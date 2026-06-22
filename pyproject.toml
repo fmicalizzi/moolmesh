@@ -3,7 +3,7 @@ name = "moolmesh"
 version = "1.4.0"
 description = "The context mesh for autonomous agents — unified observability, telemetry, and inter-agent coordination"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
 dependencies = []
 keywords = ["ai", "agents", "observability", "telemetry", "mcp", "claude", "codex", "opencode", "developer-tools"]
 classifiers = [
@@ -30,6 +30,16 @@ dev = ["pytest>=7.0"]
 
 [project.scripts]
 mool = "hub.cli:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["hub*"]
+
+[tool.setuptools.package-data]
+"hub.dashboard" = ["static/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
