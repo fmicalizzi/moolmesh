@@ -87,18 +87,45 @@ Las sesiones se auto-descubren al iniciar. Sin configuración, sin claves API, s
 Registra un repositorio git para desbloquear Project Pulse y Code Timeline:
 
 ```bash
-mool repo add /path/to/your/repo
+cd /path/to/your/repo
+mool repo add                            # Registra el directorio actual
 ```
 
 Esto ingesta el historial de commits y comienza a consultar GitHub para issues, PRs, milestones y Projects v2.
 
 ```bash
 mool repo list                           # Mostrar repos registrados
-mool repo remove /path/to/repo           # Desregistrar
-mool repo sync /path/to/repo --all       # Re-ingestar historial completo
+mool repo remove                         # Desregistrar el repo actual
+mool repo sync --all                     # Re-ingestar historial completo
 ```
 
-El token de GitHub se resuelve automáticamente: `gh auth token` → variable de entorno `GITHUB_TOKEN` → `config.toml`. Si usas GitHub CLI, no necesitas configuración extra.
+Todos los subcomandos de `repo` usan el directorio actual cuando no se especifica una ruta.
+
+### Token de GitHub
+
+El token se resuelve automáticamente en este orden:
+
+1. `gh auth token` (GitHub CLI — recomendado)
+2. Variable de entorno `GITHUB_TOKEN`
+3. `~/.moolmesh/config.toml` → `[github] token = "..."`
+
+Para **repos públicos**, no se necesita token — el historial de commits funciona sin acceso a la API de GitHub.
+
+Para **repos privados**, se requiere un token con scope `repo`. La forma más fácil:
+
+```bash
+gh auth login                            # Seguir los prompts, seleccionar scope repo
+```
+
+Si no tenés GitHub CLI, configurá la variable de entorno o agregalo al config:
+
+```toml
+# ~/.moolmesh/config.toml
+[github]
+token = "ghp_xxxxxxxxxxxxxxxxxxxx"
+```
+
+Sin un token válido, `mool repo add` funciona igual — ingesta el historial local de git, pero Project Pulse (issues, PRs, milestones) no tendrá datos de GitHub.
 
 ---
 

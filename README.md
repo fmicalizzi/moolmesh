@@ -86,18 +86,45 @@ Sessions are auto-discovered on startup. No configuration, no API keys, no cloud
 Register a git repository to unlock Project Pulse and Code Timeline:
 
 ```bash
-mool repo add /path/to/your/repo
+cd /path/to/your/repo
+mool repo add                            # Registers the current directory
 ```
 
 This ingests commit history and starts polling GitHub for issues, PRs, milestones, and Projects v2.
 
 ```bash
 mool repo list                           # Show registered repos
-mool repo remove /path/to/repo           # Unregister
-mool repo sync /path/to/repo --all       # Re-ingest full history
+mool repo remove                         # Unregister current repo
+mool repo sync --all                     # Re-ingest full history
 ```
 
-A GitHub token is resolved automatically: `gh auth token` → `GITHUB_TOKEN` env → `config.toml`. If you use the GitHub CLI, no extra setup is needed.
+All `repo` subcommands default to the current directory when no path is given.
+
+### GitHub token
+
+A token is resolved automatically in this order:
+
+1. `gh auth token` (GitHub CLI — recommended)
+2. `GITHUB_TOKEN` environment variable
+3. `~/.moolmesh/config.toml` → `[github] token = "..."`
+
+For **public repos**, no token is needed — commit history works without GitHub API access.
+
+For **private repos**, a token with `repo` scope is required. The easiest way:
+
+```bash
+gh auth login                            # Follow prompts, select repo scope
+```
+
+If you don't have the GitHub CLI, set the env var or add it to config:
+
+```toml
+# ~/.moolmesh/config.toml
+[github]
+token = "ghp_xxxxxxxxxxxxxxxxxxxx"
+```
+
+Without a valid token, `mool repo add` still works — it ingests local git history, but Project Pulse (issues, PRs, milestones) won't have GitHub data.
 
 ---
 
