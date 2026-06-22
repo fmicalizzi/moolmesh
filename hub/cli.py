@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 
+from hub.colors import green, yellow, red, dim, bold
 from hub.discovery import ProjectDiscovery
 
 
@@ -11,7 +13,6 @@ def cmd_dashboard(args: argparse.Namespace) -> None:
     from hub.dashboard.server import DashboardServer
     from hub.log import setup
 
-    # Initialize logging with specified level (default: INFO)
     setup(level=getattr(args, "log_level", "INFO"))
 
     providers = None
@@ -25,6 +26,96 @@ def cmd_dashboard(args: argparse.Namespace) -> None:
         providers=providers,
     )
     server.start()
+
+
+def cmd_daemon(args: argparse.Namespace) -> None:
+    from hub.daemon import daemonize, stop_daemon, daemon_status, read_pid, LOG_FILE
+
+    match args.daemon_command:
+        case "start":
+            existing = read_pid()
+            if existing:
+                print(yellow(f"MoolMesh daemon already running (PID {existing})"))
+                return
+
+            providers = None
+            if args.providers:
+                providers = [p.strip() for p in args.providers.split(",")]
+
+            pid = daemonize(
+                host=args.host,
+                port=args.port,
+                project_filter=getattr(args, "project", None),
+                providers=providers,
+            )
+            print(green(f"MoolMesh daemon started (PID {pid})"))
+            print(f"  Dashboard → http://{args.host}:{args.port}")
+            print(dim(f"  Logs → {LOG_FILE}"))
+
+        case "stop":
+            if stop_daemon():
+                print(green("MoolMesh daemon stopped"))
+            else:
+                print(yellow("No daemon running"))
+
+        case "restart":
+            info = daemon_status()
+            if info:
+                stop_daemon()
+                print(dim("Stopped previous daemon"))
+                import time
+                time.sleep(0.5)
+
+            providers = None
+            if args.providers:
+                providers = [p.strip() for p in args.providers.split(",")]
+
+            pid = daemonize(
+                host=args.host,
+                port=args.port,
+                project_filter=getattr(args, "project", None),
+                providers=providers,
+            )
+            print(green(f"MoolMesh daemon restarted (PID {pid})"))
+            print(f"  Dashboard → http://{args.host}:{args.port}")
+            print(dim(f"  Logs → {LOG_FILE}"))
+
+        case "status":
+            _print_daemon_status()
+
+        case _:
+            print("Uso: mool daemon {start|stop|status|restart}")
+
+
+def _print_daemon_status() -> None:
+    from hub.daemon import daemon_status
+
+    info = daemon_status()
+    if info is None:
+        print(yellow("MoolMesh daemon is not running"))
+        return
+
+    uptime = info["uptime_seconds"]
+    if uptime >= 3600:
+        uptime_str = f"{uptime // 3600}h {(uptime % 3600) // 60}m"
+    elif uptime >= 60:
+        uptime_str = f"{uptime // 60}m {uptime % 60}s"
+    else:
+        uptime_str = f"{uptime}s"
+
+    print(green("MoolMesh daemon is running"))
+    print(f"  PID:    {info['pid']}")
+    print(f"  Uptime: {uptime_str}")
+
+    log_kb = info.get("log_size", 0) / 1024
+    if log_kb > 1024:
+        print(dim(f"  Log:    {log_kb / 1024:.1f} MB"))
+    else:
+        print(dim(f"  Log:    {log_kb:.0f} KB"))
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    _print_daemon_status()
 
 
 def cmd_report(args: argparse.Namespace) -> None:
@@ -66,20 +157,19 @@ def cmd_discover(args: argparse.Namespace) -> None:
         projects = discovery.discover_all()
 
     if not projects:
-        print("No projects found.")
+        print(yellow("No projects found."))
         return
 
-    # Group by provider
     by_provider: dict[str, list] = {}
     for p in projects:
         by_provider.setdefault(p.provider.value, []).append(p)
 
     for provider, projs in sorted(by_provider.items()):
         total_files = sum(len(p.session_files) for p in projs)
-        print(f"\n  [{provider.upper()}] {len(projs)} projects, {total_files} session files")
+        print(f"\n  {bold(f'[{provider.upper()}]')} {len(projs)} projects, {total_files} session files")
         print(f"  {'─' * 50}")
         for p in projs:
-            print(f"    {p.name:<30} {len(p.session_files):>4} files  {p.path}")
+            print(f"    {p.name:<30} {len(p.session_files):>4} files  {dim(str(p.path))}")
 
     total_projects = len(projects)
     total_files = sum(len(p.session_files) for p in projects)
@@ -98,6 +188,168 @@ def cmd_backfill(args: argparse.Namespace) -> None:
     store.close()
 
 
+def cmd_doctor(args: argparse.Namespace) -> None:
+    import shutil
+    import socket
+    import sys
+    from pathlib import Path
+
+    from hub import __version__
+
+    print(f"\n  {bold('MoolMesh Doctor')} v{__version__}\n")
+
+    checks_ok = 0
+    checks_fail = 0
+
+    # Python version
+    v = sys.version_info
+    if v >= (3, 11):
+        print(green(f"  ✓ Python {v.major}.{v.minor}.{v.micro}"))
+        checks_ok += 1
+    else:
+        print(red(f"  ✗ Python {v.major}.{v.minor}.{v.micro} (requires 3.11+)"))
+        checks_fail += 1
+
+    # Events DB
+    config_dir = Path.home() / ".moolmesh"
+    events_db = config_dir / "events.db"
+    if events_db.exists():
+        size_mb = events_db.stat().st_size / (1024 * 1024)
+        try:
+            from hub.cache.event_store import EventStore
+            store = EventStore()
+            count = store.count()
+            store.close()
+            print(green(f"  ✓ events.db ({size_mb:.1f} MB, {count:,} events)"))
+        except Exception:
+            print(yellow(f"  ~ events.db ({size_mb:.1f} MB, unreadable)"))
+        checks_ok += 1
+    else:
+        print(dim("  - events.db (not created yet)"))
+
+    # GitHub DB
+    github_db = config_dir / "github.db"
+    if github_db.exists():
+        size_mb = github_db.stat().st_size / (1024 * 1024)
+        try:
+            from hub.cache.git_store import GitStore
+            store = GitStore()
+            repos = store.list_repos()
+            total_commits = sum(store.count_commits(r["id"]) for r in repos)
+            store.close()
+            print(green(f"  ✓ github.db ({size_mb:.1f} MB, {total_commits:,} commits)"))
+        except Exception:
+            print(yellow(f"  ~ github.db ({size_mb:.1f} MB, unreadable)"))
+        checks_ok += 1
+    else:
+        print(dim("  - github.db (not created yet)"))
+
+    # Repos
+    from hub.config import load_config
+    config = load_config()
+    for r in config.repos:
+        repo_path = Path(r.path)
+        if repo_path.exists() and (repo_path / ".git").exists():
+            print(green(f"  ✓ Repo: {r.owner}/{r.repo} (accessible)"))
+            checks_ok += 1
+        else:
+            print(red(f"  ✗ Repo: {r.owner}/{r.repo} (not found: {r.path})"))
+            checks_fail += 1
+
+    # GitHub token
+    from hub.config import get_github_token
+    token = get_github_token(config)
+    if token:
+        source = "config" if config.github_token else "gh auth / env"
+        print(green(f"  ✓ GitHub token: {source}"))
+        checks_ok += 1
+    else:
+        print(yellow("  ~ GitHub token: not available (optional)"))
+
+    # Port 5200
+    port = 5200
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("localhost", port))
+        sock.close()
+        print(green(f"  ✓ Port {port}: available"))
+        checks_ok += 1
+    except OSError:
+        from hub.daemon import read_pid
+        pid = read_pid()
+        if pid:
+            print(green(f"  ✓ Port {port}: in use by MoolMesh daemon (PID {pid})"))
+            checks_ok += 1
+        else:
+            print(yellow(f"  ~ Port {port}: in use by another process"))
+            checks_fail += 1
+
+    # Disk space
+    usage = shutil.disk_usage(str(config_dir) if config_dir.exists() else str(Path.home()))
+    free_gb = usage.free / (1024 ** 3)
+    if free_gb > 1:
+        print(green(f"  ✓ Disk: {free_gb:.0f} GB free"))
+        checks_ok += 1
+    else:
+        print(red(f"  ✗ Disk: {free_gb:.1f} GB free (low)"))
+        checks_fail += 1
+
+    # Daemon status
+    from hub.daemon import read_pid as _read_pid
+    daemon_pid = _read_pid()
+    if daemon_pid:
+        print(green(f"  ✓ Daemon: running (PID {daemon_pid})"))
+    else:
+        print(dim("  - Daemon: not running"))
+
+    print()
+    if checks_fail == 0:
+        print(green("  All checks passed.\n"))
+    else:
+        print(yellow(f"  {checks_ok} passed, {checks_fail} failed\n"))
+
+
+def cmd_install(args: argparse.Namespace) -> None:
+    import sys
+    from pathlib import Path
+
+    # Use the venv's Python, not the resolved base interpreter
+    venv_python = Path(sys.prefix) / "bin" / "python"
+    if not venv_python.exists():
+        venv_python = Path(sys.executable).resolve()
+
+    local_bin = Path.home() / ".local" / "bin"
+    target = local_bin / "mool"
+
+    local_bin.mkdir(parents=True, exist_ok=True)
+
+    wrapper = f"""#!/bin/sh
+exec "{venv_python}" -m hub.cli "$@"
+"""
+    target.write_text(wrapper)
+    target.chmod(0o755)
+
+    print(green(f"Installed: {target}"))
+
+    # Check if ~/.local/bin is in PATH
+    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    if str(local_bin) not in path_dirs and str(local_bin.resolve()) not in path_dirs:
+        shell = os.environ.get("SHELL", "")
+        if "zsh" in shell:
+            rc = "~/.zshrc"
+        elif "bash" in shell:
+            rc = "~/.bashrc"
+        else:
+            rc = "your shell rc file"
+        print()
+        print(yellow(f"  ~/.local/bin is not in your PATH."))
+        print(f"  Add this line to {rc}:")
+        print(f'    export PATH="$HOME/.local/bin:$PATH"')
+        print(f"  Then restart your terminal.")
+    else:
+        print(dim("  ~/.local/bin is already in PATH — ready to use."))
+
+
 def main() -> None:
     # Raise fd limit — macOS defaults to 256 which is too low for kqueue + SQLite
     try:
@@ -106,12 +358,13 @@ def main() -> None:
         if soft < 4096:
             resource.setrlimit(resource.RLIMIT_NOFILE, (4096, hard))
     except (ImportError, ValueError, OSError):
-        pass  # Not critical — the active-only filtering is the real fix
+        pass
 
     parser = argparse.ArgumentParser(
         prog="mool",
         description="MoolMesh — the context mesh for autonomous agents",
     )
+    parser.add_argument("--version", action="store_true", help="Show version and exit")
     subparsers = parser.add_subparsers(dest="command")
 
     # dashboard
@@ -123,6 +376,28 @@ def main() -> None:
     dash.add_argument("--log-level", default="INFO",
                       choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                       help="Logging level (default: INFO)")
+
+    # daemon
+    daemon = subparsers.add_parser("daemon", help="Run dashboard as background service")
+    daemon_sub = daemon.add_subparsers(dest="daemon_command")
+
+    d_start = daemon_sub.add_parser("start", help="Start daemon")
+    d_start.add_argument("--port", type=int, default=5200, help="Server port (default: 5200)")
+    d_start.add_argument("--host", default="localhost", help="Server host (default: localhost)")
+    d_start.add_argument("--project", help="Filter to project name")
+    d_start.add_argument("--providers", help="Comma-separated providers")
+
+    daemon_sub.add_parser("stop", help="Stop daemon")
+    daemon_sub.add_parser("status", help="Show daemon status")
+
+    d_restart = daemon_sub.add_parser("restart", help="Restart daemon")
+    d_restart.add_argument("--port", type=int, default=5200, help="Server port (default: 5200)")
+    d_restart.add_argument("--host", default="localhost", help="Server host (default: localhost)")
+    d_restart.add_argument("--project", help="Filter to project name")
+    d_restart.add_argument("--providers", help="Comma-separated providers")
+
+    # status (shortcut for daemon status)
+    subparsers.add_parser("status", help="Show daemon status")
 
     # report
     rep = subparsers.add_parser("report", help="Generate batch analysis report")
@@ -145,35 +420,50 @@ def main() -> None:
                     help="Full import (all data). Default: only import new events since last run.")
 
     # repo (con sub-subcommands)
-    repo_parser = subparsers.add_parser("repo", help="Gestionar repositorios git monitoreados")
+    repo_parser = subparsers.add_parser("repo", help="Manage monitored git repositories")
     repo_sub = repo_parser.add_subparsers(dest="repo_command")
 
-    repo_add = repo_sub.add_parser("add", help="Registrar un repositorio")
-    repo_add.add_argument("path", help="Ruta al repositorio git")
+    repo_add = repo_sub.add_parser("add", help="Register a repository")
+    repo_add.add_argument("path", nargs="?", default=".", help="Path to git repo (default: current directory)")
     repo_add.add_argument("--days", type=int, default=14, metavar="N",
-                          help="Días de historial a ingestar (default: 14)")
+                          help="Days of history to ingest (default: 14)")
     repo_add.add_argument("--all", dest="all_history", action="store_true",
-                          help="Ingestar historial completo (ignora --days, puede tardar)")
+                          help="Ingest full history (ignores --days)")
     repo_add.add_argument("--no-github", action="store_true",
-                           help="No consultar API de GitHub para este repo")
+                           help="Don't poll GitHub API for this repo")
 
-    repo_sub.add_parser("list", help="Listar repositorios registrados")
+    repo_sub.add_parser("list", help="List registered repositories")
 
-    repo_rm = repo_sub.add_parser("remove", help="Eliminar un repositorio")
-    repo_rm.add_argument("path", help="Ruta del repositorio a eliminar")
+    repo_rm = repo_sub.add_parser("remove", help="Unregister a repository")
+    repo_rm.add_argument("path", nargs="?", default=".", help="Path to repo (default: current directory)")
 
-    repo_sync = repo_sub.add_parser("sync", help="Re-ingestar historial de un repo ya registrado")
-    repo_sync.add_argument("path", help="Ruta al repositorio git")
+    repo_sync = repo_sub.add_parser("sync", help="Re-ingest commit history")
+    repo_sync.add_argument("path", nargs="?", default=".", help="Path to git repo (default: current directory)")
     repo_sync.add_argument("--days", type=int, default=14, metavar="N",
-                           help="Días de historial a ingestar (default: 14)")
+                           help="Days of history to ingest (default: 14)")
     repo_sync.add_argument("--all", dest="all_history", action="store_true",
-                           help="Ingestar historial completo")
+                           help="Ingest full history")
+
+    # doctor
+    subparsers.add_parser("doctor", help="Run system diagnostics")
+
+    # install
+    subparsers.add_parser("install", help="Install mool command globally")
 
     args = parser.parse_args()
+
+    if args.version:
+        from hub import __version__
+        print(f"moolmesh {__version__}")
+        return
 
     match args.command:
         case "dashboard":
             cmd_dashboard(args)
+        case "daemon":
+            cmd_daemon(args)
+        case "status":
+            cmd_status(args)
         case "report":
             cmd_report(args)
         case "discover":
@@ -182,6 +472,10 @@ def main() -> None:
             cmd_backfill(args)
         case "repo":
             cmd_repo(args)
+        case "doctor":
+            cmd_doctor(args)
+        case "install":
+            cmd_install(args)
         case _:
             parser.print_help()
 
@@ -197,7 +491,7 @@ def cmd_repo(args: argparse.Namespace) -> None:
         case "sync":
             cmd_repo_sync(args)
         case _:
-            print("Uso: mool repo {add|list|remove|sync}")
+            print("Usage: mool repo {add|list|remove|sync}")
 
 
 def cmd_repo_add(args: argparse.Namespace) -> None:
@@ -211,19 +505,17 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
     try:
         repo_config = add_repo(path, no_github=args.no_github)
     except ValueError as e:
-        print(f"Error: {e}")
+        print(red(f"Error: {e}"))
         return
 
     config = load_config()
-    # Verificar que no esté ya registrado
     if any(r.path == path for r in config.repos):
-        print(f"Ya registrado: {repo_config.owner}/{repo_config.repo}")
+        print(yellow(f"Already registered: {repo_config.owner}/{repo_config.repo}"))
         return
 
     config.repos.append(repo_config)
     save_config(config)
 
-    # Registrar en GitStore e ingestar historial
     store = GitStore()
     store.register_repo(repo_config)
 
@@ -231,14 +523,14 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
     days = None if args.all_history else args.days
 
     if args.all_history:
-        print("Ingestando historial completo — puede tardar varios minutos...")
+        print(dim("Ingesting full history — this may take several minutes..."))
 
     count = harvester.ingest_history(path, days=days)
 
     store.close()
-    print(f"Registrado {repo_config.owner}/{repo_config.repo}")
-    days_desc = "historial completo" if days is None else f"últimos {days} días"
-    print(f"Ingestados {count} commits ({days_desc})")
+    print(green(f"Registered {repo_config.owner}/{repo_config.repo}"))
+    days_desc = "full history" if days is None else f"last {days} days"
+    print(f"  Ingested {count} commits ({days_desc})")
 
 
 def cmd_repo_list(args: argparse.Namespace) -> None:
@@ -247,19 +539,19 @@ def cmd_repo_list(args: argparse.Namespace) -> None:
 
     config = load_config()
     if not config.repos:
-        print("No hay repositorios registrados.")
-        print("Usa: mool repo add /path/to/repo")
+        print(yellow("No repositories registered."))
+        print(dim("  Use: mool repo add /path/to/repo"))
         return
 
     store = GitStore()
-    print(f"\n  Repositorios registrados ({len(config.repos)}):")
+    print(f"\n  {bold('Registered repositories')} ({len(config.repos)}):")
     print(f"  {'─' * 60}")
     for r in config.repos:
         repo_id = store.get_repo_id(r.path)
         commits = store.count_commits(repo_id) if repo_id else 0
-        github = "✓ GitHub" if r.github_enabled else "  local"
+        github = green("✓ GitHub") if r.github_enabled else dim("  local")
         print(f"    {r.owner}/{r.repo:<25} {commits:>5} commits  {github}")
-        print(f"      {r.path}")
+        print(f"      {dim(r.path)}")
     store.close()
     print()
 
@@ -274,15 +566,14 @@ def cmd_repo_remove(args: argparse.Namespace) -> None:
     found = remove_repo(path)
 
     if not found:
-        print(f"No encontrado: {path}")
+        print(red(f"Not found: {path}"))
         return
 
-    # También limpiar de GitStore
     store = GitStore()
     store.remove_repo(path)
     store.close()
 
-    print(f"Eliminado: {path}")
+    print(green(f"Removed: {path}"))
 
 
 def cmd_repo_sync(args: argparse.Namespace) -> None:
@@ -295,14 +586,14 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
     config = load_config()
 
     if not any(r.path == path for r in config.repos):
-        print(f"No registrado: {path}")
-        print("Usa: mool repo add /path/to/repo")
+        print(red(f"Not registered: {path}"))
+        print(dim("  Use: mool repo add /path/to/repo"))
         return
 
     store = GitStore()
     repo_id = store.get_repo_id(path)
     if repo_id is None:
-        print(f"No encontrado en GitStore: {path}")
+        print(red(f"Not found in GitStore: {path}"))
         store.close()
         return
 
@@ -310,13 +601,13 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
     days = None if args.all_history else args.days
 
     if args.all_history:
-        print("Ingestando historial completo — puede tardar varios minutos...")
+        print(dim("Ingesting full history — this may take several minutes..."))
 
     count = harvester.ingest_history(path, days=days)
     store.close()
 
-    days_desc = "historial completo" if days is None else f"últimos {days} días"
-    print(f"Sincronizado: {count} commits nuevos ingestados ({days_desc})")
+    days_desc = "full history" if days is None else f"last {days} days"
+    print(green(f"Synced: {count} new commits ingested ({days_desc})"))
 
 
 if __name__ == "__main__":

@@ -145,6 +145,7 @@ class DashboardServer:
     ):
         self.host = host
         self.port = port
+        self._start_time = time.monotonic()
 
         # Shared SSE buffer — harvesters push here, SSE handler reads
         # deque is thread-safe in CPython (GIL), O(1) append, auto-discards oldest
@@ -467,6 +468,15 @@ class DashboardServer:
                         self._serve_timeline_pending()
                     case _ if self.path.startswith("/api/timeline/commit-days"):
                         self._serve_timeline_commit_days()
+                    case "/health":
+                        from hub import __version__
+                        uptime = int(time.monotonic() - server_ref._start_time)
+                        self._serve_json({
+                            "status": "healthy",
+                            "version": __version__,
+                            "uptime_seconds": uptime,
+                            "events_count": server_ref.stats["total_events"],
+                        })
                     case _:
                         self.send_error(404)
 

@@ -34,7 +34,7 @@ class TestRepoSync:
             cmd_repo_sync(args)
 
         captured = capsys.readouterr()
-        assert "No registrado" in captured.out
+        assert "Not registered" in captured.out
         assert "mool repo add" in captured.out
 
     def test_sync_already_registered_ingests(self, tmp_path, capsys):
@@ -71,7 +71,7 @@ class TestRepoSync:
             cmd_repo_sync(args)
 
         captured = capsys.readouterr()
-        assert "Sincronizado: 5 commits nuevos ingestados" in captured.out
+        assert "Synced: 5 new commits ingested" in captured.out
         mock_harvester.ingest_history.assert_called_once_with(str(repo_path.resolve()), days=30)
 
     def test_sync_all_flag(self, tmp_path, capsys):
@@ -104,7 +104,7 @@ class TestRepoSync:
             cmd_repo_sync(args)
 
         captured = capsys.readouterr()
-        assert "historial completo" in captured.out
+        assert "full history" in captured.out
         # days debe ser None cuando all_history=True
         mock_harvester.ingest_history.assert_called_once()
         call_args = mock_harvester.ingest_history.call_args
@@ -140,7 +140,7 @@ class TestRepoSync:
             cmd_repo_sync(args)
 
         captured = capsys.readouterr()
-        assert "últimos 30 días" in captured.out
+        assert "last 30 days" in captured.out
         mock_harvester.ingest_history.assert_called_once_with(str(repo_path.resolve()), days=30)
 
     def test_sync_repo_not_in_gitstore(self, tmp_path, capsys):
@@ -168,4 +168,4 @@ class TestRepoSync:
             cmd_repo_sync(args)
 
         captured = capsys.readouterr()
-        assert "No encontrado en GitStore" in captured.out
+        assert "Not found in GitStore" in captured.out
