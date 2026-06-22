@@ -8,6 +8,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ## [1.4.0] — 2026-06-22
 
+### Added (DX & Operations)
+- **Daemon mode** (`mool daemon start|stop|status|restart`) — run the dashboard as a background service. Double-fork Unix daemon with PID file (`~/.moolmesh/moolmesh.pid`), log redirection (`~/.moolmesh/daemon.log`), and SIGTERM graceful shutdown.
+- **Global CLI install** (`mool install`) — places a shell wrapper in `~/.local/bin/mool` pointing to the venv Python. Works without activating the virtualenv.
+- **System diagnostics** (`mool doctor`) — checks Python version, database health, registered repos, GitHub token, port availability, disk space, and daemon status.
+- **`mool status`** — quick alias for `mool daemon status` showing PID, uptime, and log size.
+- **`mool --version`** — prints `moolmesh X.Y.Z`.
+- **`mool repo add` defaults to current directory** — `path` argument is now optional across `add`, `remove`, and `sync`.
+- **`GET /health` endpoint** — returns JSON with status, version, uptime, and event count.
+- **ANSI colors in CLI** (`hub/colors.py`) — TTY-aware colored output with `NO_COLOR` support.
+- **PyPI publishing** — trusted publisher via GitHub Actions OIDC. `pip install moolmesh` works.
+
 ### Added
 - **MCP stdio server** (`hub/mcp_server.py`) — read-only FastMCP server exposing AI session data via stdio transport. 2 resources (`hub://schema`, `hub://projects`) + 6 tools (`get_recent_events`, `get_active_sessions`, `get_token_usage`, `get_tool_stats`, `search_events`, `get_project_activity`). PEP 723 inline deps — runs with `uv run`, no project dependency on `mcp`.
 - **Pure function architecture** — all query logic in testable `_get_xxx(db_path, ...)` functions, MCP decorators are thin delegators. Import guard allows pytest to test without mcp SDK installed.

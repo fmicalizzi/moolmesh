@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/cli-banner.png" alt="MoolMesh CLI" width="560">
+</p>
+
 # MoolMesh
 
 **The context mesh for autonomous agents.**
@@ -8,6 +12,7 @@ Unified observability, telemetry, and inter-agent coordination — running entir
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
 [![Tests: 509 passing](https://img.shields.io/badge/Tests-509%20passing-green.svg)](#development)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#)
+[![PyPI](https://img.shields.io/pypi/v/moolmesh.svg)](https://pypi.org/project/moolmesh/)
 [![Español](https://img.shields.io/badge/Docs-Espa%C3%B1ol-orange.svg)](README.es.md)
 
 ---
@@ -176,14 +181,24 @@ mool <command> [options]
 
 Commands:
   dashboard              Start the live monitoring dashboard
+  daemon start           Run dashboard as a background service
+  daemon stop            Stop the background service
+  daemon status          Show daemon PID, uptime, log size
+  daemon restart         Restart the background service
+  status                 Quick alias for daemon status
+  doctor                 Run system diagnostics
+  install                Install mool command globally (~/.local/bin)
   report                 Generate batch Markdown analysis reports
   discover               List all discovered AI agent projects
-  repo add PATH          Register a git repo for monitoring
+  repo add [PATH]        Register a git repo (default: current directory)
   repo list              List registered repos with commit counts
-  repo remove PATH       Unregister a repo
-  repo sync PATH         Re-ingest commit history
+  repo remove [PATH]     Unregister a repo (default: current directory)
+  repo sync [PATH]       Re-ingest commit history
 
-Dashboard options:
+Global options:
+  --version              Show version and exit
+
+Dashboard / daemon options:
   --port PORT            Server port (default: 5200)
   --host HOST            Server host (default: localhost)
   --project NAME         Filter to project name
@@ -193,6 +208,14 @@ Report options:
   --complete             Full-content mode: no truncation
   --output DIR           Output directory
   --provider PROVIDER    Filter by provider
+```
+
+### Health endpoint
+
+When the dashboard is running, `GET /health` returns:
+
+```json
+{"status": "healthy", "version": "1.4.0", "uptime_seconds": 3600, "events_count": 45231}
 ```
 
 ---

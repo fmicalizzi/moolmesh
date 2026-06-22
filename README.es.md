@@ -1,5 +1,9 @@
 > [English version](README.md)
 
+<p align="center">
+  <img src="docs/cli-banner.png" alt="MoolMesh CLI" width="560">
+</p>
+
 # MoolMesh
 
 **La malla de contexto para agentes autónomos.**
@@ -10,6 +14,7 @@ Observabilidad unificada, telemetría y coordinación entre agentes — ejecutá
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
 [![Tests: 509 passing](https://img.shields.io/badge/Tests-509%20passing-green.svg)](#desarrollo)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#)
+[![PyPI](https://img.shields.io/pypi/v/moolmesh.svg)](https://pypi.org/project/moolmesh/)
 
 ---
 
@@ -177,14 +182,24 @@ mool <comando> [opciones]
 
 Comandos:
   dashboard              Iniciar el dashboard de monitoreo en vivo
-  report                 Generar reportes de analisis en Markdown por lotes
+  daemon start           Ejecutar el dashboard como servicio en background
+  daemon stop            Detener el servicio en background
+  daemon status          Mostrar PID, uptime, tamaño de log
+  daemon restart         Reiniciar el servicio en background
+  status                 Atajo rápido para daemon status
+  doctor                 Ejecutar diagnóstico del sistema
+  install                Instalar comando mool globalmente (~/.local/bin)
+  report                 Generar reportes de análisis en Markdown por lotes
   discover               Listar todos los proyectos de agentes de IA descubiertos
-  repo add PATH          Registrar un repositorio git para monitoreo
+  repo add [PATH]        Registrar un repositorio git (por defecto: directorio actual)
   repo list              Listar repos registrados con conteo de commits
-  repo remove PATH       Desregistrar un repositorio
-  repo sync PATH         Re-ingestar historial de commits
+  repo remove [PATH]     Desregistrar un repositorio (por defecto: directorio actual)
+  repo sync [PATH]       Re-ingestar historial de commits
 
-Opciones del dashboard:
+Opciones globales:
+  --version              Mostrar versión y salir
+
+Opciones del dashboard / daemon:
   --port PORT            Puerto del servidor (por defecto: 5200)
   --host HOST            Host del servidor (por defecto: localhost)
   --project NAME         Filtrar por nombre de proyecto
@@ -194,6 +209,14 @@ Opciones de reportes:
   --complete             Modo contenido completo: sin truncar
   --output DIR           Directorio de salida
   --provider PROVIDER    Filtrar por proveedor
+```
+
+### Endpoint de salud
+
+Cuando el dashboard está corriendo, `GET /health` retorna:
+
+```json
+{"status": "healthy", "version": "1.4.0", "uptime_seconds": 3600, "events_count": 45231}
 ```
 
 ---
