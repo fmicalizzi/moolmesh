@@ -1,0 +1,1033 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Code Timeline — MoolMesh</title>
+
+<style>
+  :root {
+    --bg: #0C0C0E; --bg2: #14141A; --bg3: #1E1E24; --border: #2A2A30;
+    --text: #D4D4D8; --muted: #8B8B94; --accent: #C8B88A;
+    --green: #7A9E7E; --orange: #D4A054; --red: #D4645C;
+    --purple: #A88EC8; --yellow: #D4B85C; --cyan: #5CA8A0;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:'SF Mono','Cascadia Code','Fira Code',monospace; font-size:13px; line-height:1.5; overflow-x:hidden; }
+
+  /* ── Nav ── */
+  nav { background:var(--bg2); border-bottom:1px solid var(--border); padding:8px 20px; display:flex; gap:16px; font-size:13px; }
+  nav a { color:var(--muted); text-decoration:none; }
+  nav a.active { color:var(--accent); font-weight:600; }
+  nav a:hover { color:var(--text); }
+
+  /* ── Header ── */
+  header { background:var(--bg2); border-bottom:1px solid var(--border); padding:16px 24px; display:flex; align-items:center; justify-content:space-between; }
+  .logo { font-size:15px; font-weight:600; color:var(--accent); }
+  .repo-select { background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:6px; font-family:inherit; font-size:12px; }
+
+  /* ── Section Titles ── */
+  .section { padding:0 24px 16px; }
+  .section-title { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; margin-bottom:12px; }
+
+  /* ── Digest Cards ── */
+  .digest-card { background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:16px; }
+
+  /* Contenedor del digest - centrado con ancho máximo */
+  .digest-content { max-width:720px; margin:0 auto; padding:20px 32px; line-height:1.7; font-size:13px; }
+
+  /* Narrativa L3 — prosa legible */
+  .digest-text {
+    max-width:680px; margin:0 auto;
+    line-height:1.8; font-size:13.5px; color:var(--text); letter-spacing:0.01em;
+  }
+  .digest-text p { margin-bottom:12px; }
+
+  /* Resumen técnico — más ancho porque es monoespaciado */
+    .technical-summary { max-width:780px; margin:16px auto 0; }
+
+  /* Stats cards — centrados con el digest */
+  .digest-stats { max-width:720px; margin:0 auto; }
+
+  /* Navegación de fechas */
+  .digest-nav { display:flex; align-items:center; gap:8px; max-width:720px; margin:0 auto 16px; }
+  .digest-nav button { background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:6px; cursor:pointer; font-family:inherit; font-size:12px; }
+  .digest-nav button:hover { border-color:var(--accent); }
+  .digest-nav input[type="date"] { background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:6px; font-family:inherit; font-size:12px; }
+
+  /* Historial de digests */
+  .digest-history { display:flex; gap:4px; max-width:720px; margin:0 auto 12px; overflow-x:auto; padding:4px 0; }
+  .digest-day { background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:6px 10px; cursor:pointer; text-align:center; min-width:44px; font-family:inherit; color:var(--text); }
+  .digest-day.active { border-color:var(--accent); background:var(--bg2); }
+  .digest-day:hover { border-color:var(--muted); }
+  .digest-day-num { font-size:13px; font-weight:600; display:block; }
+  .digest-day-level { font-size:9px; color:var(--muted); }
+  .digest-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; flex-wrap:wrap; gap:8px; }
+  .digest-title { font-size:16px; font-weight:600; }
+  .digest-date { color:var(--muted); font-size:12px; }
+  .digest-level { display:flex; align-items:center; gap:8px; margin-bottom:12px; }
+  .level-badge { font-size:11px; font-weight:600; padding:2px 8px; border-radius:4px; background:var(--bg3); }
+  .digest-stats { display:grid; grid-template-columns:repeat(5,1fr); gap:16px; margin-bottom:20px; padding:16px; background:var(--bg3); border-radius:8px; }
+  .digest-stat { text-align:center; }
+  .digest-stat-val { font-size:24px; font-weight:700; color:var(--accent); }
+  .digest-stat-val.add { color:var(--green); }
+  .digest-stat-val.del { color:var(--red); }
+  .digest-stat-label { font-size:9px; color:var(--muted); text-transform:uppercase; margin-top:4px; }
+  .digest-text { line-height:1.7; color:var(--text); font-size:13px; white-space:pre-wrap; }
+  .digest-text h2 {
+    font-size:16px; font-weight:700; color:var(--accent);
+    margin-top:16px; margin-bottom:6px; white-space:normal;
+    letter-spacing:0.02em;
+  }
+  .digest-text h2:first-child { margin-top:0; }
+  .digest-text h3 {
+    font-size:13.5px; font-weight:600; color:var(--accent);
+    margin-top:12px; margin-bottom:4px; white-space:normal;
+  }
+  .digest-text strong { color:var(--accent); }
+  .digest-text code { background:var(--bg3); padding:2px 6px; border-radius:4px; font-size:11px; }
+  .digest-text.collapsed { max-height:320px; overflow:hidden; position:relative; }
+  .digest-text.collapsed::after { content:''; position:absolute; bottom:0; left:0; right:0; height:40px; background:linear-gradient(transparent, var(--bg2)); }
+  .digest-expand { text-align:center; margin-top:8px; }
+  .digest-expand .btn { font-size:11px; padding:4px 12px; }
+
+  /* ── Digest Level ── */
+  .digest-level { display:flex; align-items:center; gap:8px; margin-bottom:12px; font-size:11px; color:var(--muted); }
+  .level-badge { padding:2px 8px; border:1px solid var(--accent); border-radius:10px; font-weight:600; font-size:10px; }
+    .digest-narrative { background:var(--bg3); padding:16px; border-radius:8px; border-left:3px solid var(--purple); margin-top:16px; font-style:italic; color:var(--muted); white-space:pre-wrap; }
+    .technical-summary { background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:16px 20px; font-size:11px; line-height:1.6; color:var(--muted); white-space:pre-wrap; margin-top:12px; overflow-x:auto; display:none; }
+  .digest-actions { margin-top:16px; display:flex; gap:8px; }
+  .btn { background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:6px 14px; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; }
+  .btn:hover { border-color:var(--muted); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-primary { background:var(--accent); border-color:var(--accent); color:var(--bg); }
+
+  /* ── Pending Items ── */
+  .pending-section { background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:16px; }
+  .pending-list { display:flex; flex-direction:column; gap:8px; }
+  .pending-item { display:flex; align-items:center; gap:10px; padding:8px 12px; background:var(--bg3); border-radius:6px; font-size:12px; }
+  .pending-type { padding:2px 8px; border-radius:10px; font-size:10px; font-weight:600; }
+  .pending-type.pr { background:rgba(163,113,247,0.15); color:var(--purple); }
+  .pending-type.issue { background:rgba(63,185,80,0.15); color:var(--green); }
+
+  /* ── Commits Feed ── */
+  .commits-list { background:var(--bg2); border:1px solid var(--border); border-radius:8px; max-height:500px; overflow-y:auto; }
+  .commit-row { display:flex; align-items:flex-start; gap:12px; padding:12px 16px; border-bottom:1px solid var(--border); }
+  .commit-row:last-child { border-bottom:none; }
+  .commit-row:hover { background:rgba(88,166,255,0.05); }
+  .commit-avatar { width:32px; height:32px; border-radius:50%; background:var(--accent); display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; flex-shrink:0; }
+  .commit-main { flex:1; min-width:0; }
+  .commit-header { display:flex; align-items:center; gap:8px; margin-bottom:4px; flex-wrap:wrap; }
+  .commit-author { font-weight:500; }
+  .commit-branch { background:var(--bg3); padding:2px 8px; border-radius:10px; font-size:10px; color:var(--accent); }
+  .commit-time { color:var(--muted); font-size:11px; margin-left:auto; }
+  .commit-msg { color:var(--text); font-size:12px; line-height:1.5; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .commit-stats { display:flex; gap:12px; font-size:11px; margin-top:4px; }
+  .commit-add { color:var(--green); }
+  .commit-del { color:var(--red); }
+  .commit-badge { display:inline-flex; align-items:center; gap:4px; background:var(--bg3); padding:2px 8px; border-radius:10px; font-size:10px; margin-left:8px; }
+  .commit-badge.ai { color:var(--yellow); }
+  .commit-badge.merge { color:var(--purple); }
+
+  /* ── Author Stats ── */
+  .author-stats { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:16px; }
+  .author-row { display:flex; align-items:center; gap:12px; padding:8px 0; }
+  .author-name { width:120px; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .author-bar-bg { flex:1; height:20px; background:var(--bg3); border-radius:4px; overflow:hidden; position:relative; }
+  .author-bar { height:100%; background:var(--accent); border-radius:4px; transition:width .3s; }
+  .author-bar.additions { background:var(--green); }
+  .author-bar.deletions { background:var(--red); }
+  .author-count { width:50px; text-align:right; font-size:11px; color:var(--muted); }
+
+  /* ── Hot Files ── */
+  .hot-files { background:var(--bg2); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .hot-files-header { display:grid; grid-template-columns:1fr 80px 60px 60px; gap:8px; padding:10px 16px; background:var(--bg3); border-bottom:1px solid var(--border); font-size:10px; color:var(--muted); text-transform:uppercase; }
+  .hot-file-row { display:grid; grid-template-columns:1fr 80px 60px 60px; gap:8px; padding:10px 16px; border-bottom:1px solid var(--border); font-size:12px; }
+  .hot-file-row:last-child { border-bottom:none; }
+  .hot-file-path { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hot-file-count { color:var(--muted); }
+  .hot-file-add { color:var(--green); }
+  .hot-file-del { color:var(--red); }
+
+  /* ── Grid Layout ── */
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:0 24px 24px; }
+  .grid-wide { grid-column:1/-1; }
+
+  /* ── Loading ── */
+  .loading { text-align:center; padding:40px; color:var(--muted); }
+  .spinner { display:inline-block; width:20px; height:20px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 1s linear infinite; margin-right:8px; vertical-align:middle; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  /* ── Empty State ── */
+  .empty { text-align:center; padding:40px; color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<nav>
+  <a href="/">Sesiones AI</a>
+  <a href="/analytics">Analytics</a>
+  <a href="/projects">Project Pulse</a>
+  <a href="/timeline" class="active">Code Timeline</a>
+</nav>
+
+<header>
+  <div class="logo">Code Timeline <span style="color:var(--muted);font-weight:400;font-size:12px;">Commits, Autores & Archivos Calientes</span></div>
+  <div style="display:flex;gap:12px;align-items:center;">
+    <input type="date" id="dateSelect" class="repo-select" value="" style="padding:5px 10px;">
+    <select class="repo-select" id="repoSelect">
+      <option value="">Cargando repos...</option>
+    </select>
+  </div>
+</header>
+
+<!-- Navegación de fechas -->
+<div class="section grid-wide">
+  <div class="digest-nav">
+    <button id="prevDay" onclick="navigateDay(-1)" title="Día anterior">← Ayer</button>
+    <input type="date" id="digestDateNav" onchange="onDateNavChange()">
+    <button id="nextDay" onclick="navigateDay(1)" title="Día siguiente">Mañana →</button>
+    <button id="todayBtn" onclick="navigateToday()" title="Ver el día en progreso">Hoy ↻</button>
+  </div>
+</div>
+
+<!-- Historial de digests -->
+<div class="section grid-wide">
+  <div class="digest-history" id="digestHistory">
+    <!-- Populated by JS -->
+  </div>
+</div>
+
+<div class="section grid-wide">
+  <div class="digest-card">
+    <div class="digest-header">
+      <div class="digest-title" id="dailyTitle">Digest del Día</div>
+      <div class="digest-date" id="dailyDate">-</div>
+    </div>
+    <div class="digest-content">
+    <div class="digest-level" id="digestLevel" style="display:none">
+      <span class="level-badge" id="levelBadge">L2</span>
+      <span id="levelText">Template</span>
+    </div>
+    <div class="digest-stats">
+      <div class="digest-stat">
+        <div class="digest-stat-val" id="dailyCommits">-</div>
+        <div class="digest-stat-label">Commits</div>
+      </div>
+      <div class="digest-stat">
+        <div class="digest-stat-val" id="dailyPRs">-</div>
+        <div class="digest-stat-label">PRs</div>
+      </div>
+      <div class="digest-stat">
+        <div class="digest-stat-val" id="dailyIssues">-</div>
+        <div class="digest-stat-label">Issues</div>
+      </div>
+      <div class="digest-stat">
+        <div class="digest-stat-val add" id="dailyAdded">-</div>
+        <div class="digest-stat-label">LOC +</div>
+      </div>
+      <div class="digest-stat">
+        <div class="digest-stat-val del" id="dailyRemoved">-</div>
+        <div class="digest-stat-label">LOC -</div>
+      </div>
+    </div>
+    <div class="digest-text collapsed" id="dailyText">
+      Cargando digest...
+    </div>
+    <div class="digest-expand" id="dailyExpand">
+      <button class="btn" onclick="toggleDigest('daily')">Expandir</button>
+    </div>
+    <div class="digest-narrative" id="digestNarrative" style="display:none">
+    </div>
+    <pre class="technical-summary" id="dailyTechnical"></pre>
+    <div class="digest-actions">
+      <button class="btn" id="regenDaily" disabled>Regenerar</button>
+    </div>
+    </div>
+  </div>
+</div>
+
+<div class="section grid-wide" id="pendingSection" style="display:none;">
+  <div class="pending-section">
+    <div class="digest-header">
+      <div class="digest-title">Tus Pendientes <span style="color:var(--muted);font-weight:400;" id="pendingHandle"></span></div>
+    </div>
+    <div class="pending-list" id="pendingList"></div>
+  </div>
+</div>
+
+<div class="section grid-wide" id="weeklySection" style="display:none;">
+  <div class="digest-card">
+    <div class="digest-header">
+      <div class="digest-title" id="weeklyTitle">Digest Semanal</div>
+      <div class="digest-date" id="weeklyDate">-</div>
+    </div>
+    <div class="digest-content">
+    <div class="digest-level" id="weeklyDigestLevel" style="display:none">
+      <span class="level-badge" id="weeklyLevelBadge">L2</span>
+      <span id="weeklyLevelText">Template</span>
+    </div>
+    <div class="digest-stats">
+      <div class="digest-stat">
+        <div class="digest-stat-val" id="weeklyCommits">-</div>
+        <div class="digest-stat-label">Commits</div>
+      </div>
+      <div class="digest-stat">
+        <div class="digest-stat-val" id="weeklyPRs">-</div>
+        <div class="digest-stat-label">PRs</div>
+      </div>
+      <div class="digest-stat">
+        <div class="digest-stat-val" id="weeklyIssues">-</div>
+        <div class="digest-stat-label">Issues</div>
+      </div>
+      <div class="digest-stat">
+        <div class="digest-stat-val add" id="weeklyAdded">-</div>
+        <div class="digest-stat-label">LOC +</div>
+      </div>
+      <div class="digest-stat">
+        <div class="digest-stat-val del" id="weeklyRemoved">-</div>
+        <div class="digest-stat-label">LOC -</div>
+      </div>
+    </div>
+    <div class="digest-text collapsed" id="weeklyText">
+      Cargando digest semanal...
+    </div>
+    <div class="digest-expand" id="weeklyExpand">
+      <button class="btn" id="weeklyToggle" onclick="toggleDigest('weekly')">Expandir</button>
+    </div>
+    <pre class="technical-summary collapsed" id="weeklyTechnical"></pre>
+    <div class="digest-actions">
+      <button class="btn" id="regenWeekly">Regenerar Semanal</button>
+    </div>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="grid-wide">
+    <div class="section-title">Feed de Commits</div>
+    <div class="commits-list" id="commitsList">
+      <div class="loading"><span class="spinner"></span>Cargando commits...</div>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <div>
+    <div class="section-title">Estadísticas por Autor (últimos 7 días)</div>
+    <div class="author-stats" id="authorStats">
+      <div class="loading"><span class="spinner"></span>Cargando...</div>
+    </div>
+  </div>
+  <div>
+    <div class="section-title">Archivos Calientes (últimos 7 días)</div>
+    <div class="hot-files" id="hotFiles">
+      <div class="hot-files-header">
+        <div>Archivo</div>
+        <div>Cambios</div>
+        <div>+</div>
+        <div>-</div>
+      </div>
+      <div class="loading" style="padding:40px;"><span class="spinner"></span>Cargando...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentRepoId = null;
+let repos = [];
+let pollInterval = null;
+let selectedDate = null;  // null = hoy, formato "YYYY-MM-DD"
+
+function getToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function getYesterday() {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function toLocalDateStr(date) {
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+}
+
+function getCurrentDate() {
+  return selectedDate || getYesterday();
+}
+
+function getWeekRange(date) {
+  const parts = date.split('-');
+  const d = new Date(+parts[0], +parts[1]-1, +parts[2]);
+  const monday = new Date(d);
+  monday.setDate(d.getDate() - d.getDay() + (d.getDay() === 0 ? -6 : 1));
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  return {
+    since: toLocalDateStr(monday) + 'T00:00:00',
+    until: toLocalDateStr(sunday) + 'T23:59:59'
+  };
+}
+
+function getWeekStart(date) {
+  const parts = date.split('-');
+  const d = new Date(+parts[0], +parts[1]-1, +parts[2]);
+  const monday = new Date(d);
+  monday.setDate(d.getDate() - d.getDay() + (d.getDay() === 0 ? -6 : 1));
+  return toLocalDateStr(monday);
+}
+
+function formatShortDate(dateStr) {
+  const parts = dateStr.split('-');
+  const d = new Date(+parts[0], +parts[1]-1, +parts[2]);
+  return d.toLocaleDateString('es', { day: 'numeric', month: 'short' });
+}
+
+// Minimal markdown renderer (zero-dependency)
+function renderMarkdown(text) {
+  if (!text) return '';
+  return text
+    .replace(/^### (.*$)/gim, '<h3>$1</h3>')
+    .replace(/^## (.*$)/gim, '<h2>$1</h2>')
+    .replace(/^# (.*$)/gim, '<h1>$1</h1>')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/`(.*?)`/g, '<code>$1</code>')
+    .replace(/\n/g, '<br>');
+}
+
+// Avatar colors
+const avatarColors = ['var(--accent)', 'var(--green)', 'var(--purple)', 'var(--orange)', 'var(--cyan)', 'var(--red)'];
+
+function getAvatarColor(name) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  return avatarColors[Math.abs(hash) % avatarColors.length];
+}
+
+function getInitials(name) {
+  return name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
+}
+
+function formatRelativeTime(timestamp) {
+  const date = new Date(timestamp);
+  const now = new Date();
+  const diff = Math.floor((now - date) / 1000);
+  
+  if (diff < 60) return 'ahora';
+  if (diff < 3600) return `${Math.floor(diff/60)}m`;
+  if (diff < 86400) return `${Math.floor(diff/3600)}h`;
+  if (diff < 604800) return `${Math.floor(diff/86400)}d`;
+  return date.toLocaleDateString('es-ES', { month: 'short', day: 'numeric' });
+}
+
+async function loadRepos() {
+  try {
+    const resp = await fetch('/api/repos');
+    repos = await resp.json();
+    const select = document.getElementById('repoSelect');
+    select.innerHTML = repos.length
+      ? repos.map(r => `<option value="${r.id}">${r.owner}/${r.repo_name}</option>`).join('')
+      : '<option value="">No hay repos registrados</option>';
+    if (repos.length) {
+      currentRepoId = repos[0].id;
+      loadAllData();
+      loadDigestHistory();
+      startPolling();
+    }
+  } catch (e) {
+    console.error('Error cargando repos:', e);
+  }
+}
+
+async function loadAllData() {
+  if (!currentRepoId) return;
+
+  // Resetear estado de colapso al navegar
+  digestExpanded['daily'] = false;
+  digestExpanded['weekly'] = false;
+
+  // Feedback inmediato: mostrar estado de carga en cada sección
+  document.getElementById('dailyCommits').textContent = '…';
+  document.getElementById('dailyAdded').textContent = '…';
+  document.getElementById('dailyRemoved').textContent = '…';
+  document.getElementById('dailyText').innerHTML = '<div class="loading"><span class="spinner"></span>Generando digest…</div>';
+  document.getElementById('dailyText').classList.add('collapsed');
+  document.getElementById('dailyTechnical').style.display = 'none';
+  document.getElementById('digestNarrative').style.display = 'none';
+
+  // Resetear stats semanales (T8)
+  const weeklyResets = ['weeklyCommits', 'weeklyAdded', 'weeklyRemoved', 'weeklyPRs', 'weeklyIssues'];
+  weeklyResets.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = '…';
+  });
+  document.getElementById('weeklyText').innerHTML = '<div class="loading"><span class="spinner"></span>Generando digest semanal…</div>';
+  document.getElementById('weeklyText').classList.add('collapsed');
+  document.getElementById('weeklyTechnical').style.display = 'none';
+
+  document.getElementById('commitsList').innerHTML = '<div class="loading"><span class="spinner"></span>Cargando commits…</div>';
+  document.getElementById('authorStats').innerHTML = '<div class="loading"><span class="spinner"></span>Cargando…</div>';
+  document.getElementById('hotFiles').innerHTML = '<div class="loading"><span class="spinner"></span>Cargando…</div>';
+
+  await Promise.all([
+    loadDailyDigest(),
+    loadWeeklyDigest(),
+    loadCommits(),
+    loadAuthors(),
+    loadHotFiles(),
+    loadPending(),
+  ]);
+  document.getElementById('regenDaily').disabled = false;
+}
+
+async function loadDailyDigest() {
+  try {
+    const resp = await fetch(`/api/timeline/digest?repo_id=${currentRepoId}&date=${getCurrentDate()}&period=daily`);
+    const digest = await resp.json();
+    renderDigest(digest, 'daily');
+
+    // Renderizar texto L2/L3
+    const textEl = document.getElementById('dailyText');
+    const levelEl = document.getElementById('digestLevel');
+    const levelBadge = document.getElementById('levelBadge');
+    const levelText = document.getElementById('levelText');
+    const narrativeEl = document.getElementById('digestNarrative');
+
+    // Preparar texto con heading si es L3 (sin heading nativo)
+    let content = digest.text || '';
+    if (digest.level === 3 && !content.startsWith('##')) {
+      const dateLabel = formatDisplayDate(getCurrentDate());
+      const heading = `## Digest del ${dateLabel}\n\n`;
+      content = heading + content;
+    }
+    textEl.innerHTML = renderMarkdown(content);
+
+    // Mostrar indicador de nivel con tooltip de ollama_status
+    if (digest.level >= 2) {
+      levelEl.style.display = 'flex';
+      const labels = { 1: 'L1 Stats', 2: 'L2 Template', 3: 'L3 Narrativa' };
+      levelBadge.textContent = labels[digest.level] || `L${digest.level}`;
+      if (digest.level === 3) {
+        levelBadge.style.color = 'var(--purple)';
+        levelBadge.style.borderColor = 'var(--purple)';
+        levelText.textContent = 'Narrativa LLM';
+      } else {
+        levelBadge.style.color = 'var(--accent)';
+        levelText.textContent = 'Template';
+      }
+
+      // Mostrar estado de Ollama si es relevante (T2)
+      if (digest.ollama_status === 'failed') {
+        levelBadge.title = 'Ollama intentado pero falló — mostrando template L2';
+      } else if (digest.ollama_status === 'skipped_historical') {
+        levelBadge.title = 'Ollama omitido para fecha histórica — presionar Regenerar para forzar';
+      } else if (digest.ollama_status === 'success') {
+        levelBadge.title = 'Narrativa generada por LLM (Ollama)';
+      } else if (digest.ollama_status === 'not_configured') {
+        levelBadge.title = 'Ollama no configurado';
+      }
+    }
+
+    // Para L3: la narrativa ya está en digest.text (no duplicar)
+    // Para L2: no hay narrativa separada
+    narrativeEl.style.display = 'none';
+
+    // Renderizar resumen técnico
+    const techEl = document.getElementById('dailyTechnical');
+    if (digest.technical_summary) {
+        techEl.textContent = digest.technical_summary;
+        techEl.style.display = 'block';
+    } else {
+        techEl.style.display = 'none';
+    }
+
+    // Actualizar stats de PRs e Issues
+    const stats = digest.stats || {};
+    document.getElementById('dailyPRs').textContent =
+      (stats.prs_merged?.length || 0) + (stats.prs_opened?.length || 0);
+    document.getElementById('dailyIssues').textContent =
+      (stats.issues_closed?.length || 0) + (stats.issues_opened?.length || 0);
+
+    // Restaurar estado collapsed según digestExpanded (T7)
+    const isExpanded = digestExpanded['daily'];
+    if (isExpanded) {
+      textEl.classList.remove('collapsed');
+    } else {
+      textEl.classList.add('collapsed');
+    }
+    const toggleBtn = document.querySelector('#dailyExpand .btn');
+    if (toggleBtn) {
+      toggleBtn.textContent = isExpanded ? 'Contraer' : 'Expandir';
+    }
+  } catch (e) {
+    console.error('Error cargando digest diario:', e);
+  }
+}
+
+async function loadWeeklyDigest() {
+  // Mostrar digest semanal todos los días (no solo lunes/viernes)
+  document.getElementById('weeklySection').style.display = 'block';
+
+  try {
+    const resp = await fetch(`/api/timeline/digest?repo_id=${currentRepoId}&date=${getCurrentDate()}&period=weekly`);
+    const digest = await resp.json();
+    renderDigest(digest, 'weekly');
+
+    // Renderizar texto
+    const textEl = document.getElementById('weeklyText');
+    const levelEl = document.getElementById('weeklyDigestLevel');
+    const levelBadge = document.getElementById('weeklyLevelBadge');
+    const levelText = document.getElementById('weeklyLevelText');
+
+    // Preparar texto con heading si es L3 (sin heading nativo)
+    let content = digest.text || '';
+    if (digest.level === 3 && !content.startsWith('##')) {
+      const range = getWeekRangeDisplay(getCurrentDate());
+      const heading = `## Digest Semanal — ${range}\n\n`;
+      content = heading + content;
+    }
+    textEl.innerHTML = renderMarkdown(content);
+
+    // Mostrar indicador de nivel con tooltip de ollama_status (T5)
+    if (digest.level >= 2) {
+      levelEl.style.display = 'flex';
+      const labels = { 1: 'L1 Stats', 2: 'L2 Template', 3: 'L3 Narrativa' };
+      levelBadge.textContent = labels[digest.level] || `L${digest.level}`;
+      if (digest.level === 3) {
+        levelBadge.style.color = 'var(--purple)';
+        levelBadge.style.borderColor = 'var(--purple)';
+        levelText.textContent = 'Narrativa LLM';
+      } else {
+        levelBadge.style.color = 'var(--accent)';
+        levelText.textContent = 'Template';
+      }
+
+      // Mostrar estado de Ollama si es relevante (T2)
+      if (digest.ollama_status === 'failed') {
+        levelBadge.title = 'Ollama intentado pero falló — mostrando template L2';
+      } else if (digest.ollama_status === 'skipped_historical') {
+        levelBadge.title = 'Ollama omitido para fecha histórica — presionar Regenerar para forzar';
+      } else if (digest.ollama_status === 'success') {
+        levelBadge.title = 'Narrativa generada por LLM (Ollama)';
+      } else if (digest.ollama_status === 'not_configured') {
+        levelBadge.title = 'Ollama no configurado';
+      }
+    }
+
+    // Renderizar resumen técnico (T5)
+    const techEl = document.getElementById('weeklyTechnical');
+    if (digest.technical_summary) {
+        techEl.textContent = digest.technical_summary;
+        techEl.style.display = 'block';
+    } else {
+        techEl.style.display = 'none';
+    }
+
+    // Actualizar stats de PRs e Issues
+    const stats = digest.stats || {};
+    document.getElementById('weeklyPRs').textContent =
+      (stats.prs_merged?.length || 0) + (stats.prs_opened?.length || 0);
+    document.getElementById('weeklyIssues').textContent =
+      (stats.issues_closed?.length || 0) + (stats.issues_opened?.length || 0);
+
+    // Restaurar estado collapsed según digestExpanded (T7)
+    const isExpanded = digestExpanded['weekly'];
+    if (isExpanded) {
+      textEl.classList.remove('collapsed');
+    } else {
+      textEl.classList.add('collapsed');
+    }
+    const toggleBtn = document.getElementById('weeklyToggle');
+    if (toggleBtn) {
+      toggleBtn.textContent = isExpanded ? 'Contraer' : 'Expandir';
+    }
+  } catch (e) {
+    console.error('Error cargando digest semanal:', e);
+  }
+}
+
+async function loadPending() {
+  try {
+    const resp = await fetch(`/api/timeline/pending?repo_id=${currentRepoId}`);
+    const data = await resp.json();
+    
+    const section = document.getElementById('pendingSection');
+    if (data.handle && data.items.length > 0) {
+      section.style.display = 'block';
+      document.getElementById('pendingHandle').textContent = `@${data.handle}`;
+      
+      const list = document.getElementById('pendingList');
+      list.innerHTML = data.items.map(item => `
+        <div class="pending-item">
+          <span class="pending-type ${item.is_pr ? 'pr' : 'issue'}">${item.is_pr ? 'PR' : 'Issue'}</span>
+          <span>#${item.number}</span>
+          <span>${escapeHtml(item.title)}</span>
+        </div>
+      `).join('');
+    } else {
+      section.style.display = 'none';
+    }
+  } catch (e) {
+    console.error('Error cargando pendientes:', e);
+  }
+}
+
+function formatDisplayDate(dateStr) {
+  // "2026-04-16" → "16 de abril de 2026"
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const d = new Date(year, month - 1, day);
+  return d.toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+function getWeekRangeDisplay(dateStr) {
+  const parts = dateStr.split('-');
+  const d = new Date(+parts[0], +parts[1]-1, +parts[2]);
+  const monday = new Date(d);
+  monday.setDate(d.getDate() - d.getDay() + (d.getDay() === 0 ? -6 : 1));
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  const from = formatShortDate(toLocalDateStr(monday));
+  const to = formatShortDate(toLocalDateStr(sunday));
+  return `${from} – ${to}`;
+}
+
+function renderDigest(digest, prefix) {
+  const stats = digest.stats || {};
+  const authors = stats.authors || [];
+  const added = authors.reduce((sum, a) => sum + (a.insertions || 0), 0);
+  const removed = authors.reduce((sum, a) => sum + (a.deletions || 0), 0);
+
+  if (prefix === 'weekly') {
+    // Calcular rango lunes-domingo de la semana del digest
+    const weekDate = digest.date || getCurrentDate();
+    const { since, until } = getWeekRange(weekDate);
+    const from = since.split('T')[0];        // "2026-04-13"
+    const to = until.split('T')[0];          // "2026-04-19"
+    const fromFmt = formatShortDate(from);   // "13 abr"
+    const toFmt = formatShortDate(to);       // "19 abr"
+    document.getElementById('weeklyDate').textContent = `${fromFmt} – ${toFmt}`;
+
+    // Actualizar título del digest semanal (T6)
+    const titleEl = document.getElementById('weeklyTitle');
+    if (titleEl) {
+      titleEl.textContent = `Digest Semanal — ${fromFmt} – ${toFmt}`;
+    }
+  } else {
+    const displayDate = selectedDate || digest.date || '-';
+    document.getElementById('dailyDate').textContent = displayDate;
+
+    // Actualizar título del digest diario incondicionalmente (T6)
+    const titleEl = document.getElementById('dailyTitle');
+    if (titleEl) {
+      titleEl.textContent = selectedDate
+        ? `Digest del ${formatDisplayDate(selectedDate)}`
+        : 'Digest del Día';
+    }
+  }
+
+  document.getElementById(`${prefix}Commits`).textContent = stats.commits || 0;
+  document.getElementById(`${prefix}Added`).textContent = `+${added}`;
+  document.getElementById(`${prefix}Removed`).textContent = `-${removed}`;
+}
+
+async function loadCommits() {
+  try {
+    let url = `/api/timeline/commits?repo_id=${currentRepoId}&limit=50`;
+    const date = getCurrentDate();
+    const today = getToday();
+    const yesterday = getYesterday();
+
+    // Si es un día histórico (no hoy ni ayer), filtrar por ese día
+    if (date !== today && date !== yesterday) {
+      url += `&since=${date}T00:00:00&until=${date}T23:59:59`;
+    }
+
+    const resp = await fetch(url);
+    const commits = await resp.json();
+    renderCommits(commits);
+  } catch (e) {
+    console.error('Error cargando commits:', e);
+  }
+}
+
+function renderCommits(commits) {
+  const container = document.getElementById('commitsList');
+  if (!commits.length) {
+    container.innerHTML = '<div class="empty">No hay commits recientes</div>';
+    return;
+  }
+  container.innerHTML = commits.map(c => {
+    const initials = getInitials(c.author_name);
+    const color = getAvatarColor(c.author_name);
+    const badges = [];
+    if (c.is_merge) badges.push('<span class="commit-badge merge">merge</span>');
+    if (c.ai_assisted) badges.push('<span class="commit-badge ai">🤖</span>');
+    
+    return `
+      <div class="commit-row">
+        <div class="commit-avatar" style="background:${color}">${initials}</div>
+        <div class="commit-main">
+          <div class="commit-header">
+            <span class="commit-author">${escapeHtml(c.author_name)}</span>
+            ${c.branch ? `<span class="commit-branch">${escapeHtml(c.branch)}</span>` : ''}
+            ${badges.join('')}
+            <span class="commit-time">${formatRelativeTime(c.timestamp)}</span>
+          </div>
+          <div class="commit-msg">${escapeHtml(c.message.split('\n')[0])}</div>
+          <div class="commit-stats">
+            ${c.files_changed ? `<span>${c.files_changed} archivos</span>` : ''}
+            ${c.insertions ? `<span class="commit-add">+${c.insertions}</span>` : ''}
+            ${c.deletions ? `<span class="commit-del">-${c.deletions}</span>` : ''}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function loadAuthors() {
+  try {
+    const { since, until } = getWeekRange(getCurrentDate());
+    const resp = await fetch(
+      `/api/timeline/authors?repo_id=${currentRepoId}&since=${since}&until=${until}`
+    );
+    const authors = await resp.json();
+    renderAuthors(authors);
+  } catch (e) { console.error('Error cargando autores:', e); }
+}
+
+function renderAuthors(authors) {
+  const container = document.getElementById('authorStats');
+  if (!authors.length) {
+    container.innerHTML = '<div class="empty">Sin datos de autores</div>';
+    return;
+  }
+  const max = Math.max(...authors.map(a => a.commits));
+  container.innerHTML = authors.map(a => `
+    <div class="author-row">
+      <div class="author-name">${escapeHtml(a.author_name)}</div>
+      <div class="author-bar-bg">
+        <div class="author-bar" style="width:${(a.commits / max * 100).toFixed(1)}%"></div>
+      </div>
+      <div class="author-count">${a.commits}</div>
+    </div>
+  `).join('');
+}
+
+async function loadHotFiles() {
+  try {
+    const { since, until } = getWeekRange(getCurrentDate());
+    const resp = await fetch(
+      `/api/timeline/hot-files?repo_id=${currentRepoId}&since=${since}&until=${until}&limit=20`
+    );
+    const files = await resp.json();
+    renderHotFiles(files);
+  } catch (e) { console.error('Error cargando archivos calientes:', e); }
+}
+
+function renderHotFiles(files) {
+  const container = document.getElementById('hotFiles');
+  if (!files.length) {
+    container.innerHTML = `
+      <div class="hot-files-header"><div>Archivo</div><div>Cambios</div><div>+</div><div>-</div></div>
+      <div class="empty">Sin datos</div>
+    `;
+    return;
+  }
+  container.innerHTML = `
+    <div class="hot-files-header">
+      <div>Archivo</div>
+      <div>Cambios</div>
+      <div>+</div>
+      <div>-</div>
+    </div>
+    ${files.map(f => `
+      <div class="hot-file-row">
+        <div class="hot-file-path" title="${escapeHtml(f.file_path)}">${escapeHtml(f.file_path)}</div>
+        <div class="hot-file-count">${f.changes}</div>
+        <div class="hot-file-add">+${f.insertions}</div>
+        <div class="hot-file-del">-${f.deletions}</div>
+      </div>
+    `).join('')}
+  `;
+}
+
+function startPolling() {
+  if (pollInterval) clearInterval(pollInterval);
+  // Poll commits every 30s
+  pollInterval = setInterval(loadCommits, 30000);
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Estado de digests colapsados
+const digestExpanded = { daily: false, weekly: false };
+
+function toggleDigest(prefix) {
+  const textEl = document.getElementById(`${prefix}Text`);
+  const techEl = document.getElementById(`${prefix}Technical`);
+  const btnEl = prefix === 'weekly'
+    ? document.getElementById('weeklyToggle')
+    : document.querySelector(`#${prefix}Expand .btn`);
+  digestExpanded[prefix] = !digestExpanded[prefix];
+
+  if (digestExpanded[prefix]) {
+    textEl.classList.remove('collapsed');
+    if (techEl) techEl.classList.remove('collapsed');
+    if (btnEl) btnEl.textContent = 'Colapsar';
+  } else {
+    textEl.classList.add('collapsed');
+    if (techEl) techEl.classList.add('collapsed');
+    if (btnEl) btnEl.textContent = 'Expandir';
+  }
+}
+
+// Botón regenerar daily
+document.getElementById('regenDaily').addEventListener('click', async () => {
+  const btn = document.getElementById('regenDaily');
+  btn.disabled = true;
+  btn.textContent = 'Regenerando...';
+
+  // NUEVO: mostrar spinner mientras espera Ollama (T3)
+  const dailyText = document.getElementById('dailyText');
+  if (dailyText) {
+    dailyText.innerHTML = '<div class="loading"><div class="spinner"></div>Generando narrativa con Ollama...</div>';
+  }
+
+  try {
+    // 1. Force fetch: computa y cachea el nuevo digest (puede tardar 30-120s por Ollama)
+    await fetch(`/api/timeline/digest?repo_id=${currentRepoId}&date=${getCurrentDate()}&period=daily&force=1`);
+    // 2. Cargar y renderizar desde cache: actualiza texto, badge, technical summary, stats
+    await loadDailyDigest();
+  } catch (e) {
+    console.error('Error regenerando digest:', e);
+    if (dailyText) dailyText.innerHTML = '<div class="error">Error al regenerar. Intenta de nuevo.</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Regenerar';
+  }
+});
+
+// Botón regenerar weekly
+document.getElementById('regenWeekly').addEventListener('click', async () => {
+  const btn = document.getElementById('regenWeekly');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = 'Regenerando...';
+
+  const weeklyText = document.getElementById('weeklyText');
+  if (weeklyText) {
+    weeklyText.innerHTML = '<div class="loading"><div class="spinner"></div>Generando narrativa semanal con Ollama...</div>';
+  }
+
+  try {
+    // force=1 con la fecha actual — el server calcula week_start internamente
+    await fetch(`/api/timeline/digest?repo_id=${currentRepoId}&date=${getCurrentDate()}&period=weekly&force=1`);
+    await loadWeeklyDigest();
+  } catch (e) {
+    console.error('Error regenerando digest semanal:', e);
+    if (weeklyText) weeklyText.innerHTML = '<div class="error">Error al regenerar. Intenta de nuevo.</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Regenerar Semanal';
+  }
+});
+
+// Event listeners
+document.getElementById('repoSelect').addEventListener('change', (e) => {
+  currentRepoId = e.target.value;
+  if (currentRepoId) {
+    loadAllData();
+    loadDigestHistory();
+  }
+});
+
+document.getElementById('dateSelect').addEventListener('change', (e) => {
+  selectedDate = e.target.value || null;
+  document.getElementById('digestDateNav').value = e.target.value || getYesterday();
+  if (currentRepoId) {
+    loadAllData();
+    loadDigestHistory();
+  }
+});
+
+// Init — default a ayer (último día completo), no al día en curso
+document.getElementById('dateSelect').value = getYesterday();
+document.getElementById('digestDateNav').value = getYesterday();
+loadRepos();
+
+// Navegación de fechas
+function navigateDay(offset) {
+    const parts = document.getElementById('digestDateNav').value.split('-');
+    const current = new Date(+parts[0], +parts[1]-1, +parts[2]);
+    current.setDate(current.getDate() + offset);
+    const newDate = toLocalDateStr(current);
+    document.getElementById('digestDateNav').value = newDate;
+    document.getElementById('dateSelect').value = newDate;
+    selectedDate = newDate;
+    loadAllData();
+    loadDigestHistory();
+}
+
+function navigateToday() {
+    const today = getToday();
+    document.getElementById('digestDateNav').value = today;
+    document.getElementById('dateSelect').value = today;
+    selectedDate = null;
+    loadAllData();
+    loadDigestHistory();
+}
+
+function onDateNavChange() {
+    const newDate = document.getElementById('digestDateNav').value;
+    document.getElementById('dateSelect').value = newDate;
+    selectedDate = newDate;
+    loadAllData();
+    loadDigestHistory();
+}
+
+function selectDigestDate(date) {
+    document.getElementById('digestDateNav').value = date;
+    document.getElementById('dateSelect').value = date;
+    selectedDate = date;
+    loadAllData();
+    loadDigestHistory();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function loadDigestHistory() {
+    if (!currentRepoId) return;
+    try {
+        const resp = await fetch(
+          `/api/timeline/commit-days?repo_id=${currentRepoId}&limit=30`
+        );
+        const history = await resp.json();
+        const container = document.getElementById('digestHistory');
+        if (!history.length) { container.innerHTML = ''; return; }
+
+        const currentDate = getCurrentDate();
+        container.innerHTML = history.map(d => {
+            const isActive = d.date === currentDate;
+            const levelLabel = d.level > 0 ? `L${d.level}` : '·';
+            return `
+                <button class="digest-day ${isActive ? 'active' : ''}"
+                        onclick="selectDigestDate('${d.date}')">
+                    <span class="digest-day-num">${d.date.split('-')[2]}</span>
+                    <span class="digest-day-level">${levelLabel}</span>
+                </button>
+            `;
+        }).join('');
+    } catch (e) {
+        console.error('Error cargando historial de commits:', e);
+    }
+}
+</script>
+</body>
+</html>

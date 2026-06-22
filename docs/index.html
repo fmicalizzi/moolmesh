@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoolMesh — the context mesh for autonomous agents</title>
+<meta name="description" content="Unified observability, telemetry, and inter-agent coordination. Local-first, zero dependencies, open source.">
+<style>
+  :root {
+    --obsidian: #0C0C0E;
+    --stone: #14141A;
+    --carved: #1E1E24;
+    --border: #2A2A30;
+    --glyph: #C8B88A;
+    --moss: #7A9E7E;
+    --ash: #8B8B94;
+    --smoke: #5A5A63;
+    --text: #D4D4D8;
+    --jade: #4A7C59;
+    --amber: #D4A054;
+    --teal: #5CA8A0;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--obsidian);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .mono {
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  }
+
+  /* ── Hero ── */
+  .hero {
+    text-align: center;
+    padding: 6rem 1.5rem 4rem;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  .pyramid {
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 14px;
+    line-height: 1.3;
+    color: var(--glyph);
+    white-space: pre;
+    margin-bottom: 2rem;
+    opacity: 0;
+    animation: carve 0.8s ease-out 0.2s forwards;
+  }
+
+  @keyframes carve {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .hero h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+    margin-bottom: 0.75rem;
+    opacity: 0;
+    animation: carve 0.6s ease-out 0.5s forwards;
+  }
+
+  .hero h1 span {
+    color: var(--glyph);
+  }
+
+  .hero .tagline {
+    font-size: clamp(1rem, 2.5vw, 1.25rem);
+    color: var(--ash);
+    max-width: 540px;
+    margin: 0 auto 2.5rem;
+    opacity: 0;
+    animation: carve 0.6s ease-out 0.7s forwards;
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    opacity: 0;
+    animation: carve 0.5s ease-out 0.9s forwards;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.7rem 1.5rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    text-decoration: none;
+    transition: all 0.15s ease;
+  }
+
+  .btn-primary {
+    background: var(--glyph);
+    color: var(--obsidian);
+  }
+  .btn-primary:hover { background: #D8C89A; }
+
+  .btn-secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover { border-color: var(--ash); }
+
+  /* ── Install strip ── */
+  .install {
+    background: var(--stone);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 1.25rem 1.5rem;
+    text-align: center;
+  }
+
+  .install code {
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.95rem;
+    color: var(--glyph);
+    background: var(--carved);
+    padding: 0.5rem 1.25rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    display: inline-block;
+    letter-spacing: 0.02em;
+  }
+
+  .install code .dim { color: var(--smoke); }
+
+  /* ── Sections ── */
+  section {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 4rem 1.5rem;
+  }
+
+  section h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: var(--text);
+  }
+
+  section h2 .accent { color: var(--glyph); }
+
+  section .subtitle {
+    color: var(--ash);
+    margin-bottom: 2.5rem;
+    font-size: 1rem;
+  }
+
+  /* ── Views grid ── */
+  .views {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+  }
+
+  @media (max-width: 580px) {
+    .views { grid-template-columns: 1fr; }
+  }
+
+  .view-card {
+    background: var(--stone);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    transition: border-color 0.15s;
+  }
+  .view-card:hover { border-color: var(--smoke); }
+
+  .view-card .icon {
+    font-size: 1.5rem;
+    margin-bottom: 0.75rem;
+    display: block;
+  }
+
+  .view-card h3 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+    color: var(--text);
+  }
+
+  .view-card p {
+    font-size: 0.85rem;
+    color: var(--ash);
+    line-height: 1.5;
+  }
+
+  /* ── Agents ── */
+  .agents-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.75rem;
+  }
+
+  @media (max-width: 720px) {
+    .agents-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  @media (max-width: 400px) {
+    .agents-grid { grid-template-columns: 1fr; }
+  }
+
+  .agent {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    background: var(--stone);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+  }
+
+  .agent .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .agent .name {
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+
+  .agent .format {
+    font-size: 0.75rem;
+    color: var(--smoke);
+    margin-left: auto;
+  }
+
+  .agent.live .dot { background: var(--moss); }
+  .agent.planned .dot { background: var(--amber); }
+  .agent.planned .name { color: var(--ash); }
+
+  .agent-legend {
+    display: flex;
+    gap: 1.5rem;
+    margin-top: 1rem;
+    font-size: 0.8rem;
+    color: var(--smoke);
+  }
+
+  .agent-legend span {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .agent-legend .dot-sm {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  /* ── Principles ── */
+  .principles {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1.5rem;
+  }
+
+  @media (max-width: 580px) {
+    .principles { grid-template-columns: 1fr; }
+  }
+
+  /* ── Specs ── */
+  .specs {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    margin-top: 2.5rem;
+  }
+
+  @media (max-width: 720px) {
+    .specs { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  .spec {
+    background: var(--stone);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    text-align: center;
+  }
+
+  .spec .val {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--glyph);
+    display: block;
+    margin-bottom: 0.25rem;
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  }
+
+  .spec .label {
+    font-size: 0.8rem;
+    color: var(--ash);
+  }
+
+  .principle {
+    border-left: 2px solid var(--border);
+    padding-left: 1.25rem;
+  }
+
+  .principle h3 {
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 0.3rem;
+    color: var(--glyph);
+  }
+
+  .principle p {
+    font-size: 0.85rem;
+    color: var(--ash);
+    line-height: 1.55;
+  }
+
+  /* ── Footer ── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 2.5rem 1.5rem;
+    text-align: center;
+    color: var(--smoke);
+    font-size: 0.85rem;
+  }
+
+  footer a {
+    color: var(--ash);
+    text-decoration: none;
+  }
+  footer a:hover { color: var(--glyph); }
+
+  footer .links {
+    display: flex;
+    justify-content: center;
+    gap: 2rem;
+    margin-bottom: 1rem;
+  }
+
+  footer .license {
+    font-size: 0.8rem;
+    color: var(--smoke);
+  }
+
+  /* ── Divider ── */
+  .divider {
+    max-width: 900px;
+    margin: 0 auto;
+    border: none;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pyramid, .hero h1, .hero .tagline, .hero-actions {
+      opacity: 1;
+      animation: none;
+      transform: none;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .hero { padding: 4rem 1rem 3rem; }
+    section { padding: 3rem 1rem; }
+    .pyramid { font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="pyramid" aria-hidden="true">               ██
+             ██▓▓██
+           ██▓▓▓▓▓▓██
+         ██▓▓▓▓▓▓▓▓▓▓██
+       ██▓▓▓▓▓▓▓▓▓▓▓▓▓▓██
+       ██████████████████</div>
+  <h1><span>Mool</span>Mesh</h1>
+  <p class="tagline">Congregating scattered signals into shared understanding. Unified observability for autonomous agents — running entirely on your machine.</p>
+  <div class="hero-actions">
+    <a href="https://github.com/fmicalizzi/moolmesh" class="btn btn-primary">View on GitHub</a>
+    <a href="https://github.com/fmicalizzi/moolmesh/blob/main/PHILOSOPHY.md" class="btn btn-secondary">Read the Philosophy</a>
+  </div>
+</div>
+
+<div class="install">
+  <code><span class="dim">$</span> pip install moolmesh <span class="dim">&amp;&amp;</span> mool dashboard</code>
+</div>
+
+<section>
+  <h2>Four views, <span class="accent">one surface</span></h2>
+  <p class="subtitle">Everything your agents are doing — in a single browser tab.</p>
+  <div class="views">
+    <div class="view-card">
+      <span class="icon" aria-hidden="true">&#x25CE;</span>
+      <h3>AI Sessions</h3>
+      <p>Live event feed from all agents. Messages, tool calls, token usage, models — as they happen.</p>
+    </div>
+    <div class="view-card">
+      <span class="icon" aria-hidden="true">&#x25A4;</span>
+      <h3>Analytics</h3>
+      <p>Token consumption by provider, hourly activity, top tools, top projects. See where the spend goes.</p>
+    </div>
+    <div class="view-card">
+      <span class="icon" aria-hidden="true">&#x25D0;</span>
+      <h3>Project Pulse</h3>
+      <p>PR kanban, issues, milestones, GitHub Projects v2. The state of the work, human and AI alike.</p>
+    </div>
+    <div class="view-card">
+      <span class="icon" aria-hidden="true">&#x25B6;</span>
+      <h3>Code Timeline</h3>
+      <p>Commit feed, author stats, hot files, daily and weekly digest narratives powered by LLM.</p>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section>
+  <h2>Agents <span class="accent">supported</span></h2>
+  <p class="subtitle">Auto-discovered on startup. No configuration, no API keys, no cloud.</p>
+  <div class="agents-grid">
+    <div class="agent live">
+      <div class="dot"></div>
+      <span class="name">Claude Code</span>
+      <span class="format mono">JSONL</span>
+    </div>
+    <div class="agent live">
+      <div class="dot"></div>
+      <span class="name">Codex (GPT-5)</span>
+      <span class="format mono">JSONL+SQLite</span>
+    </div>
+    <div class="agent live">
+      <div class="dot"></div>
+      <span class="name">Qwen CLI</span>
+      <span class="format mono">JSONL</span>
+    </div>
+    <div class="agent live">
+      <div class="dot"></div>
+      <span class="name">OpenCode</span>
+      <span class="format mono">SQLite</span>
+    </div>
+    <div class="agent planned">
+      <div class="dot"></div>
+      <span class="name">Aider</span>
+    </div>
+    <div class="agent planned">
+      <div class="dot"></div>
+      <span class="name">Pi</span>
+    </div>
+    <div class="agent planned">
+      <div class="dot"></div>
+      <span class="name">GitHub Copilot CLI</span>
+    </div>
+    <div class="agent planned">
+      <div class="dot"></div>
+      <span class="name">Antigravity CLI</span>
+    </div>
+  </div>
+  <div class="agent-legend">
+    <span><span class="dot-sm" style="background:var(--moss)"></span> Shipping</span>
+    <span><span class="dot-sm" style="background:var(--amber)"></span> Planned</span>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section>
+  <h2>Built on <span class="accent">four principles</span></h2>
+  <div class="principles">
+    <div class="principle">
+      <h3>State as truth</h3>
+      <p>If it matters, it lives in SQLite. If it's in SQLite, it's queryable. No volatile caches, no ephemeral memory.</p>
+    </div>
+    <div class="principle">
+      <h3>Radical agnosticism</h3>
+      <p>No corporate loyalties. Adding a new agent is an adapter, not a rewrite. The tool serves the developer, not the vendor.</p>
+    </div>
+    <div class="principle">
+      <h3>Zero cloud lock-in</h3>
+      <p>Python standard library and SQLite. No accounts, no API keys, no data leaving your machine. Privacy is the architecture.</p>
+    </div>
+    <div class="principle">
+      <h3>Zero friction</h3>
+      <p>Session discovery is automatic. If setup takes more than a minute, something is wrong.</p>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section>
+  <h2>Under the <span class="accent">hood</span></h2>
+  <p class="subtitle">Built for developers who care about what runs on their machine.</p>
+
+  <div class="specs">
+    <div class="spec">
+      <span class="val">&lt;200MB</span>
+      <span class="label">RAM footprint</span>
+    </div>
+    <div class="spec">
+      <span class="val">0</span>
+      <span class="label">External dependencies</span>
+    </div>
+    <div class="spec">
+      <span class="val">509</span>
+      <span class="label">Tests passing</span>
+    </div>
+    <div class="spec">
+      <span class="val">~1s</span>
+      <span class="label">Cold start</span>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section>
+  <h2>MCP Server &amp; <span class="accent">headless mode</span></h2>
+  <p class="subtitle">MoolMesh works with a dashboard or without one.</p>
+  <div class="views">
+    <div class="view-card">
+      <h3>MCP stdio server</h3>
+      <p>Read-only access to session data via the Model Context Protocol. Any MCP-compatible agent can query active sessions, token usage, tool stats, and project activity. Runs as a separate process (~15 MB RAM), independent from the dashboard.</p>
+    </div>
+    <div class="view-card">
+      <h3>Headless CLI</h3>
+      <p>Generate Markdown reports, discover sessions, and manage repos — all without launching the dashboard. Ideal for CI pipelines, cron jobs, or scripting into your existing workflow. Every command exits cleanly with structured output.</p>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section>
+  <h2>Technical <span class="accent">details</span></h2>
+  <div class="principles">
+    <div class="principle">
+      <h3>Python 3.11+ stdlib only</h3>
+      <p>No pip packages at runtime. <code style="color:var(--glyph);background:var(--carved);padding:0.1rem 0.4rem;border-radius:3px;font-size:0.8rem;">tomllib</code>, <code style="color:var(--glyph);background:var(--carved);padding:0.1rem 0.4rem;border-radius:3px;font-size:0.8rem;">sqlite3</code>, <code style="color:var(--glyph);background:var(--carved);padding:0.1rem 0.4rem;border-radius:3px;font-size:0.8rem;">http.server</code>, <code style="color:var(--glyph);background:var(--carved);padding:0.1rem 0.4rem;border-radius:3px;font-size:0.8rem;">threading</code>. That's the stack.</p>
+    </div>
+    <div class="principle">
+      <h3>SQLite persistence</h3>
+      <p>Two databases: <code style="color:var(--glyph);background:var(--carved);padding:0.1rem 0.4rem;border-radius:3px;font-size:0.8rem;">events.db</code> for sessions, <code style="color:var(--glyph);background:var(--carved);padding:0.1rem 0.4rem;border-radius:3px;font-size:0.8rem;">github.db</code> for repos. WAL mode, transactional offsets, crash-safe. Schema migrates automatically on startup.</p>
+    </div>
+    <div class="principle">
+      <h3>SSE live streaming</h3>
+      <p>Server-Sent Events with <code style="color:var(--glyph);background:var(--carved);padding:0.1rem 0.4rem;border-radius:3px;font-size:0.8rem;">id:</code> fields for zero-gap reconnection. Browser disconnects and reconnects get replayed from SQLite — no events lost.</p>
+    </div>
+    <div class="principle">
+      <h3>macOS + Linux</h3>
+      <p>macOS uses <code style="color:var(--glyph);background:var(--carved);padding:0.1rem 0.4rem;border-radius:3px;font-size:0.8rem;">kqueue</code> for instant file detection. Linux falls back to polling (~1s). Both work out of the box, no configuration needed.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="links">
+    <a href="https://github.com/fmicalizzi/moolmesh">GitHub</a>
+    <a href="https://github.com/fmicalizzi/moolmesh/blob/main/README.md">Docs</a>
+    <a href="https://github.com/fmicalizzi/moolmesh/blob/main/README.es.md">Docs (ES)</a>
+    <a href="https://github.com/fmicalizzi/moolmesh/blob/main/PHILOSOPHY.md">Philosophy</a>
+    <a href="https://github.com/fmicalizzi/moolmesh/blob/main/CONTRIBUTING.md">Contributing</a>
+  </div>
+  <p class="license">MIT License — Your telemetry is yours.</p>
+</footer>
+
+</body>
+</html>

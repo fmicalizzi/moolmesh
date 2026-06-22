@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoolMesh — Analytics</title>
+<style>
+  :root {
+    --bg: #0C0C0E; --bg2: #14141A; --bg3: #1E1E24; --border: #2A2A30;
+    --text: #D4D4D8; --muted: #8B8B94; --accent: #C8B88A;
+    --green: #7A9E7E; --orange: #D4A054; --red: #D4645C;
+    --purple: #A88EC8; --yellow: #D4B85C; --cyan: #5CA8A0;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:'SF Mono','Cascadia Code','Fira Code',monospace; font-size:13px; line-height:1.5; overflow-x:hidden; }
+
+  /* ── Header ── */
+  header { background:var(--bg2); border-bottom:1px solid var(--border); padding:10px 24px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:10; }
+  .logo { font-size:15px; font-weight:600; color:var(--accent); }
+  .logo span { color:var(--muted); font-weight:400; font-size:12px; }
+  .logo a { color:var(--purple); font-size:11px; margin-left:12px; text-decoration:none; border:1px solid rgba(188,140,255,0.3); padding:1px 8px; border-radius:10px; }
+  .tabs { display:flex; gap:4px; }
+  .tab { background:var(--bg3); border:1px solid var(--border); color:var(--muted); padding:4px 14px; border-radius:6px; font-size:12px; font-family:inherit; cursor:pointer; transition:all .15s; }
+  .tab:hover { border-color:var(--muted); }
+  .tab.on { color:var(--text); border-color:var(--accent); background:rgba(88,166,255,0.1); }
+
+  /* ── KPI Cards ── */
+  .kpi-row { display:grid; grid-template-columns:repeat(6,1fr); gap:12px; padding:16px 24px; }
+  .kpi { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:14px 16px; text-align:center; }
+  .kpi-val { font-size:24px; font-weight:700; color:var(--accent); }
+  .kpi-lbl { font-size:9px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; margin-top:2px; }
+  .kpi-sub { font-size:10px; color:var(--muted); margin-top:4px; }
+  .kpi-val.green { color:var(--green); }
+  .kpi-val.purple { color:var(--purple); }
+  .kpi-val.orange { color:var(--orange); }
+  .kpi-val.cyan { color:var(--cyan); }
+
+  /* ── Grid ── */
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:0 24px 16px; }
+  .grid-full { grid-column:1/-1; }
+  .card { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:16px; }
+  .card-title { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; margin-bottom:12px; }
+
+  /* ── Donut chart (SVG) ── */
+  .donut-wrap { display:flex; align-items:center; gap:20px; }
+  .donut-legend { display:flex; flex-direction:column; gap:6px; }
+  .legend-item { display:flex; align-items:center; gap:8px; font-size:12px; }
+  .legend-dot { width:10px; height:10px; border-radius:2px; flex-shrink:0; }
+  .legend-val { color:var(--muted); font-size:11px; margin-left:auto; padding-left:12px; }
+
+  /* ── Bar chart (CSS) ── */
+  .bar-row { display:flex; align-items:center; gap:8px; padding:3px 0; }
+  .bar-label { min-width:100px; font-size:11px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bar-track { flex:1; height:16px; background:var(--bg3); border-radius:3px; overflow:hidden; position:relative; }
+  .bar-fill { height:100%; border-radius:3px; transition:width .4s ease; min-width:2px; }
+  .bar-count { min-width:50px; text-align:right; font-size:11px; color:var(--muted); }
+
+  /* ── Area chart (SVG) ── */
+  .area-chart svg { width:100%; height:140px; }
+
+  /* ── Gauge ring ── */
+  .gauge-wrap { display:flex; align-items:center; justify-content:center; gap:30px; }
+  .gauge-center { text-align:center; }
+  .gauge-pct { font-size:28px; font-weight:700; color:var(--green); }
+  .gauge-lbl { font-size:10px; color:var(--muted); }
+  .gauge-stats { display:flex; flex-direction:column; gap:6px; font-size:12px; }
+  .gauge-stat { display:flex; justify-content:space-between; gap:20px; }
+  .gauge-stat span:last-child { color:var(--muted); }
+
+  /* ── Provider colors ── */
+  .c-claude { color:var(--accent); }
+  .c-codex { color:var(--green); }
+  .c-qwen { color:var(--yellow); }
+  .bg-claude { background:var(--accent); }
+  .bg-codex { background:var(--green); }
+  .bg-qwen { background:var(--yellow); }
+
+  /* ── Loading ── */
+  .loading { text-align:center; padding:40px; color:var(--muted); }
+
+  @media (max-width:900px) { .kpi-row { grid-template-columns:repeat(3,1fr); } .grid { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+
+<nav style="background:#14141A; border-bottom:1px solid #2A2A30; padding:8px 20px; display:flex; gap:16px; font-size:13px;">
+  <a href="/" style="color:#8B8B94; text-decoration:none;">Sesiones AI</a>
+  <a href="/analytics" style="color:#C8B88A; text-decoration:none; font-weight:600;">Analytics</a>
+  <a href="/projects" style="color:#8B8B94; text-decoration:none;">Project Pulse</a>
+  <a href="/timeline" style="color:#8B8B94; text-decoration:none;">Code Timeline</a>
+</nav>
+
+<header>
+  <div class="logo">MoolMesh <span>v1.4</span> <a href="/">Live Feed</a> <button id="btn-report" style="color:#5CA8A0;font-size:11px;margin-left:6px;background:none;border:1px solid rgba(57,210,192,0.3);padding:1px 8px;border-radius:10px;font-family:inherit;cursor:pointer">Export Reports</button></div>
+  <div class="tabs" id="tabs">
+    <button class="tab on" data-p="live">Live</button>
+    <button class="tab" data-p="day">Hoy</button>
+    <button class="tab" data-p="week">Semana</button>
+    <button class="tab" data-p="full">Full</button>
+  </div>
+</header>
+
+<!-- KPI row -->
+<div class="kpi-row">
+  <div class="kpi"><div class="kpi-val" id="k-events">—</div><div class="kpi-lbl">Eventos</div><div class="kpi-sub" id="k-events-sub"></div></div>
+  <div class="kpi"><div class="kpi-val green" id="k-input">—</div><div class="kpi-lbl">Input Tokens</div><div class="kpi-sub" id="k-input-sub"></div></div>
+  <div class="kpi"><div class="kpi-val purple" id="k-output">—</div><div class="kpi-lbl">Output Tokens</div><div class="kpi-sub" id="k-output-sub"></div></div>
+  <div class="kpi"><div class="kpi-val orange" id="k-cost">—</div><div class="kpi-lbl">Costo Est. USD</div><div class="kpi-sub" id="k-cost-sub"></div></div>
+  <div class="kpi"><div class="kpi-val cyan" id="k-sessions">—</div><div class="kpi-lbl">Sesiones</div><div class="kpi-sub" id="k-sessions-sub"></div></div>
+  <div class="kpi"><div class="kpi-val" id="k-projects">—</div><div class="kpi-lbl">Proyectos</div><div class="kpi-sub" id="k-projects-sub"></div></div>
+</div>
+
+<!-- Charts grid -->
+<div class="grid">
+  <!-- Tokens by Provider (donut) -->
+  <div class="card">
+    <div class="card-title">Tokens por Provider</div>
+    <div class="donut-wrap" id="ch-provider"></div>
+  </div>
+
+  <!-- Event Types (donut) -->
+  <div class="card">
+    <div class="card-title">Tipos de Evento</div>
+    <div class="donut-wrap" id="ch-types"></div>
+  </div>
+
+  <!-- Activity Timeline (area chart) -->
+  <div class="card grid-full">
+    <div class="card-title">Actividad por Hora</div>
+    <div class="area-chart" id="ch-hourly"></div>
+  </div>
+
+  <!-- Top Tools (bar chart) -->
+  <div class="card">
+    <div class="card-title">Top Herramientas</div>
+    <div id="ch-tools"></div>
+  </div>
+
+  <!-- Top Projects (bar chart) -->
+  <div class="card">
+    <div class="card-title">Top Proyectos</div>
+    <div id="ch-projects"></div>
+  </div>
+
+  <!-- Models (donut) -->
+  <div class="card">
+    <div class="card-title">Modelos Usados</div>
+    <div class="donut-wrap" id="ch-models"></div>
+  </div>
+
+  <!-- Cache Efficiency (gauge) -->
+  <div class="card">
+    <div class="card-title">Eficiencia de Cache</div>
+    <div class="gauge-wrap" id="ch-cache"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+
+  let period = 'live';
+  let liveData = null;
+  let refreshTimer = null;
+
+  const $ = id => document.getElementById(id);
+  const PCOLORS = { claude:'#C8B88A', codex:'#7A9E7E', qwen:'#D4B85C' };
+  const TCOLORS = { user:'#C8B88A', assistant:'#7A9E7E', tool_use:'#D4A054', tool_result:'#5CA8A0', thinking:'#A88EC8', system:'#8B8B94', summary:'#8B8B94' };
+  const PALETTE = ['#C8B88A','#7A9E7E','#D4A054','#5CA8A0','#A88EC8','#D4645C','#D4B85C','#8B8B94','#A88EC8','#C87898'];
+
+  // ── Period switching ──
+  window.setPeriod = function(p) {
+    period = p;
+    document.querySelectorAll('.tab').forEach(b => b.className = 'tab' + (b.dataset.p===p?' on':''));
+    loadData();
+  };
+
+  async function loadData() {
+    if (period === 'live') {
+      // Use live tracker data from existing APIs
+      const [stats, sessions, tools, ptokens, dbStats] = await Promise.all([
+        fetch('/api/stats').then(r=>r.json()),
+        fetch('/api/sessions').then(r=>r.json()),
+        fetch('/api/tools').then(r=>r.json()),
+        fetch('/api/provider-tokens').then(r=>r.json()),
+        fetch('/api/db-stats').then(r=>r.json()),
+      ]);
+      renderLive(stats, sessions, tools, ptokens, dbStats);
+    } else {
+      const data = await fetch('/api/analytics?period=' + period).then(r=>r.json());
+      renderAnalytics(data);
+    }
+  }
+
+  // ── Render: Live (from tracker) ──
+  function renderLive(stats, sessions, tools, ptokens, dbStats) {
+    const inTok = stats.total_input_tokens || 0;
+    const outTok = stats.total_output_tokens || 0;
+    const cost = estimateCost(inTok, outTok, 0);
+
+    $('k-events').textContent = fmtN(stats.total_events);
+    $('k-events-sub').textContent = 'desde inicio del server';
+    $('k-input').textContent = fmtN(inTok);
+    $('k-output').textContent = fmtN(outTok);
+    $('k-cost').textContent = '$' + cost.toFixed(2);
+    $('k-sessions').textContent = sessions.length;
+    $('k-projects').textContent = new Set(sessions.map(s=>s.project)).size;
+    $('k-projects-sub').textContent = stats.active_providers?.join(', ') || '';
+
+    // Provider tokens donut
+    const provData = [];
+    for (const [p, vals] of Object.entries(ptokens)) {
+      const t = (vals.input||0) + (vals.output||0);
+      if (t > 0) provData.push({ label:p, value:t, color:PCOLORS[p]||'#8B8B94' });
+    }
+    renderDonut('ch-provider', provData, v => fmtN(v) + ' tok');
+
+    // Tools bar chart
+    renderBars('ch-tools', tools.map(t => ({ label:t.name, value:t.count })), var_orange);
+
+    // Projects bar chart
+    const projData = sessions.slice(0,12).map(s => ({
+      label: s.project, value: s.events, color: PCOLORS[s.provider]
+    }));
+    renderBars('ch-projects', projData);
+
+    // Models donut from sessions
+    const modelMap = {};
+    sessions.forEach(s => s.models?.forEach(m => { modelMap[m] = (modelMap[m]||0) + s.events; }));
+    const modelData = Object.entries(modelMap).map(([m,c],i) => ({ label:shortModel(m), value:c, color:PALETTE[i%PALETTE.length] }));
+    renderDonut('ch-models', modelData, v => fmtN(v) + ' events');
+
+    // Event types — not available from live APIs, show placeholder
+    $('ch-types').innerHTML = '<div style="color:var(--muted);font-size:11px;padding:20px;text-align:center">Cambia a Hoy/Semana/Full para ver desglose de tipos</div>';
+    $('ch-hourly').innerHTML = '<div style="color:var(--muted);font-size:11px;padding:20px;text-align:center">Timeline disponible en Hoy/Semana/Full</div>';
+    $('ch-cache').innerHTML = '<div style="color:var(--muted);font-size:11px;padding:20px;text-align:center">Cache stats en Hoy/Semana/Full</div>';
+  }
+
+  // ── Render: Analytics (from SQLite) ──
+  function renderAnalytics(d) {
+    const inTok = d.tokens.input;
+    const outTok = d.tokens.output;
+    const cached = d.tokens.cached;
+    const cost = estimateCost(inTok, outTok, cached);
+    const periodLabel = { day:'hoy', week:'ultimos 7 dias', full:'todo el historial' }[d.period] || '';
+
+    $('k-events').textContent = fmtN(d.total_events);
+    $('k-events-sub').textContent = periodLabel;
+    $('k-input').textContent = fmtN(inTok);
+    $('k-input-sub').textContent = cached > 0 ? fmtN(cached) + ' cached' : '';
+    $('k-output').textContent = fmtN(outTok);
+    $('k-output-sub').textContent = '';
+    $('k-cost').textContent = '$' + cost.toFixed(2);
+    $('k-cost-sub').textContent = '';
+    $('k-sessions').textContent = fmtN(d.total_sessions);
+    $('k-sessions-sub').textContent = '';
+    $('k-projects').textContent = d.total_projects;
+    $('k-projects-sub').textContent = '';
+
+    // Provider donut
+    const provData = d.by_provider.map(p => ({
+      label: p.provider, value: p.input_tokens + p.output_tokens, color: PCOLORS[p.provider]||'#8B8B94'
+    })).filter(p => p.value > 0);
+    renderDonut('ch-provider', provData, v => fmtN(v) + ' tok');
+
+    // Event types donut
+    const typeData = d.by_type.map((t,i) => ({
+      label: t.type, value: t.count, color: TCOLORS[t.type] || PALETTE[i%PALETTE.length]
+    }));
+    renderDonut('ch-types', typeData, v => fmtN(v));
+
+    // Tools bar
+    renderBars('ch-tools', d.by_tool.map(t => ({ label:t.name, value:t.count })), var_orange);
+
+    // Projects bar
+    renderBars('ch-projects', d.by_project.map(p => ({
+      label: p.project, value: p.events, color: PCOLORS[p.provider]
+    })));
+
+    // Models donut
+    const modelData = d.by_model.map((m,i) => ({
+      label: shortModel(m.model), value: m.count, color: PALETTE[i%PALETTE.length]
+    }));
+    renderDonut('ch-models', modelData, v => fmtN(v));
+
+    // Hourly area chart
+    renderAreaChart('ch-hourly', d.hourly);
+
+    // Cache gauge
+    const totalCacheOps = inTok + cached;
+    const cacheRate = totalCacheOps > 0 ? (cached / totalCacheOps * 100) : 0;
+    renderGauge('ch-cache', cacheRate, inTok, outTok, cached);
+  }
+
+  // ── SVG Donut Chart ──
+  function renderDonut(containerId, data, fmtValue) {
+    const el = $(containerId);
+    if (!data.length) { el.innerHTML = '<div style="color:var(--muted);font-size:11px;text-align:center;padding:20px">Sin datos</div>'; return; }
+
+    const total = data.reduce((s,d) => s + d.value, 0);
+    const R = 54, r = 38, cx = 64, cy = 64;
+    let angle = -90;
+
+    let paths = '';
+    for (const d of data) {
+      const pct = d.value / total;
+      const a1 = angle * Math.PI / 180;
+      angle += pct * 360;
+      const a2 = angle * Math.PI / 180;
+      const large = pct > 0.5 ? 1 : 0;
+      const x1o = cx + R * Math.cos(a1), y1o = cy + R * Math.sin(a1);
+      const x2o = cx + R * Math.cos(a2), y2o = cy + R * Math.sin(a2);
+      const x1i = cx + r * Math.cos(a2), y1i = cy + r * Math.sin(a2);
+      const x2i = cx + r * Math.cos(a1), y2i = cy + r * Math.sin(a1);
+      paths += `<path d="M${x1o},${y1o} A${R},${R} 0 ${large} 1 ${x2o},${y2o} L${x1i},${y1i} A${r},${r} 0 ${large} 0 ${x2i},${y2i} Z" fill="${d.color}" opacity="0.85"/>`;
+    }
+
+    const svg = `<svg width="128" height="128" viewBox="0 0 128 128">${paths}<text x="${cx}" y="${cy-2}" text-anchor="middle" fill="#D4D4D8" font-size="14" font-weight="700" font-family="monospace">${fmtN(total)}</text><text x="${cx}" y="${cy+12}" text-anchor="middle" fill="#8B8B94" font-size="8" font-family="monospace">total</text></svg>`;
+
+    let legend = '<div class="donut-legend">';
+    for (const d of data) {
+      const pct = ((d.value / total) * 100).toFixed(1);
+      legend += `<div class="legend-item"><span class="legend-dot" style="background:${d.color}"></span><span>${esc(d.label)}</span><span class="legend-val">${fmtValue(d.value)} (${pct}%)</span></div>`;
+    }
+    legend += '</div>';
+
+    el.innerHTML = svg + legend;
+  }
+
+  // ── CSS Bar Chart ──
+  const var_orange = '#D4A054';
+  function renderBars(containerId, data, defaultColor) {
+    const el = $(containerId);
+    if (!data.length) { el.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:10px">Sin datos</div>'; return; }
+    const max = Math.max(...data.map(d => d.value));
+    let html = '';
+    for (const d of data.slice(0, 12)) {
+      const pct = Math.max(2, (d.value / max) * 100);
+      const color = d.color || defaultColor || '#C8B88A';
+      html += `<div class="bar-row"><span class="bar-label" title="${esc(d.label)}">${esc(d.label)}</span><div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div><span class="bar-count">${fmtN(d.value)}</span></div>`;
+    }
+    el.innerHTML = html;
+  }
+
+  // ── SVG Area Chart ──
+  function renderAreaChart(containerId, hourly) {
+    const el = $(containerId);
+    if (!hourly || !hourly.length) { el.innerHTML = '<div style="color:var(--muted);font-size:11px;text-align:center;padding:30px">Sin datos de actividad horaria</div>'; return; }
+
+    const W = 900, H = 140, pad = { t:10, r:10, b:25, l:45 };
+    const w = W - pad.l - pad.r, h = H - pad.t - pad.b;
+    const n = hourly.length;
+    const maxVal = Math.max(1, ...hourly.map(h => h.total));
+
+    const x = i => pad.l + (i / Math.max(1, n-1)) * w;
+    const y = v => pad.t + h - (v / maxVal) * h;
+
+    // Stacked areas: claude bottom, codex middle, qwen top
+    const providers = ['claude','codex','qwen'];
+    const colors = { claude:'rgba(88,166,255,0.4)', codex:'rgba(63,185,80,0.4)', qwen:'rgba(227,179,65,0.4)' };
+    const strokes = { claude:'#C8B88A', codex:'#7A9E7E', qwen:'#D4B85C' };
+
+    let svgContent = '';
+
+    // Grid lines
+    for (let i = 0; i <= 4; i++) {
+      const gy = pad.t + (h / 4) * i;
+      const val = Math.round(maxVal * (4 - i) / 4);
+      svgContent += `<line x1="${pad.l}" y1="${gy}" x2="${W-pad.r}" y2="${gy}" stroke="#2A2A30" stroke-width="0.5"/>`;
+      svgContent += `<text x="${pad.l-6}" y="${gy+3}" text-anchor="end" fill="#8B8B94" font-size="9" font-family="monospace">${fmtN(val)}</text>`;
+    }
+
+    // X labels (show ~8 labels)
+    const step = Math.max(1, Math.floor(n / 8));
+    for (let i = 0; i < n; i += step) {
+      const label = hourly[i].hour.slice(11, 13) + 'h';
+      svgContent += `<text x="${x(i)}" y="${H-4}" text-anchor="middle" fill="#8B8B94" font-size="9" font-family="monospace">${label}</text>`;
+    }
+
+    // Draw stacked
+    for (const prov of providers) {
+      const vals = hourly.map(h => h[prov] || 0);
+      if (vals.every(v => v === 0)) continue;
+
+      let path = `M${x(0)},${y(vals[0])}`;
+      for (let i = 1; i < n; i++) path += ` L${x(i)},${y(vals[i])}`;
+      // Close for area
+      const area = path + ` L${x(n-1)},${y(0)} L${x(0)},${y(0)} Z`;
+      svgContent += `<path d="${area}" fill="${colors[prov]}"/>`;
+      svgContent += `<path d="${path}" fill="none" stroke="${strokes[prov]}" stroke-width="1.5"/>`;
+    }
+
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${svgContent}</svg>`;
+  }
+
+  // ── SVG Gauge Ring ──
+  function renderGauge(containerId, pct, input, output, cached) {
+    const el = $(containerId);
+    const R = 48, stroke = 10, cx = 58, cy = 58;
+    const circ = 2 * Math.PI * R;
+    const offset = circ * (1 - pct / 100);
+    const color = pct > 70 ? '#7A9E7E' : pct > 40 ? '#D4A054' : '#D4645C';
+
+    const svg = `<svg width="116" height="116" viewBox="0 0 116 116">
+      <circle cx="${cx}" cy="${cy}" r="${R}" fill="none" stroke="#1E1E24" stroke-width="${stroke}"/>
+      <circle cx="${cx}" cy="${cy}" r="${R}" fill="none" stroke="${color}" stroke-width="${stroke}"
+        stroke-dasharray="${circ}" stroke-dashoffset="${offset}" stroke-linecap="round"
+        transform="rotate(-90 ${cx} ${cy})" style="transition:stroke-dashoffset .6s ease"/>
+      <text x="${cx}" y="${cy-4}" text-anchor="middle" fill="${color}" font-size="18" font-weight="700" font-family="monospace">${pct.toFixed(1)}%</text>
+      <text x="${cx}" y="${cy+12}" text-anchor="middle" fill="#8B8B94" font-size="8" font-family="monospace">cache hit</text>
+    </svg>`;
+
+    const stats = `<div class="gauge-stats">
+      <div class="gauge-stat"><span>Input tokens</span><span>${fmtN(input)}</span></div>
+      <div class="gauge-stat"><span>Output tokens</span><span>${fmtN(output)}</span></div>
+      <div class="gauge-stat"><span>Cached</span><span>${fmtN(cached)}</span></div>
+      <div class="gauge-stat"><span>Total</span><span>${fmtN(input+output+cached)}</span></div>
+    </div>`;
+
+    el.innerHTML = svg + stats;
+  }
+
+  // ── Helpers ──
+  function fmtN(n) { if(n>=1e9) return (n/1e9).toFixed(1)+'B'; if(n>=1e6) return (n/1e6).toFixed(1)+'M'; if(n>=1e3) return (n/1e3).toFixed(1)+'K'; return ''+n; }
+  function esc(s) { return s?s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'):''; }
+  function shortModel(m) { return m?m.replace('claude-','').replace(/-2025\d{4}/,'').replace('gpt-','').replace('coder-',''):'?'; }
+  function estimateCost(input, output, cached) {
+    // Approximate: $3/1M input, $15/1M output, $0.30/1M cache_read
+    return (input/1e6)*3 + (output/1e6)*15 + (cached/1e6)*0.30;
+  }
+
+  // ── Tab switching ──
+  function setPeriod(p) {
+    period = p;
+    document.querySelectorAll('.tab').forEach(b => b.className = 'tab' + (b.dataset.p===p?' on':''));
+    if (refreshTimer) clearInterval(refreshTimer);
+    loadData();
+    const interval = p === 'live' ? 3000 : 30000;
+    refreshTimer = setInterval(loadData, interval);
+  }
+
+  $('tabs').addEventListener('click', e => {
+    const btn = e.target.closest('.tab');
+    if (btn) setPeriod(btn.dataset.p);
+  });
+
+  // ── Report generation ──
+  $('btn-report').addEventListener('click', async function() {
+    const btn = this;
+    btn.textContent = 'Generating...';
+    btn.style.color = '#D4A054';
+    btn.disabled = true;
+    try {
+      await fetch('/api/generate-reports');
+      const poll = setInterval(async () => {
+        const r = await fetch('/api/report-status').then(r=>r.json());
+        if (r.status === 'done') {
+          clearInterval(poll);
+          btn.textContent = r.projects + ' projects exported';
+          btn.style.color = '#7A9E7E';
+          setTimeout(() => { btn.textContent = 'Export Reports'; btn.style.color = '#5CA8A0'; btn.disabled = false; }, 4000);
+        } else if (r.status === 'error') {
+          clearInterval(poll);
+          btn.textContent = 'Error!'; btn.style.color = '#D4645C';
+          setTimeout(() => { btn.textContent = 'Export Reports'; btn.style.color = '#5CA8A0'; btn.disabled = false; }, 4000);
+        }
+      }, 2000);
+    } catch(e) {
+      btn.textContent = 'Error'; btn.style.color = '#D4645C';
+      setTimeout(() => { btn.textContent = 'Export Reports'; btn.style.color = '#5CA8A0'; btn.disabled = false; }, 3000);
+    }
+  });
+
+  // ── Init ──
+  loadData();
+  refreshTimer = setInterval(loadData, 3000);
+})();
+</script>
+</body>
+</html>

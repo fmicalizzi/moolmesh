@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoolMesh</title>
+<style>
+  :root {
+    --bg: #0C0C0E;
+    --bg-secondary: #14141A;
+    --bg-tertiary: #1E1E24;
+    --border: #2A2A30;
+    --text: #D4D4D8;
+    --text-muted: #8B8B94;
+    --accent: #C8B88A;
+    --green: #7A9E7E;
+    --orange: #D4A054;
+    --red: #D4645C;
+    --purple: #A88EC8;
+    --yellow: #D4B85C;
+    --cyan: #5CA8A0;
+    --magenta: #B898D8;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  .logo { font-size: 15px; font-weight: 600; color: var(--accent); }
+  .logo span { color: var(--text-muted); font-weight: 400; font-size: 12px; }
+
+  .header-right { display: flex; gap: 16px; align-items: center; }
+
+  .provider-status { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-muted); }
+
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
+  .status-dot.active { animation: pulse 2s infinite; }
+  .status-dot.active.claude { background: var(--accent); }
+  .status-dot.active.codex { background: var(--green); }
+  .status-dot.active.qwen { background: var(--yellow); }
+  .status-dot.active.opencode { background: var(--magenta, #B898D8); }
+
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .conn { font-size: 10px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); }
+  .conn.ok { color: var(--green); border-color: var(--green); }
+  .conn.err { color: var(--red); border-color: var(--red); }
+
+  /* ── Stats Strip ── */
+  .stats-strip {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 6px 20px;
+    display: flex;
+    gap: 20px;
+    flex-shrink: 0;
+    align-items: center;
+  }
+  .stat { display: flex; align-items: baseline; gap: 4px; }
+  .stat-val { font-size: 16px; font-weight: 700; color: var(--accent); }
+  .stat-lbl { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+
+  /* ── Main 2-col layout ── */
+  .main-layout {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+  }
+
+  /* ── Left: Sidebar with project cards + charts ── */
+  .sidebar {
+    width: 340px;
+    min-width: 300px;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .sidebar-section {
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .sidebar-section.scrollable {
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .sidebar-section::-webkit-scrollbar { width: 5px; }
+  .sidebar-section::-webkit-scrollbar-track { background: var(--bg); }
+  .sidebar-section::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .section-title {
+    padding: 8px 14px;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+
+  /* ── Project Cards ── */
+  .project-card {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    cursor: default;
+    transition: background 0.15s;
+  }
+  .project-card:hover { background: var(--bg-secondary); }
+
+  .project-card .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+  }
+
+  .project-card .card-name {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .project-card .card-provider {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    font-weight: 700;
+  }
+
+  .card-provider.claude { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .card-provider.codex { background: rgba(63,185,80,0.15); color: var(--green); }
+  .card-provider.qwen { background: rgba(227,179,65,0.15); color: var(--yellow); }
+  .card-provider.opencode { background: rgba(184,152,216,0.15); color: var(--magenta, #B898D8); }
+
+  .project-card .card-cwd {
+    font-size: 10px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 6px;
+  }
+
+  .project-card .card-stats {
+    display: flex;
+    gap: 12px;
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+
+  .project-card .card-stats strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .project-card .card-bar {
+    margin-top: 6px;
+    height: 3px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .project-card .card-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .card-bar-fill.claude { background: var(--accent); }
+  .card-bar-fill.codex { background: var(--green); }
+  .card-bar-fill.qwen { background: var(--yellow); }
+  .card-bar-fill.opencode { background: var(--magenta, #B898D8); }
+
+  /* ── Tool Chart ── */
+  .tool-row {
+    padding: 3px 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+  }
+
+  .tool-name { min-width: 90px; color: var(--text-muted); }
+
+  .tool-bar-wrap {
+    flex: 1;
+    height: 12px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .tool-bar {
+    height: 100%;
+    background: var(--orange);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+    min-width: 2px;
+  }
+
+  .tool-count { font-size: 10px; color: var(--text-muted); min-width: 30px; text-align: right; }
+
+  /* ── Provider Tokens Mini Chart ── */
+  .provider-tokens {
+    padding: 8px 14px;
+    display: flex;
+    gap: 12px;
+  }
+
+  .pt-item {
+    flex: 1;
+    text-align: center;
+  }
+
+  .pt-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; }
+  .pt-val { font-size: 14px; font-weight: 700; }
+  .pt-val.claude { color: var(--accent); }
+  .pt-val.codex { color: var(--green); }
+  .pt-val.qwen { color: var(--yellow); }
+  .pt-val.opencode { color: var(--magenta, #B898D8); }
+
+  .pt-bar { height: 4px; border-radius: 2px; margin-top: 3px; background: var(--bg-tertiary); overflow: hidden; }
+  .pt-bar-fill { height: 100%; border-radius: 2px; }
+  .pt-bar-fill.claude { background: var(--accent); }
+  .pt-bar-fill.codex { background: var(--green); }
+  .pt-bar-fill.qwen { background: var(--yellow); }
+  .pt-bar-fill.opencode { background: var(--magenta, #B898D8); }
+
+  /* ── Right: Feed ── */
+  .feed-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .feed-header {
+    padding: 6px 16px;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+  }
+
+  .filters { display: flex; gap: 6px; align-items: center; }
+
+  .fbtn {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .fbtn:hover { border-color: var(--text-muted); }
+  .fbtn.on { color: var(--text); border-color: var(--accent); background: rgba(88,166,255,0.1); }
+  .fbtn.on-claude { border-color: var(--accent); color: var(--accent); }
+  .fbtn.on-codex { border-color: var(--green); color: var(--green); }
+  .fbtn.on-qwen { border-color: var(--yellow); color: var(--yellow); }
+  .fbtn.on-opencode { border-color: var(--magenta, #B898D8); color: var(--magenta, #B898D8); }
+
+  #feed {
+    flex: 1;
+    overflow-y: auto;
+    padding: 2px 0;
+  }
+
+  #feed::-webkit-scrollbar { width: 5px; }
+  #feed::-webkit-scrollbar-track { background: var(--bg); }
+  #feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .ev {
+    padding: 3px 16px;
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    transition: background 0.1s;
+    font-size: 12px;
+  }
+  .ev:hover { background: var(--bg-secondary); }
+  .ev-new { animation: fadeIn 0.25s ease; }
+  .ev.hidden { display: none; }
+
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; } }
+
+  .ev .time { color: var(--text-muted); font-size: 10px; white-space: nowrap; min-width: 55px; }
+  .ev .prov { font-size: 9px; padding: 0 5px; border-radius: 3px; text-transform: uppercase; font-weight: 700; min-width: 46px; text-align: center; }
+  .prov.claude { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .prov.codex { background: rgba(63,185,80,0.15); color: var(--green); }
+  .prov.qwen { background: rgba(227,179,65,0.15); color: var(--yellow); }
+  .prov.opencode { background: rgba(184,152,216,0.15); color: var(--magenta, #B898D8); }
+  .ev .proj { font-size: 9px; color: var(--cyan); border: 1px solid rgba(57,210,192,0.25); background: rgba(57,210,192,0.06); padding: 0 5px; border-radius: 3px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ev .etype { font-size: 10px; min-width: 65px; }
+  .t-user { color: var(--accent); }
+  .t-assistant { color: var(--green); }
+  .t-tool_use { color: var(--orange); }
+  .t-tool_result { color: var(--cyan); }
+  .t-thinking { color: var(--purple); }
+  .t-system { color: var(--text-muted); }
+  .t-summary { color: var(--text-muted); }
+  .ev .sum { color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ev .mdl { color: var(--text-muted); font-size: 9px; white-space: nowrap; }
+
+  .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); gap: 10px; }
+  .empty-state .icon { font-size: 40px; opacity: 0.2; }
+
+  /* ── Activity mini-timeline ── */
+  .mini-timeline {
+    padding: 8px 14px;
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 50px;
+  }
+
+  .tl-bar {
+    flex: 1;
+    background: var(--bg-tertiary);
+    border-radius: 1px;
+    min-height: 2px;
+    transition: height 0.2s;
+    position: relative;
+  }
+
+  .tl-bar .tl-claude { background: var(--accent); }
+  .tl-bar .tl-codex { background: var(--green); }
+  .tl-bar .tl-qwen { background: var(--yellow); }
+  .tl-bar .tl-opencode { background: var(--magenta, #B898D8); }
+
+  .tl-segment {
+    width: 100%;
+    border-radius: 1px;
+    min-height: 1px;
+  }
+
+  @media (max-width: 800px) {
+    .sidebar { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<nav style="background:#14141A; border-bottom:1px solid #2A2A30; padding:8px 20px; display:flex; gap:16px; font-size:13px;">
+  <a href="/" style="color:#C8B88A; text-decoration:none; font-weight:600;">Sesiones AI</a>
+  <a href="/analytics" style="color:#8B8B94; text-decoration:none;">Analytics</a>
+  <a href="/projects" style="color:#8B8B94; text-decoration:none;">Project Pulse</a>
+  <a href="/timeline" style="color:#8B8B94; text-decoration:none;">Code Timeline</a>
+</nav>
+
+<header>
+  <div class="logo">MoolMesh <span>v1.4</span> <button id="btn-report" onclick="genReports()" style="color:var(--cyan);font-size:11px;margin-left:12px;background:none;border:1px solid rgba(57,210,192,0.3);padding:1px 8px;border-radius:10px;font-family:inherit;cursor:pointer">Export Reports</button></div>
+  <div class="header-right">
+    <div class="provider-status"><div class="status-dot" id="dot-claude"></div><span>Claude</span></div>
+    <div class="provider-status"><div class="status-dot" id="dot-codex"></div><span>Codex</span></div>
+    <div class="provider-status"><div class="status-dot" id="dot-qwen"></div><span>Qwen</span></div>
+    <div class="provider-status"><div class="status-dot" id="dot-opencode"></div><span>OpenCode</span></div>
+    <div class="conn err" id="conn">disconnected</div>
+  </div>
+</header>
+
+<div class="stats-strip">
+  <div class="stat"><span class="stat-val" id="s-events">0</span><span class="stat-lbl">events</span></div>
+  <div class="stat"><span class="stat-val" id="s-in">0</span><span class="stat-lbl">input tok</span></div>
+  <div class="stat"><span class="stat-val" id="s-out">0</span><span class="stat-lbl">output tok</span></div>
+  <div class="stat"><span class="stat-val" id="s-tools">0</span><span class="stat-lbl">tools</span></div>
+  <div class="stat"><span class="stat-val" id="s-proj">0</span><span class="stat-lbl">projects</span></div>
+  <div class="stat"><span class="stat-val" id="s-files">0</span><span class="stat-lbl">watched</span></div>
+  <div class="stat"><span class="stat-val" id="s-stored" style="color:var(--cyan)">0</span><span class="stat-lbl">stored</span></div>
+</div>
+
+<div class="main-layout">
+  <!-- ── Sidebar ── -->
+  <div class="sidebar">
+    <!-- Provider token distribution -->
+    <div class="sidebar-section">
+      <div class="section-title">Provider Tokens</div>
+      <div class="provider-tokens" id="pt-chart">
+        <div class="pt-item"><div class="pt-label">Claude</div><div class="pt-val claude" id="pt-claude">0</div><div class="pt-bar"><div class="pt-bar-fill claude" id="ptb-claude" style="width:0"></div></div></div>
+        <div class="pt-item"><div class="pt-label">Codex</div><div class="pt-val codex" id="pt-codex">0</div><div class="pt-bar"><div class="pt-bar-fill codex" id="ptb-codex" style="width:0"></div></div></div>
+        <div class="pt-item"><div class="pt-label">Qwen</div><div class="pt-val qwen" id="pt-qwen">0</div><div class="pt-bar"><div class="pt-bar-fill qwen" id="ptb-qwen" style="width:0"></div></div></div>
+        <div class="pt-item"><div class="pt-label">OpenCode</div><div class="pt-val opencode" id="pt-opencode">0</div><div class="pt-bar"><div class="pt-bar-fill opencode" id="ptb-opencode" style="width:0"></div></div></div>
+      </div>
+    </div>
+
+    <!-- Activity Timeline -->
+    <div class="sidebar-section">
+      <div class="section-title">Activity (last 60s)</div>
+      <div class="mini-timeline" id="timeline"></div>
+    </div>
+
+    <!-- Top Tools -->
+    <div class="sidebar-section" id="tools-section" style="max-height:140px;overflow-y:auto">
+      <div class="section-title">Top Tools</div>
+      <div id="tools-chart"></div>
+    </div>
+
+    <!-- Active Projects -->
+    <div class="sidebar-section scrollable">
+      <div class="section-title">Active Projects <span id="proj-count"></span></div>
+      <div id="projects"></div>
+    </div>
+  </div>
+
+  <!-- ── Feed ── -->
+  <div class="feed-area">
+    <div class="feed-header">
+      <div class="filters">
+        <span>Live Feed</span>
+        <button class="fbtn on" data-f="all" onclick="setFilter('all')">All</button>
+        <button class="fbtn" data-f="claude" onclick="setFilter('claude')">Claude</button>
+        <button class="fbtn" data-f="codex" onclick="setFilter('codex')">Codex</button>
+        <button class="fbtn" data-f="qwen" onclick="setFilter('qwen')">Qwen</button>
+        <button class="fbtn" data-f="opencode" onclick="setFilter('opencode')">OpenCode</button>
+      </div>
+      <span id="feed-count">0</span>
+    </div>
+    <div id="feed">
+      <div class="empty-state" id="empty">
+        <div class="icon">&#9678;</div>
+        <p>Waiting for agent activity...</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  const S = { events:0, inTok:0, outTok:0, tools:0, providers:new Set(), projects:new Set() };
+  const MAX_FEED = 200;
+  let autoScroll = true, feedN = 0, filter = 'all';
+  let maxEventId = 0;  // highest event ID seen — used for SSE dedup
+
+  const $ = id => document.getElementById(id);
+  const feed = $('feed'), empty = $('empty'), conn = $('conn');
+
+  // ── SSE with Last-Event-ID replay ──
+  function connectSSE() {
+    const url = maxEventId ? '/api/events?last_id=' + maxEventId : '/api/events';
+    const src = new EventSource(url);
+    src.onopen = () => { conn.textContent = 'connected'; conn.className = 'conn ok'; };
+    src.onmessage = e => {
+      try {
+        const ev = JSON.parse(e.data);
+        // Dedup: skip events already rendered from snapshot
+        if (ev.id && ev.id <= maxEventId) return;
+        if (ev.id && ev.id > maxEventId) maxEventId = ev.id;
+        addEvent(ev); trackStats(ev);
+      } catch(_){}
+    };
+    src.onerror = () => { conn.textContent = 'reconnecting...'; conn.className = 'conn err'; };
+  }
+
+  async function loadRecent() {
+    try {
+      const r = await fetch('/api/recent');
+      const data = await r.json();
+      // Supports both new {events, max_id} format and legacy array
+      const events = Array.isArray(data) ? data : (data.events || []);
+      if (data.max_id) maxEventId = data.max_id;
+      for (const ev of events) {
+        if (ev.id && ev.id > maxEventId) maxEventId = ev.id;
+        addEvent(ev, false); trackStats(ev);
+      }
+    } catch(_){}
+  }
+
+  // ── Event ──
+  function addEvent(ev, anim=true) {
+    if (empty.parentNode === feed) feed.removeChild(empty);
+    const d = document.createElement('div');
+    d.className = 'ev' + (anim ? ' ev-new' : '') + (filter!=='all' && ev.provider!==filter ? ' hidden' : '');
+    d.dataset.provider = ev.provider;
+    const t = fmtTime(ev.timestamp);
+    const m = ev.model ? shortMdl(ev.model) : '';
+    d.innerHTML =
+      '<span class="time">' + t + '</span>' +
+      '<span class="prov ' + ev.provider + '">' + ev.provider + '</span>' +
+      (ev.project ? '<span class="proj">' + esc(ev.project) + '</span>' : '') +
+      '<span class="etype t-' + ev.event_type + '">' + ev.event_type + '</span>' +
+      '<span class="sum">' + esc(ev.summary) + '</span>' +
+      (m ? '<span class="mdl">' + m + '</span>' : '');
+    feed.appendChild(d);
+    feedN++;
+    $('feed-count').textContent = feedN + ' events';
+    if (autoScroll) d.scrollIntoView({ behavior:'smooth', block:'end' });
+    while (feed.children.length > MAX_FEED) { feed.removeChild(feed.firstChild); feedN--; }
+  }
+
+  function trackStats(ev) {
+    S.events++;
+    if (ev.tokens) { S.inTok += ev.tokens.input||0; S.outTok += ev.tokens.output||0; }
+    if (ev.tool_name) S.tools++;
+    if (ev.provider) S.providers.add(ev.provider);
+    if (ev.project) S.projects.add(ev.provider+':'+ev.project);
+    $('s-events').textContent = fmtN(S.events);
+    $('s-in').textContent = fmtN(S.inTok);
+    $('s-out').textContent = fmtN(S.outTok);
+    $('s-tools').textContent = fmtN(S.tools);
+    $('s-proj').textContent = S.projects.size;
+    for (const p of S.providers) {
+      const dot = $('dot-'+p);
+      if (dot) dot.className = 'status-dot active ' + p;
+    }
+  }
+
+  // ── Filter ──
+  window.setFilter = function(f) {
+    filter = f;
+    document.querySelectorAll('.fbtn').forEach(b => {
+      b.className = 'fbtn' + (b.dataset.f===f ? ' on' + (f!=='all'?'-'+f:'') : '');
+    });
+    document.querySelectorAll('#feed .ev').forEach(el => {
+      el.classList.toggle('hidden', f!=='all' && el.dataset.provider!==f);
+    });
+  };
+
+  // ── Sidebar polling (every 3s) ──
+  async function refreshSidebar() {
+    try {
+      const [sessions, tools, ptokens, stats] = await Promise.all([
+        fetch('/api/sessions').then(r=>r.json()),
+        fetch('/api/tools').then(r=>r.json()),
+        fetch('/api/provider-tokens').then(r=>r.json()),
+        fetch('/api/stats').then(r=>r.json()),
+      ]);
+
+      // Watched files + stored events
+      $('s-files').textContent = fmtN(stats.watched_files || 0);
+      // Fetch DB stats for stored count
+      try {
+        const db = await fetch('/api/db-stats').then(r=>r.json());
+        $('s-stored').textContent = fmtN(db.total_events || 0);
+      } catch(_){}
+
+      // Projects
+      renderProjects(sessions);
+
+      // Tools
+      renderTools(tools);
+
+      // Provider tokens
+      renderProviderTokens(ptokens);
+
+    } catch(_){}
+    setTimeout(refreshSidebar, 3000);
+  }
+
+  function renderProjects(sessions) {
+    const c = $('projects');
+    $('proj-count').textContent = '(' + sessions.length + ')';
+    c.innerHTML = '';
+    for (const s of sessions.slice(0, 20)) {
+      const cwd = s.cwd || '';
+      const shortCwd = cwd.length > 45 ? '...' + cwd.slice(-42) : cwd;
+      const totalTok = (s.input_tokens||0) + (s.output_tokens||0);
+      const lastAgo = timeAgo(s.last_event);
+      const div = document.createElement('div');
+      div.className = 'project-card';
+      div.innerHTML =
+        '<div class="card-header">' +
+          '<span class="card-name"><span class="card-provider ' + s.provider + '">' + s.provider + '</span> ' + esc(s.project) + '</span>' +
+          '<span style="font-size:10px;color:var(--text-muted)">' + lastAgo + '</span>' +
+        '</div>' +
+        '<div class="card-cwd" title="' + esc(cwd) + '">' + esc(shortCwd) + '</div>' +
+        '<div class="card-stats">' +
+          '<span><strong>' + fmtN(s.events) + '</strong> events</span>' +
+          '<span><strong>' + fmtN(totalTok) + '</strong> tokens</span>' +
+          '<span><strong>' + s.tool_calls + '</strong> tools</span>' +
+          (s.models.length ? '<span>' + s.models.map(shortMdl).join(', ') + '</span>' : '') +
+        '</div>' +
+        '<div class="card-bar"><div class="card-bar-fill ' + s.provider + '" style="width:' + Math.min(100, (s.events/Math.max(1,sessions[0].events))*100) + '%"></div></div>';
+      c.appendChild(div);
+    }
+  }
+
+  function renderTools(tools) {
+    const c = $('tools-chart');
+    if (!tools.length) { c.innerHTML = '<div style="padding:8px 14px;color:var(--text-muted);font-size:11px">No tool calls yet</div>'; return; }
+    const max = tools[0].count;
+    c.innerHTML = '';
+    for (const t of tools.slice(0, 8)) {
+      const pct = Math.max(3, (t.count/max)*100);
+      c.innerHTML +=
+        '<div class="tool-row">' +
+          '<span class="tool-name">' + esc(t.name) + '</span>' +
+          '<div class="tool-bar-wrap"><div class="tool-bar" style="width:' + pct + '%"></div></div>' +
+          '<span class="tool-count">' + t.count + '</span>' +
+        '</div>';
+    }
+  }
+
+  function renderProviderTokens(pt) {
+    const providers = ['claude','codex','qwen','opencode'];
+    let total = 0;
+    const vals = {};
+    for (const p of providers) {
+      const v = (pt[p]||{});
+      vals[p] = (v.input||0) + (v.output||0);
+      total += vals[p];
+    }
+    total = Math.max(1, total);
+    for (const p of providers) {
+      $('pt-'+p).textContent = fmtN(vals[p]);
+      $('ptb-'+p).style.width = Math.max(0, (vals[p]/total)*100) + '%';
+    }
+  }
+
+  // ── Activity timeline ──
+  let tlData = [];
+  function trackTimeline(ev) {
+    const now = Date.now()/1000;
+    tlData.push({ t: now, p: ev.provider });
+    // keep last 60s
+    const cutoff = now - 60;
+    tlData = tlData.filter(d => d.t >= cutoff);
+    renderTimeline();
+  }
+
+  function renderTimeline() {
+    const tl = $('timeline');
+    if (!tlData.length) return;
+    const now = Date.now()/1000;
+    const bins = 30; // 30 bars = 2s each
+    const provs = ['claude','codex','qwen','opencode'];
+    const counts = Array.from({length:bins}, () => ({claude:0, codex:0, qwen:0, opencode:0}));
+    for (const d of tlData) {
+      const age = now - d.t;
+      const idx = Math.min(bins-1, Math.floor(age/2));
+      counts[bins-1-idx][d.p] = (counts[bins-1-idx][d.p]||0) + 1;
+    }
+    const maxC = Math.max(1, ...counts.map(c => provs.reduce((s,p)=>s+(c[p]||0),0)));
+    tl.innerHTML = '';
+    for (const c of counts) {
+      const total = provs.reduce((s,p)=>s+(c[p]||0),0);
+      const h = Math.max(2, (total/maxC)*36);
+      const bar = document.createElement('div');
+      bar.className = 'tl-bar';
+      bar.style.height = h + 'px';
+      // Stack segments
+      if (total > 0) {
+        for (const [p, n] of provs.map(p=>[p,c[p]||0])) {
+          if (n > 0) {
+            const seg = document.createElement('div');
+            seg.className = 'tl-segment tl-' + p;
+            seg.style.height = Math.max(1, (n/total)*h) + 'px';
+            bar.appendChild(seg);
+          }
+        }
+      }
+      tl.appendChild(bar);
+    }
+  }
+
+  // Override addEvent to also track timeline
+  const origAdd = addEvent;
+  // Wrap trackStats to also update timeline
+  const origTrack = trackStats;
+  trackStats = function(ev) { origTrack(ev); trackTimeline(ev); };
+
+  // ── Scroll ──
+  feed.addEventListener('scroll', () => {
+    autoScroll = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+  });
+
+  // ── Helpers ──
+  function fmtTime(ts) {
+    if (!ts) return '--:--';
+    try { return new Date(ts).toLocaleTimeString('en-GB',{hour12:false}); } catch { return ts.slice(11,19); }
+  }
+  function shortMdl(m) {
+    if (!m) return '';
+    return m.replace('claude-','').replace(/-2025\d{4}/,'').replace('gpt-','');
+  }
+  function fmtN(n) {
+    if (n>=1e6) return (n/1e6).toFixed(1)+'M';
+    if (n>=1e3) return (n/1e3).toFixed(1)+'K';
+    return ''+n;
+  }
+  function esc(s) { return s ? s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') : ''; }
+  function timeAgo(ts) {
+    if (!ts) return '';
+    try {
+      const diff = (Date.now() - new Date(ts).getTime()) / 1000;
+      if (diff < 5) return 'now';
+      if (diff < 60) return Math.floor(diff) + 's ago';
+      if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+      if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+      return Math.floor(diff/86400) + 'd ago';
+    } catch { return ''; }
+  }
+
+  // ── Report generation ──
+  window.genReports = async function() {
+    const btn = $('btn-report');
+    btn.textContent = 'Generating...';
+    btn.style.color = '#D4A054';
+    btn.disabled = true;
+    try {
+      await fetch('/api/generate-reports');
+      const poll = setInterval(async () => {
+        const r = await fetch('/api/report-status').then(r=>r.json());
+        if (r.status === 'done') {
+          clearInterval(poll);
+          btn.textContent = r.projects + ' projects exported';
+          btn.style.color = '#7A9E7E';
+          setTimeout(() => { btn.textContent = 'Export Reports'; btn.style.color = '#5CA8A0'; btn.disabled = false; }, 4000);
+        } else if (r.status === 'error') {
+          clearInterval(poll);
+          btn.textContent = 'Error!';
+          btn.style.color = '#D4645C';
+          setTimeout(() => { btn.textContent = 'Export Reports'; btn.style.color = '#5CA8A0'; btn.disabled = false; }, 4000);
+        }
+      }, 2000);
+    } catch(e) {
+      btn.textContent = 'Error';
+      btn.style.color = '#D4645C';
+      setTimeout(() => { btn.textContent = 'Export Reports'; btn.style.color = '#5CA8A0'; btn.disabled = false; }, 3000);
+    }
+  };
+
+  // ── Init ──
+  loadRecent().then(() => { connectSSE(); refreshSidebar(); });
+  // Refresh timeline every 2s even without events
+  setInterval(renderTimeline, 2000);
+})();
+</script>
+</body>
+</html>

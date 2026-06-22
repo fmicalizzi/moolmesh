@@ -1,0 +1,295 @@
+> [English version](README.md)
+
+# MoolMesh
+
+**La malla de contexto para agentes autónomos.**
+
+Observabilidad unificada, telemetría y coordinación entre agentes — ejecutándose completamente en tu máquina.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
+[![Tests: 509 passing](https://img.shields.io/badge/Tests-509%20passing-green.svg)](#desarrollo)
+[![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#)
+
+---
+
+## ¿Por qué MoolMesh?
+
+El desarrollo de software moderno ya no es humano-contra-teclado. Es un ecosistema de agentes de IA trabajando en paralelo — cada uno con sus propios logs, contadores de tokens y trazas de razonamiento, todos encerrados en silos separados.
+
+Cuando Claude Code se queda atrapado en un bucle, tus otros agentes no lo saben. Cuando gastas tokens en cuatro proveedores, no puedes ver qué commit lo justificó. Cuando tu equipo usa diferentes herramientas de IA en el mismo repositorio, nadie tiene la imagen completa.
+
+**MoolMesh congrega lo que está disperso.** Auto-descubre sesiones de todos los agentes de programación con IA principales, las normaliza en una única base de datos consultable y expone ese estado tanto a humanos (vía dashboard) como a máquinas (vía MCP).
+
+Lee nuestra [Filosofía](PHILOSOPHY.md) para entender el doble axioma detrás de MoolMesh: **Human-First y Agent-First**.
+
+---
+
+## Qué obtienes
+
+Cuatro vistas en una sola pestaña del navegador:
+
+| Vista | Qué muestra |
+|-------|-------------|
+| **AI Sessions** | Feed de eventos en vivo de todos los agentes — mensajes, llamadas a herramientas, uso de tokens, modelos |
+| **Analytics** | Consumo de tokens por proveedor, actividad por hora, herramientas más usadas, proyectos principales |
+| **Project Pulse** | Kanban de PRs, lista de issues, milestones, tablero de GitHub Projects v2 |
+| **Code Timeline** | Feed de commits, estadisticas por autor, archivos calientes, resumenes diarios/semanales |
+
+Además, un **servidor MCP** que permite a otros agentes de IA consultar los datos de sesión programáticamente — habilitando supervisión y orquestación entre agentes.
+
+---
+
+## Inicio rápido
+
+```bash
+# Instalar
+pip install moolmesh
+
+# Iniciar el dashboard
+mool dashboard
+# → abrir http://localhost:5200
+```
+
+Eso es todo. MoolMesh auto-descubre tus sesiones de IA inmediatamente. No requiere configuración.
+
+> **Ejecutar desde el código fuente:**
+> ```bash
+> git clone https://github.com/fmicalizzi/moolmesh.git
+> cd moolmesh
+> python -m venv .venv && source .venv/bin/activate
+> pip install -e ".[dev]"
+> mool dashboard
+> ```
+
+---
+
+## Agentes soportados
+
+| Proveedor | Fuente de sesión | Formato |
+|-----------|-----------------|---------|
+| **Claude Code** | `~/.claude/projects/` | JSONL por sesión + logs de subagentes |
+| **Codex (GPT-5)** | `~/.codex/sessions/` + `state_5.sqlite` | Rollout JSONL + metadatos SQLite |
+| **Qwen CLI** | `~/.qwen/projects/` | JSONL por chat |
+| **OpenCode** | `~/.local/share/opencode/opencode.db` | SQLite (sesion → mensaje → parte) |
+
+Las sesiones se auto-descubren al iniciar. Sin configuración, sin claves API, sin servicios en la nube.
+
+---
+
+## Integracion con Git y GitHub
+
+Registra un repositorio git para desbloquear Project Pulse y Code Timeline:
+
+```bash
+mool repo add /path/to/your/repo
+```
+
+Esto ingesta el historial de commits y comienza a consultar GitHub para issues, PRs, milestones y Projects v2.
+
+```bash
+mool repo list                           # Mostrar repos registrados
+mool repo remove /path/to/repo           # Desregistrar
+mool repo sync /path/to/repo --all       # Re-ingestar historial completo
+```
+
+El token de GitHub se resuelve automáticamente: `gh auth token` → variable de entorno `GITHUB_TOKEN` → `config.toml`. Si usas GitHub CLI, no necesitas configuración extra.
+
+---
+
+## Servidor MCP (API inter-agentes)
+
+MoolMesh expone un servidor MCP de solo lectura vía stdio, permitiendo que cualquier agente compatible con MCP consulte los datos de sesión:
+
+```json
+{
+  "mcpServers": {
+    "moolmesh": {
+      "command": "uv",
+      "args": ["run", "/path/to/moolmesh/hub/mcp_server.py"]
+    }
+  }
+}
+```
+
+Herramientas disponibles:
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `get_recent_events` | Últimos N eventos de todos los proveedores |
+| `get_active_sessions` | Sesiones activas en las últimas N horas |
+| `get_token_usage` | Consumo de tokens por proveedor |
+| `get_tool_stats` | Herramientas más usadas por los agentes de IA |
+| `search_events` | Búsqueda de texto completo en resúmenes de eventos |
+| `get_project_activity` | Resumen completo del proyecto con estadísticas |
+
+Recursos: `hub://schema` (esquema de base de datos), `hub://projects` (lista de proyectos con estadísticas).
+
+El servidor abre SQLite en modo solo lectura (`?mode=ro`). Se ejecuta como un proceso separado (~15-20 MB RAM), independiente del dashboard.
+
+---
+
+## Resúmenes narrativos (Digests)
+
+Code Timeline genera resúmenes diarios y semanales para cada repositorio registrado:
+
+| Nivel | Qué contiene | Cuándo |
+|-------|-------------|--------|
+| **L1** | Estadísticas SQL crudas (commits, PRs, issues, LOC) | Siempre disponible |
+| **L2** | Plantilla estructurada con puntos clave | Siempre disponible |
+| **L3** | Párrafo narrativo generado por LLM | Cuando hay un proveedor LLM configurado |
+
+L3 funciona con cualquier API compatible con OpenAI. Configura en `~/.moolmesh/config.toml`:
+
+```toml
+[llm]
+provider = "openrouter"
+api_url  = "https://openrouter.ai/api/v1"
+model    = "google/gemma-4-31b-it:free"
+api_key  = "sk-or-v1-..."
+```
+
+Proveedores soportados: OpenRouter, OpenAI, Together, Groq, Ollama. Si el LLM no está disponible, los resúmenes caen automáticamente a L2.
+
+---
+
+## Reportes por lotes
+
+Genera reportes de análisis en Markdown desde la línea de comandos:
+
+```bash
+# Reporte automático — escribe en ~/.moolmesh/reports/
+mool report auto
+
+# Contenido completo (sin truncar)
+mool report auto --complete
+
+# Filtrar por proyecto o proveedor
+mool report --project myapp --provider claude --output ./exports
+```
+
+---
+
+## Referencia del CLI
+
+```
+mool <comando> [opciones]
+
+Comandos:
+  dashboard              Iniciar el dashboard de monitoreo en vivo
+  report                 Generar reportes de analisis en Markdown por lotes
+  discover               Listar todos los proyectos de agentes de IA descubiertos
+  repo add PATH          Registrar un repositorio git para monitoreo
+  repo list              Listar repos registrados con conteo de commits
+  repo remove PATH       Desregistrar un repositorio
+  repo sync PATH         Re-ingestar historial de commits
+
+Opciones del dashboard:
+  --port PORT            Puerto del servidor (por defecto: 5200)
+  --host HOST            Host del servidor (por defecto: localhost)
+  --project NAME         Filtrar por nombre de proyecto
+  --providers LIST       Separados por coma: claude,codex,qwen,opencode
+
+Opciones de reportes:
+  --complete             Modo contenido completo: sin truncar
+  --output DIR           Directorio de salida
+  --provider PROVIDER    Filtrar por proveedor
+```
+
+---
+
+## Arquitectura
+
+```
+hub/
+  parsers/         Parsers JSONL + SQLite para cada proveedor
+  adapters/        Normalizar entradas del proveedor → eventos unificados
+  watchers/        Cosechadores de archivos: descubrir → offset → parsear → almacenar → SSE
+  harvesters/      GitHarvester (120s) + GitHubHarvester (15s/60s)
+  integrations/    GitHubClient (REST + GraphQL) + clientes LLM
+  digests/         L1 Stats → L2 Plantilla → L3 Narrativa LLM
+  correlation/     Enlaces AI ↔ Git: Co-Author, refs a issues, timestamps
+  dashboard/       Servidor HTTP + SSE + 4 paginas HTML
+  cache/           EventStore (events.db) + GitStore (github.db)
+  mcp_server.py    Servidor MCP stdio (solo lectura, PEP 723 deps inline)
+  cli.py           Punto de entrada del CLI
+```
+
+### Flujo de datos
+
+1. **Discovery** escanea los directorios de cada proveedor buscando archivos de sesion
+2. **Parsers** leen JSONL o consultan SQLite generando entradas tipadas
+3. **Adapters** normalizan a `UnifiedEvent` con campos comunes
+4. **Watchers** hacen polling incremental, almacenan atomicamente en SQLite y envian via SSE
+5. **Dashboard** sirve el feed en vivo + analytics via HTTP + Server-Sent Events
+
+Todo el estado se persiste en SQLite. Seguro ante crashes, semantica exactly-once via offsets transaccionales.
+
+---
+
+## Persistencia
+
+| Base de datos | Ruta | Contenido |
+|---------------|------|-----------|
+| `events.db` | `~/.moolmesh/events.db` | Eventos de sesiones de IA, offsets de archivos, búfer de replay SSE |
+| `github.db` | `~/.moolmesh/github.db` | Repos, commits, issues, PRs, milestones, resúmenes |
+
+Ambas bases de datos se crean automáticamente. El esquema migra al iniciar.
+
+---
+
+## Confiabilidad
+
+- **SSE sin brechas** — los campos `id:` habilitan reconexion del navegador con replay desde SQLite
+- **Offsets transaccionales** — eventos y posiciones de archivo se actualizan en una sola transaccion
+- **Seguridad ante crashes de Git** — excepciones capturadas por repositorio, timeout de 60s en `git fetch`
+- **ETags de GitHub** — las respuestas 304 no consumen rate limit
+- **Fallback de resúmenes** — LLM no disponible → plantilla L2, sin repos → estadísticas L1
+- **Seguridad WAL de OpenCode** — SQLite solo lectura con timeout, nunca bloquea escrituras de OpenCode
+
+---
+
+## Hoja de ruta
+
+MoolMesh empezó con agentes de programación, pero la visión es más amplia — cualquier agente autónomo que genere señales observables pertenece a la malla.
+
+| Estado | Alcance | Detalles |
+|--------|---------|----------|
+| **Disponible** | Claude Code, Codex (GPT-5), Qwen CLI, OpenCode | Parsing completo de sesiones, monitoreo en vivo, MCP |
+| **Planeado** | Aider, Pi, GitHub Copilot CLI, Antigravity CLI | Adaptadores en progreso — PRs bienvenidos |
+| **Futuro** | Hermes, Odyssey, Goose, propuestas de la comunidad | Abre un issue para proponer un nuevo proveedor |
+| **Visión** | Analytics de uso de modelos cross-repo | Monitorear consumo de tokens y actividad de agentes en los repositorios de una organización |
+
+El objetivo a largo plazo: una capa de observabilidad unificada para cualquier ecosistema de agentes — programación, ops, investigación, orquestación — para que los equipos vean qué hacen sus agentes, qué gastan, y si interfieren entre sí.
+
+---
+
+## Limitaciones
+
+- **Óptimo en macOS, compatible con Linux** — macOS usa `kqueue` para detección instantánea; Linux usa polling (~1s)
+- **Sin autenticación** — el dashboard se vincula a localhost. Usa un proxy inverso para acceso remoto
+- **Diseño mono-usuario** — no está pensado para despliegues multi-usuario o en servidor
+- **Python 3.11+** — utiliza `tomllib` de la biblioteca estandar
+- **Solo GitHub Projects v2** — Projects clasicos (v1) no estan soportados
+
+---
+
+## Desarrollo
+
+```bash
+# Ejecutar todos los tests
+pytest tests/ -v
+
+# Ejecutar con cobertura
+pytest tests/ -v --cov=hub
+```
+
+509 tests. Cero dependencias externas. Python stdlib + SQLite.
+
+Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para las guías de contribución.
+
+---
+
+## Licencia
+
+[MIT](LICENSE) — Tu telemetria es tuya.

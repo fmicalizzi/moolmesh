@@ -1,0 +1,7 @@
+{"type":"session_meta","timestamp":"2026-04-01T10:00:00Z","payload":{"id":"abc123-def456","cwd":"/Users/test/project","cli_version":"0.98.0","model_provider":"openai","source":"vscode"}}
+{"type":"event_msg","timestamp":"2026-04-01T10:00:05Z","payload":{"content":"fix the bug"}}
+{"type":"response_item","timestamp":"2026-04-01T10:00:10Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll fix it"}]}}
+{"type":"response_item","timestamp":"2026-04-01T10:00:15Z","payload":{"type":"function_call","call_id":"fc1","name":"shell","arguments":"{\"command\":\"git diff\"}"}}
+{"type":"response_item","timestamp":"2026-04-01T10:00:20Z","payload":{"type":"function_call_output","call_id":"fc1","output":"diff --git a/main.py b/main.py"}}
+{"type":"response_item","timestamp":"2026-04-01T10:00:25Z","payload":{"type":"reasoning","summary":[{"text":"The bug is in the config parser"}]}}
+{"type":"event_msg","timestamp":"2026-04-01T10:00:30Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"output_tokens":350,"cached_input_tokens":800,"reasoning_output_tokens":120,"total_tokens":2470}}}}

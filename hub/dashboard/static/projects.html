@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Pulse — MoolMesh</title>
+<style>
+  :root {
+    --bg: #0C0C0E; --bg2: #14141A; --bg3: #1E1E24; --border: #2A2A30;
+    --text: #D4D4D8; --muted: #8B8B94; --accent: #C8B88A;
+    --green: #7A9E7E; --orange: #D4A054; --red: #D4645C;
+    --purple: #A88EC8; --yellow: #D4B85C; --cyan: #5CA8A0;
+    --gray: #8B8B94;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:'SF Mono','Cascadia Code','Fira Code',monospace; font-size:13px; line-height:1.5; overflow-x:hidden; }
+
+  /* ── Nav ── */
+  nav { background:var(--bg2); border-bottom:1px solid var(--border); padding:8px 20px; display:flex; gap:16px; font-size:13px; }
+  nav a { color:var(--muted); text-decoration:none; }
+  nav a.active { color:var(--accent); font-weight:600; }
+  nav a:hover { color:var(--text); }
+
+  /* ── Header ── */
+  header { background:var(--bg2); border-bottom:1px solid var(--border); padding:16px 24px; display:flex; align-items:center; justify-content:space-between; }
+  .logo { font-size:15px; font-weight:600; color:var(--accent); }
+  .repo-select { background:var(--bg3); border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:6px; font-family:inherit; font-size:12px; }
+
+  /* ── Stats Cards ── */
+  .stats-row { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; padding:16px 24px; }
+  .stat-card { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:16px; text-align:center; }
+  .stat-val { font-size:28px; font-weight:700; }
+  .stat-val.open { color:var(--green); }
+  .stat-val.prs { color:var(--purple); }
+  .stat-val.milestones { color:var(--orange); }
+  .stat-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; margin-top:4px; }
+
+  /* ── Pipeline Kanban ── */
+  .section { padding:0 24px 16px; }
+  .section-title { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; margin-bottom:12px; }
+  .kanban { display:grid; grid-template-columns:repeat(5,1fr); gap:12px; }
+  .kanban-col { background:var(--bg2); border:1px solid var(--border); border-radius:8px; min-height:200px; }
+  .kanban-header { padding:10px 12px; border-bottom:1px solid var(--border); font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; display:flex; align-items:center; justify-content:space-between; }
+  .kanban-header.draft { color:var(--gray); }
+  .kanban-header.review { color:var(--accent); }
+  .kanban-header.approved { color:var(--green); }
+  .kanban-header.merged { color:var(--purple); }
+  .kanban-header.closed { color:var(--red); }
+  .kanban-count { background:var(--bg3); padding:2px 8px; border-radius:10px; font-size:10px; }
+  .kanban-items { padding:8px; max-height:400px; overflow-y:auto; }
+  .pr-card { background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:10px; margin-bottom:8px; cursor:pointer; transition:border-color .15s; }
+  .pr-card:hover { border-color:var(--muted); }
+  .pr-title { font-size:12px; font-weight:500; margin-bottom:6px; line-height:1.4; }
+  .pr-meta { display:flex; align-items:center; gap:8px; font-size:10px; color:var(--muted); }
+  .pr-number { color:var(--accent); }
+  .pr-author { }
+  .pr-assignees { display:flex; gap:2px; margin-left:auto; }
+  .avatar { width:18px; height:18px; border-radius:50%; background:var(--accent); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:600; }
+
+  /* ── Issues List ── */
+  .issues-list { background:var(--bg2); border:1px solid var(--border); border-radius:8px; max-height:400px; overflow-y:auto; }
+  .issue-row { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--border); }
+  .issue-row:last-child { border-bottom:none; }
+  .issue-icon { width:16px; height:16px; border-radius:50%; flex-shrink:0; }
+  .issue-icon.open { background:var(--green); }
+  .issue-icon.closed { background:var(--red); }
+  .issue-icon.merged { background:var(--purple); }
+  .issue-title { flex:1; font-size:12px; }
+  .issue-number { color:var(--muted); font-size:11px; }
+  .labels { display:flex; gap:4px; }
+  .label { padding:2px 8px; border-radius:10px; font-size:10px; }
+  .issue-state { font-size:10px; color:var(--muted); text-transform:uppercase; }
+
+  /* ── Milestones ── */
+  .milestones-list { background:var(--bg2); border:1px solid var(--border); border-radius:8px; }
+  .milestone-row { padding:14px 16px; border-bottom:1px solid var(--border); }
+  .milestone-row:last-child { border-bottom:none; }
+  .milestone-header { display:flex; align-items:center; gap:12px; margin-bottom:8px; }
+  .milestone-title { font-size:13px; font-weight:500; }
+  .milestone-due { font-size:11px; color:var(--muted); margin-left:auto; }
+  .milestone-progress { height:6px; background:var(--bg3); border-radius:3px; overflow:hidden; margin-bottom:6px; }
+  .milestone-bar { height:100%; background:var(--green); border-radius:3px; transition:width .3s; }
+  .milestone-stats { font-size:10px; color:var(--muted); display:flex; gap:16px; }
+
+  /* ── Project Board ── */
+  .board-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+  .board-col { background:var(--bg2); border:1px solid var(--border); border-radius:8px; min-height:150px; }
+  .board-header { padding:10px 12px; border-bottom:1px solid var(--border); font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+  .board-items { padding:8px; }
+  .board-item { background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:10px; margin-bottom:8px; }
+  .board-item-title { font-size:12px; margin-bottom:4px; }
+  .board-item-type { font-size:10px; color:var(--muted); }
+  .board-item-type.pr { color:var(--purple); }
+  .board-item-type.issue { color:var(--green); }
+
+  /* ── Activity Feed ── */
+  .activity-list { background:var(--bg2); border:1px solid var(--border); border-radius:8px; max-height:300px; overflow-y:auto; }
+  .activity-row { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--border); font-size:11px; }
+  .activity-row:last-child { border-bottom:none; }
+  .activity-time { color:var(--muted); font-size:10px; width:50px; }
+  .activity-icon { width:8px; height:8px; border-radius:50%; }
+  .activity-icon.issue { background:var(--green); }
+  .activity-icon.pr { background:var(--purple); }
+  .activity-text { flex:1; }
+  .activity-repo { color:var(--muted); font-size:10px; }
+
+  /* ── Grid Layout ── */
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:0 24px 24px; }
+  .grid-full { grid-column:1/-1; }
+
+  /* ── Loading ── */
+  .loading { text-align:center; padding:40px; color:var(--muted); }
+  .spinner { display:inline-block; width:20px; height:20px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 1s linear infinite; margin-right:8px; vertical-align:middle; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  /* ── Empty State ── */
+  .empty { text-align:center; padding:40px; color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<nav>
+  <a href="/">Sesiones AI</a>
+  <a href="/analytics">Analytics</a>
+  <a href="/projects" class="active">Project Pulse</a>
+  <a href="/timeline">Code Timeline</a>
+</nav>
+
+<header>
+  <div class="logo">Project Pulse <span style="color:var(--muted);font-weight:400;font-size:12px;">GitHub Issues, PRs & Milestones</span></div>
+  <select class="repo-select" id="repoSelect">
+    <option value="">Cargando repos...</option>
+  </select>
+</header>
+
+<div class="stats-row">
+  <div class="stat-card">
+    <div class="stat-val open" id="openIssues">-</div>
+    <div class="stat-label">Issues Abiertas</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-val prs" id="openPRs">-</div>
+    <div class="stat-label">PRs Abiertos</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-val milestones" id="activeMilestones">-</div>
+    <div class="stat-label">Milestones Activos</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-val" style="color:var(--cyan);" id="projectItems">-</div>
+    <div class="stat-label">Items en Proyecto</div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">Pipeline de Pull Requests</div>
+  <div class="kanban" id="prPipeline">
+    <div class="kanban-col">
+      <div class="kanban-header draft">Borrador <span class="kanban-count" id="countDraft">0</span></div>
+      <div class="kanban-items" id="colDraft"><div class="empty">Sin PRs</div></div>
+    </div>
+    <div class="kanban-col">
+      <div class="kanban-header review">En Review <span class="kanban-count" id="countReview">0</span></div>
+      <div class="kanban-items" id="colReview"><div class="empty">Sin PRs</div></div>
+    </div>
+    <div class="kanban-col">
+      <div class="kanban-header approved">Aprobado <span class="kanban-count" id="countApproved">0</span></div>
+      <div class="kanban-items" id="colApproved"><div class="empty">Sin PRs</div></div>
+    </div>
+    <div class="kanban-col">
+      <div class="kanban-header merged">Mergeado <span class="kanban-count" id="countMerged">0</span></div>
+      <div class="kanban-items" id="colMerged"><div class="empty">Sin PRs</div></div>
+    </div>
+    <div class="kanban-col">
+      <div class="kanban-header closed">Cerrado <span class="kanban-count" id="countClosed">0</span></div>
+      <div class="kanban-items" id="colClosed"><div class="empty">Sin PRs</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <div>
+    <div class="section-title">Issues Recientes</div>
+    <div class="issues-list" id="issuesList">
+      <div class="loading"><span class="spinner"></span>Cargando issues...</div>
+    </div>
+  </div>
+  <div>
+    <div class="section-title">Milestones</div>
+    <div class="milestones-list" id="milestonesList">
+      <div class="loading"><span class="spinner"></span>Cargando milestones...</div>
+    </div>
+  </div>
+</div>
+
+<div class="section grid-full">
+  <div class="section-title">Tablero de Proyecto</div>
+  <div class="board-grid" id="projectBoard">
+    <div class="board-col">
+      <div class="board-header">Todo</div>
+      <div class="board-items" id="boardTodo"><div class="empty">Sin items</div></div>
+    </div>
+    <div class="board-col">
+      <div class="board-header">In Progress</div>
+      <div class="board-items" id="boardInProgress"><div class="empty">Sin items</div></div>
+    </div>
+    <div class="board-col">
+      <div class="board-header">Review</div>
+      <div class="board-items" id="boardReview"><div class="empty">Sin items</div></div>
+    </div>
+    <div class="board-col">
+      <div class="board-header">Done</div>
+      <div class="board-items" id="boardDone"><div class="empty">Sin items</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="section grid-full">
+  <div class="section-title">Actividad Reciente</div>
+  <div class="activity-list" id="activityList">
+    <div class="empty">La actividad aparecerá aquí</div>
+  </div>
+</div>
+
+<script>
+let currentRepoId = null;
+let repos = [];
+let pollIntervals = [];
+
+// Colors for labels
+const labelColors = {
+  'bug': 'var(--red)',
+  'feature': 'var(--green)',
+  'enhancement': 'var(--green)',
+  'docs': 'var(--accent)',
+  'documentation': 'var(--accent)',
+  'good first issue': 'var(--yellow)',
+  'help wanted': 'var(--orange)',
+  'wontfix': 'var(--gray)',
+  'duplicate': 'var(--gray)',
+};
+
+async function loadRepos() {
+  try {
+    const resp = await fetch('/api/repos');
+    repos = await resp.json();
+    const select = document.getElementById('repoSelect');
+    select.innerHTML = repos.length 
+      ? repos.map(r => `<option value="${r.id}">${r.owner}/${r.repo_name}</option>`).join('')
+      : '<option value="">No hay repos registrados</option>';
+    if (repos.length) {
+      currentRepoId = repos[0].id;
+      loadAllData();
+      startPolling();
+    }
+  } catch (e) {
+    console.error('Error cargando repos:', e);
+  }
+}
+
+async function loadAllData() {
+  if (!currentRepoId) return;
+  await Promise.all([
+    loadIssues(),
+    loadPRs(),
+    loadMilestones(),
+    loadProjectBoard(),
+  ]);
+}
+
+async function loadIssues() {
+  try {
+    const resp = await fetch(`/api/github/issues?repo_id=${currentRepoId}&state=open`);
+    const issues = await resp.json();
+    document.getElementById('openIssues').textContent = issues.filter(i => !i.is_pull_request).length;
+    renderIssues(issues);
+  } catch (e) {
+    console.error('Error cargando issues:', e);
+  }
+}
+
+function renderIssues(issues) {
+  const container = document.getElementById('issuesList');
+  if (!issues.length) {
+    container.innerHTML = '<div class="empty">No hay issues</div>';
+    return;
+  }
+  container.innerHTML = issues.slice(0, 20).map(issue => {
+    const labels = Array.isArray(issue.labels) ? issue.labels : JSON.parse(issue.labels || '[]');
+    const isPR = issue.is_pull_request;
+    const state = issue.state === 'closed' ? 'closed' : (isPR && issue.pr_merged_at ? 'merged' : 'open');
+    return `
+      <div class="issue-row">
+        <div class="issue-icon ${state}"></div>
+        <div class="issue-title">${escapeHtml(issue.title)}</div>
+        <div class="labels">
+          ${labels.map(l => `<span class="label" style="background:${labelColors[l.toLowerCase()] || 'var(--bg3)'};color:var(--text);">${escapeHtml(l)}</span>`).join('')}
+        </div>
+        <div class="issue-number">#${issue.number}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function loadPRs() {
+  try {
+    const resp = await fetch(`/api/github/prs?repo_id=${currentRepoId}`);
+    const pipeline = await resp.json();
+    // Guardar para expandir columnas después
+    window._pipelineData = pipeline;
+    const allPRs = Object.values(pipeline).flat();
+    document.getElementById('openPRs').textContent = allPRs.filter(p => ['draft', 'review', 'approved'].includes(p.pr_state)).length;
+    renderPipeline(pipeline);
+  } catch (e) {
+    console.error('Error cargando PRs:', e);
+  }
+}
+
+function renderPipeline(pipeline) {
+  const states = ['draft', 'review', 'approved', 'merged', 'closed'];
+  const stateLabels = { draft: 'Borrador', review: 'En Review', approved: 'Aprobado', merged: 'Mergeado', closed: 'Cerrado' };
+  const MAX_VISIBLE = 15; // Limitar items visibles por columna
+
+  states.forEach(state => {
+    const prs = pipeline[state] || [];
+    document.getElementById(`count${state.charAt(0).toUpperCase() + state.slice(1)}`).textContent = prs.length;
+    const container = document.getElementById(`col${state.charAt(0).toUpperCase() + state.slice(1)}`);
+    if (!prs.length) {
+      container.innerHTML = '<div class="empty">Sin PRs</div>';
+      return;
+    }
+
+    // Mostrar solo los primeros MAX_VISIBLE
+    const visiblePRs = prs.slice(0, MAX_VISIBLE);
+    const hasMore = prs.length > MAX_VISIBLE;
+
+    let html = visiblePRs.map(pr => `
+      <div class="pr-card">
+        <div class="pr-title">${escapeHtml(pr.title)}</div>
+        <div class="pr-meta">
+          <span class="pr-number">#${pr.number}</span>
+          <span class="pr-author">@${escapeHtml(pr.author || 'unknown')}</span>
+          <div class="pr-assignees">
+            ${(pr.assignees || []).slice(0, 3).map(a => `<div class="avatar" title="${escapeHtml(a)}">${a.slice(0,2).toUpperCase()}</div>`).join('')}
+          </div>
+        </div>
+      </div>
+    `).join('');
+
+    // Agregar botón "Ver más" si hay más items
+    if (hasMore) {
+      const remaining = prs.length - MAX_VISIBLE;
+      html += `<div class="empty" style="padding:8px;font-size:11px;cursor:pointer;" onclick="expandColumn('${state}', this)">+ ${remaining} más...</div>`;
+    }
+
+    container.innerHTML = html;
+  });
+}
+
+function expandColumn(state, element) {
+  // Recargar la columna con todos los items
+  // Este es un método simple - recarga todo desde los datos guardados
+  const container = element.parentElement;
+  const allPRs = window._pipelineData?.[state] || [];
+
+  container.innerHTML = allPRs.map(pr => `
+    <div class="pr-card">
+      <div class="pr-title">${escapeHtml(pr.title)}</div>
+      <div class="pr-meta">
+        <span class="pr-number">#${pr.number}</span>
+        <span class="pr-author">@${escapeHtml(pr.author || 'unknown')}</span>
+        <div class="pr-assignees">
+          ${(pr.assignees || []).slice(0, 3).map(a => `<div class="avatar" title="${escapeHtml(a)}">${a.slice(0,2).toUpperCase()}</div>`).join('')}
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function loadMilestones() {
+  try {
+    const resp = await fetch(`/api/github/milestones?repo_id=${currentRepoId}`);
+    const milestones = await resp.json();
+    document.getElementById('activeMilestones').textContent = milestones.filter(m => m.state === 'open').length;
+    renderMilestones(milestones);
+  } catch (e) {
+    console.error('Error cargando milestones:', e);
+  }
+}
+
+function renderMilestones(milestones) {
+  const container = document.getElementById('milestonesList');
+  if (!milestones.length) {
+    container.innerHTML = '<div class="empty">No hay milestones</div>';
+    return;
+  }
+  container.innerHTML = milestones.map(m => {
+    const total = m.open_issues + m.closed_issues;
+    const pct = total ? Math.round((m.closed_issues / total) * 100) : 0;
+    const due = m.due_on ? new Date(m.due_on).toLocaleDateString('es-ES', { month: 'short', day: 'numeric' }) : '';
+    return `
+      <div class="milestone-row">
+        <div class="milestone-header">
+          <div class="milestone-title">${escapeHtml(m.title)}</div>
+          <div class="milestone-due">${due}</div>
+        </div>
+        <div class="milestone-progress">
+          <div class="milestone-bar" style="width:${pct}%"></div>
+        </div>
+        <div class="milestone-stats">
+          <span>${pct}% completo</span>
+          <span>${m.open_issues} abiertas / ${m.closed_issues} cerradas</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function loadProjectBoard() {
+  try {
+    const resp = await fetch(`/api/github/project-board?repo_id=${currentRepoId}`);
+    const board = await resp.json();
+    const allItems = Object.values(board).flat();
+    document.getElementById('projectItems').textContent = allItems.length;
+    renderProjectBoard(board);
+  } catch (e) {
+    console.error('Error cargando project board:', e);
+  }
+}
+
+function renderProjectBoard(board) {
+  const columns = {
+    'Todo': 'boardTodo',
+    'In Progress': 'boardInProgress',
+    'Review': 'boardReview',
+    'Done': 'boardDone',
+  };
+  const MAX_BOARD_ITEMS = 20; // Limitar columna Done
+
+  Object.entries(columns).forEach(([status, elementId]) => {
+    const items = board[status] || [];
+    const container = document.getElementById(elementId);
+    if (!items.length) {
+      container.innerHTML = '<div class="empty">Sin items</div>';
+      return;
+    }
+
+    // Limitar solo la columna Done (histórica)
+    const isDone = status === 'Done';
+    const visibleItems = isDone ? items.slice(0, MAX_BOARD_ITEMS) : items;
+    const hasMore = isDone && items.length > MAX_BOARD_ITEMS;
+
+    let html = visibleItems.map(item => `
+      <div class="board-item">
+        <div class="board-item-title">${escapeHtml(item.title || 'Untitled')}</div>
+        <div class="board-item-type ${item.content_type === 'PullRequest' ? 'pr' : 'issue'}">
+          ${item.content_type === 'PullRequest' ? 'PR' : 'Issue'} ${item.content_number ? `#${item.content_number}` : ''}
+        </div>
+      </div>
+    `).join('');
+
+    if (hasMore) {
+      const remaining = items.length - MAX_BOARD_ITEMS;
+      html += `<div class="empty" style="padding:8px;font-size:11px;">+ ${remaining} más</div>`;
+    }
+
+    container.innerHTML = html;
+  });
+}
+
+function startPolling() {
+  // Clear existing intervals
+  pollIntervals.forEach(clearInterval);
+  pollIntervals = [];
+  
+  // Poll issues/PRs every 15s
+  pollIntervals.push(setInterval(loadIssues, 15000));
+  pollIntervals.push(setInterval(loadPRs, 15000));
+  
+  // Poll milestones/project board every 60s
+  pollIntervals.push(setInterval(loadMilestones, 60000));
+  pollIntervals.push(setInterval(loadProjectBoard, 60000));
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Event listeners
+document.getElementById('repoSelect').addEventListener('change', (e) => {
+  currentRepoId = e.target.value;
+  if (currentRepoId) {
+    loadAllData();
+  }
+});
+
+// Init
+loadRepos();
+</script>
+</body>
+</html>
