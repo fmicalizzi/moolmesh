@@ -3,7 +3,7 @@ name = "moolmesh"
 version = "1.4.0"
 description = "The context mesh for autonomous agents — unified observability, telemetry, and inter-agent coordination"
 requires-python = ">=3.11"
-license = "MIT"
+license = {text = "MIT"}
 dependencies = []
 keywords = ["ai", "agents", "observability", "telemetry", "mcp", "claude", "codex", "opencode", "developer-tools"]
 classifiers = [
@@ -11,7 +11,6 @@ classifiers = [
     "Environment :: Console",
     "Environment :: Web Environment",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3.11",
