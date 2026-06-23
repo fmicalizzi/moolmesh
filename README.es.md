@@ -213,15 +213,21 @@ Comandos:
   daemon stop            Detener el servicio en background
   daemon status          Mostrar PID, uptime, tamaño de log
   daemon restart         Reiniciar el servicio en background
-  status                 Atajo rápido para daemon status
+  status [--json]        Atajo rápido para daemon status
   doctor                 Ejecutar diagnóstico del sistema
   install                Instalar comando mool globalmente (~/.local/bin)
   report                 Generar reportes de análisis en Markdown por lotes
-  discover               Listar todos los proyectos de agentes de IA descubiertos
+  discover [--json]      Listar todos los proyectos de agentes de IA descubiertos
   repo add [PATH]        Registrar un repositorio git (por defecto: directorio actual)
   repo list              Listar repos registrados con conteo de commits
   repo remove [PATH]     Desregistrar un repositorio (por defecto: directorio actual)
   repo sync [PATH]       Re-ingestar historial de commits
+  query events           Eventos recientes como JSON
+  query sessions         Sesiones activas como JSON
+  query tokens           Uso de tokens por proveedor como JSON
+  query tools            Herramientas más usadas como JSON
+  query search TEXTO     Buscar eventos por texto como JSON
+  query project NOMBRE   Resumen de actividad de un proyecto como JSON
 
 Opciones globales:
   --version              Mostrar versión y salir
@@ -237,6 +243,32 @@ Opciones de reportes:
   --output DIR           Directorio de salida
   --provider PROVIDER    Filtrar por proveedor
 ```
+
+### CLI para agentes (`mool query`)
+
+Para agentes sin soporte MCP, `mool query` expone los mismos datos del servidor MCP via JSON en stdout:
+
+```bash
+# Últimos 10 eventos
+mool query events -n 10
+
+# Sesiones activas en las últimas 2 horas
+mool query sessions --hours 2
+
+# Consumo de tokens por proveedor desde una fecha
+mool query tokens --since 2026-06-01
+
+# Herramientas más usadas en un proyecto
+mool query tools --project moolmesh -n 5
+
+# Buscar eventos que mencionen "daemon"
+mool query search "daemon" --provider claude
+
+# Resumen completo de actividad de un proyecto
+mool query project moolmesh
+```
+
+Toda la salida es JSON válido — compatible con `jq`, parseable en cualquier lenguaje, o usable desde llamadas subprocess de agentes. También: `mool status --json` y `mool discover --json` para salida parseable por máquinas.
 
 ### Endpoint de salud
 

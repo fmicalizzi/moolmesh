@@ -212,15 +212,21 @@ Commands:
   daemon stop            Stop the background service
   daemon status          Show daemon PID, uptime, log size
   daemon restart         Restart the background service
-  status                 Quick alias for daemon status
+  status [--json]        Quick alias for daemon status
   doctor                 Run system diagnostics
   install                Install mool command globally (~/.local/bin)
   report                 Generate batch Markdown analysis reports
-  discover               List all discovered AI agent projects
+  discover [--json]      List all discovered AI agent projects
   repo add [PATH]        Register a git repo (default: current directory)
   repo list              List registered repos with commit counts
   repo remove [PATH]     Unregister a repo (default: current directory)
   repo sync [PATH]       Re-ingest commit history
+  query events           Recent events as JSON
+  query sessions         Active sessions as JSON
+  query tokens           Token usage by provider as JSON
+  query tools            Top tools used by agents as JSON
+  query search TEXT      Search events by text as JSON
+  query project NAME     Project activity summary as JSON
 
 Global options:
   --version              Show version and exit
@@ -236,6 +242,32 @@ Report options:
   --output DIR           Output directory
   --provider PROVIDER    Filter by provider
 ```
+
+### Agent-friendly CLI (`mool query`)
+
+For agents that don't have MCP support, `mool query` exposes the same data as the MCP server via stdout JSON:
+
+```bash
+# Get the last 10 events
+mool query events -n 10
+
+# Active sessions in the last 2 hours
+mool query sessions --hours 2
+
+# Token consumption by provider since a date
+mool query tokens --since 2026-06-01
+
+# Top tools used in a project
+mool query tools --project moolmesh -n 5
+
+# Search for events mentioning "daemon"
+mool query search "daemon" --provider claude
+
+# Full project activity summary
+mool query project moolmesh
+```
+
+All output is valid JSON — pipe to `jq`, parse with any language, or use from agent subprocess calls. Also: `mool status --json` and `mool discover --json` for machine-parseable output.
 
 ### Health endpoint
 

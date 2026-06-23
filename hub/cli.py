@@ -88,6 +88,8 @@ def cmd_daemon(args: argparse.Namespace) -> None:
 
 
 def _print_daemon_status() -> None:
+    import json
+    from urllib.request import urlopen
     from hub.daemon import daemon_status
 
     info = daemon_status()
@@ -107,6 +109,24 @@ def _print_daemon_status() -> None:
     print(f"  PID:    {info['pid']}")
     print(f"  Uptime: {uptime_str}")
 
+    # Query the running daemon for live stats
+    try:
+        with urlopen("http://localhost:5200/health", timeout=2) as resp:
+            health = json.loads(resp.read())
+        print(f"  Port:   {5200}")
+        print(f"  Events: {health.get('events_count', 0):,}")
+    except Exception:
+        pass
+
+    # Show monitored repos
+    try:
+        from hub.config import load_config
+        config = load_config()
+        if config.repos:
+            print(f"  Repos:  {', '.join(f'{r.owner}/{r.repo}' for r in config.repos)}")
+    except Exception:
+        pass
+
     log_kb = info.get("log_size", 0) / 1024
     if log_kb > 1024:
         print(dim(f"  Log:    {log_kb / 1024:.1f} MB"))
@@ -115,7 +135,42 @@ def _print_daemon_status() -> None:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    _print_daemon_status()
+    if getattr(args, "json_output", False):
+        _print_daemon_status_json()
+    else:
+        _print_daemon_status()
+
+
+def _print_daemon_status_json() -> None:
+    import json as _json
+    from urllib.request import urlopen
+    from hub.daemon import daemon_status
+
+    info = daemon_status()
+    if info is None:
+        print(_json.dumps({"running": False}))
+        return
+
+    result = {"running": True, "pid": info["pid"], "uptime_seconds": info["uptime_seconds"]}
+
+    try:
+        with urlopen("http://localhost:5200/health", timeout=2) as resp:
+            health = _json.loads(resp.read())
+        result["port"] = 5200
+        result["events_count"] = health.get("events_count", 0)
+        result["version"] = health.get("version")
+    except Exception:
+        pass
+
+    try:
+        from hub.config import load_config
+        config = load_config()
+        if config.repos:
+            result["repos"] = [f"{r.owner}/{r.repo}" for r in config.repos]
+    except Exception:
+        pass
+
+    print(_json.dumps(result))
 
 
 def cmd_report(args: argparse.Namespace) -> None:
@@ -155,6 +210,20 @@ def cmd_discover(args: argparse.Namespace) -> None:
         projects = provider_map[args.provider]()
     else:
         projects = discovery.discover_all()
+
+    if getattr(args, "json_output", False):
+        import json as _json
+        result = [
+            {
+                "provider": p.provider.value,
+                "name": p.name,
+                "path": str(p.path),
+                "session_files": len(p.session_files),
+            }
+            for p in projects
+        ]
+        print(_json.dumps(result))
+        return
 
     if not projects:
         print(yellow("No projects found."))
@@ -351,7 +420,7 @@ exec "{venv_python}" -m hub.cli "$@"
 
 
 def main() -> None:
-    # Raise fd limit — macOS defaults to 256 which is too low for kqueue + SQLite
+    # Raise fd limit — some OS defaults (e.g. macOS 256) are too low for SQLite + many session files
     try:
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -397,7 +466,8 @@ def main() -> None:
     d_restart.add_argument("--providers", help="Comma-separated providers")
 
     # status (shortcut for daemon status)
-    subparsers.add_parser("status", help="Show daemon status")
+    st = subparsers.add_parser("status", help="Show daemon status")
+    st.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
 
     # report
     rep = subparsers.add_parser("report", help="Generate batch analysis report")
@@ -413,6 +483,7 @@ def main() -> None:
     # discover
     disc = subparsers.add_parser("discover", help="List discovered projects")
     disc.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode"], help="Filter by provider")
+    disc.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
 
     # backfill
     bf = subparsers.add_parser("backfill", help="Import historical session data into EventStore")
@@ -444,6 +515,36 @@ def main() -> None:
     repo_sync.add_argument("--all", dest="all_history", action="store_true",
                            help="Ingest full history")
 
+    # query (agent-friendly JSON output)
+    query_parser = subparsers.add_parser("query", help="Query data as JSON (agent-friendly)")
+    query_sub = query_parser.add_subparsers(dest="query_command")
+
+    q_events = query_sub.add_parser("events", help="Recent events")
+    q_events.add_argument("-n", "--limit", type=int, default=50, help="Max events (default: 50, max: 500)")
+
+    q_sessions = query_sub.add_parser("sessions", help="Active sessions")
+    q_sessions.add_argument("--hours", type=int, default=4, help="Lookback window in hours (default: 4)")
+
+    q_tokens = query_sub.add_parser("tokens", help="Token usage by provider")
+    q_tokens.add_argument("--provider", help="Filter by provider")
+    q_tokens.add_argument("--since", help="ISO 8601 date (e.g. 2026-06-22)")
+
+    q_tools = query_sub.add_parser("tools", help="Top tools used by agents")
+    q_tools.add_argument("--project", help="Filter by project (substring)")
+    q_tools.add_argument("--since", help="ISO 8601 date")
+    q_tools.add_argument("-n", "--limit", type=int, default=20, help="Max results (default: 20)")
+
+    q_search = query_sub.add_parser("search", help="Search events by text")
+    q_search.add_argument("text", help="Text to search in event summaries")
+    q_search.add_argument("--provider", help="Filter by provider")
+    q_search.add_argument("--project", help="Filter by project (substring)")
+    q_search.add_argument("--type", dest="event_type", help="Filter by event type")
+    q_search.add_argument("-n", "--limit", type=int, default=50, help="Max results (default: 50)")
+
+    q_project = query_sub.add_parser("project", help="Project activity summary")
+    q_project.add_argument("name", help="Project name (substring match)")
+    q_project.add_argument("--since", help="ISO 8601 date")
+
     # doctor
     subparsers.add_parser("doctor", help="Run system diagnostics")
 
@@ -472,12 +573,52 @@ def main() -> None:
             cmd_backfill(args)
         case "repo":
             cmd_repo(args)
+        case "query":
+            cmd_query(args)
         case "doctor":
             cmd_doctor(args)
         case "install":
             cmd_install(args)
         case _:
             parser.print_help()
+
+
+def cmd_query(args: argparse.Namespace) -> None:
+    import json as _json
+    from hub.mcp_server import (
+        EVENTS_DB,
+        _get_recent_events,
+        _get_active_sessions,
+        _get_token_usage,
+        _get_tool_stats,
+        _search_events,
+        _get_project_activity,
+    )
+
+    match args.query_command:
+        case "events":
+            data = _get_recent_events(EVENTS_DB, args.limit)
+        case "sessions":
+            data = _get_active_sessions(EVENTS_DB, args.hours)
+        case "tokens":
+            data = _get_token_usage(EVENTS_DB, args.provider, args.since)
+        case "tools":
+            data = _get_tool_stats(EVENTS_DB, args.project, args.since, args.limit)
+        case "search":
+            data = _search_events(
+                EVENTS_DB, args.text,
+                provider=args.provider,
+                project=args.project,
+                event_type=args.event_type,
+                limit=args.limit,
+            )
+        case "project":
+            data = _get_project_activity(EVENTS_DB, args.name, args.since)
+        case _:
+            print("Usage: mool query {events|sessions|tokens|tools|search|project}")
+            return
+
+    print(_json.dumps(data, default=str))
 
 
 def cmd_repo(args: argparse.Namespace) -> None:

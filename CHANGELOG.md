@@ -17,6 +17,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 - **`mool repo add` defaults to current directory** — `path` argument is now optional across `add`, `remove`, and `sync`.
 - **`GET /health` endpoint** — returns JSON with status, version, uptime, and event count.
 - **ANSI colors in CLI** (`hub/colors.py`) — TTY-aware colored output with `NO_COLOR` support.
+- **Agent-friendly CLI** (`mool query`) — 6 JSON-output subcommands (`events`, `sessions`, `tokens`, `tools`, `search`, `project`) for agents without MCP. Reuses the same pure functions as the MCP server. Also `--json` flag on `status` and `discover`.
 - **PyPI publishing** — trusted publisher via GitHub Actions OIDC. `pip install moolmesh` works.
 
 ### Added
