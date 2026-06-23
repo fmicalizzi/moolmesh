@@ -308,9 +308,33 @@ class DashboardServer:
         # Start SSE broadcaster (reads from sse_buffer, pushes to clients)
         threading.Thread(target=self._broadcast_sse, daemon=True).start()
 
-        # Start HTTP server (blocking)
+        # Start HTTP server (blocking) — detect existing instance or auto-increment
         handler = self._make_handler()
-        server = http.server.ThreadingHTTPServer((self.host, self.port), handler)
+        server = None
+        for attempt in range(10):
+            try:
+                server = http.server.ThreadingHTTPServer((self.host, self.port), handler)
+                break
+            except OSError:
+                if attempt == 0:
+                    # Check if the port is already running MoolMesh
+                    try:
+                        import json as _json
+                        from urllib.request import urlopen
+                        with urlopen(f"http://{self.host}:{self.port}/health", timeout=2) as resp:
+                            health = _json.loads(resp.read())
+                        if health.get("status") == "healthy":
+                            print(f"\n  MoolMesh is already running on port {self.port}")
+                            print(f"  Dashboard → http://{self.host}:{self.port}")
+                            print("  Use 'mool daemon stop' to stop it, or --port to use a different port.\n")
+                            return
+                    except Exception:
+                        pass
+                    print(f"\n  Port {self.port} in use, trying next...")
+                self.port += 1
+        if server is None:
+            print(f"\n  Could not find an available port. Exiting.")
+            return
         print(f"\n  Dashboard → http://{self.host}:{self.port}")
         print("  Press Ctrl+C to stop\n")
         try:
