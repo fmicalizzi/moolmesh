@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.4.3] — 2026-06-23
+
+### Fixed
+- **systemd compatibility** — `mool daemon start` auto-detects process supervisors (`$INVOCATION_ID`, `$NOTIFY_SOCKET`) and stays in foreground instead of double-forking. `Type=simple` systemd services now work correctly. (#1)
+- **Global install docs** — added "Production Install" section with `pipx install moolmesh` as recommended method and systemd unit file example. (#2)
+
+---
+
 ## [1.4.0] — 2026-06-22
 
 ### Added (DX & Operations)
