@@ -68,6 +68,48 @@ That's it. MoolMesh auto-discovers your AI sessions immediately. No configuratio
 
 ---
 
+## Production Install
+
+For system-wide access (run `mool` from any directory):
+
+```bash
+# Recommended — isolated venv, global binary
+pipx install moolmesh
+
+# Or with pip (requires a venv on modern Python)
+pip install moolmesh
+```
+
+### systemd service (Linux)
+
+Use `mool dashboard` (foreground) as the entry point — MoolMesh auto-detects systemd and skips the double-fork:
+
+```ini
+# ~/.config/systemd/user/moolmesh.service
+[Unit]
+Description=MoolMesh Dashboard
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mool daemon start --port 5200
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now moolmesh
+systemctl --user status moolmesh
+```
+
+> **Note:** `mool daemon start` auto-detects systemd (`$INVOCATION_ID`) and stays in the foreground, so `Type=simple` works correctly. Outside systemd, it double-forks as usual.
+
+---
+
 ## Supported Agents
 
 | Provider | Session source | Format |

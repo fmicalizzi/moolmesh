@@ -28,37 +28,56 @@ def write_pid(pid: int) -> None:
     PID_FILE.write_text(str(pid))
 
 
+def _is_supervised() -> bool:
+    """Detect if running under a process supervisor (systemd, launchd, Docker)."""
+    return bool(os.environ.get("INVOCATION_ID") or os.environ.get("NOTIFY_SOCKET"))
+
+
 def daemonize(host: str, port: int, project_filter: str | None, providers: list[str] | None) -> int:
-    """Double-fork to detach from terminal. Returns child PID to the caller."""
+    """Fork to background, or run foreground if under a process supervisor.
+
+    Returns child PID to the caller (or own PID in supervised mode).
+    """
+    if _is_supervised():
+        return _run_foreground(host, port, project_filter, providers)
+
     pid = os.fork()
     if pid > 0:
-        # First parent — wait briefly for child to write PID, then return it
         time.sleep(0.3)
         return read_pid() or pid
 
-    # First child — new session
     os.setsid()
 
     pid2 = os.fork()
     if pid2 > 0:
         os._exit(0)
 
-    # Second child — the actual daemon
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     write_pid(os.getpid())
 
-    # Redirect stdout/stderr to log file
     log_fd = os.open(str(LOG_FILE), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     os.dup2(log_fd, sys.stdout.fileno())
     os.dup2(log_fd, sys.stderr.fileno())
     os.close(log_fd)
 
-    # Redirect stdin from /dev/null
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, sys.stdin.fileno())
     os.close(devnull)
 
-    # Run the dashboard
+    _run_server(host, port, project_filter, providers)
+    os._exit(0)
+
+
+def _run_foreground(host: str, port: int, project_filter: str | None, providers: list[str] | None) -> int:
+    """Run in foreground for process supervisors (systemd, Docker)."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    write_pid(os.getpid())
+    _run_server(host, port, project_filter, providers)
+    return os.getpid()
+
+
+def _run_server(host: str, port: int, project_filter: str | None, providers: list[str] | None) -> None:
+    """Start the dashboard server with signal handling."""
     from hub.dashboard.server import DashboardServer
     from hub.log import setup
     setup(level="INFO")
@@ -79,8 +98,6 @@ def daemonize(host: str, port: int, project_filter: str | None, providers: list[
         server.start()
     finally:
         PID_FILE.unlink(missing_ok=True)
-
-    os._exit(0)
 
 
 def stop_daemon() -> bool:
