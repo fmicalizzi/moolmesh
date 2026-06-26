@@ -431,7 +431,7 @@ class TestMCPGetSessionEvents:
         store.store_with_offset(events, "fp11", "claude", "/tmp/f.jsonl", 1100)
 
         results = _get_session_events(
-            str(store.db_path), "sess-001", include_full_text=True
+            str(store.db_path), "sess-001", text_mode="full"
         )
         assert len(results) == 1
         assert results[0]["full_text"] == "mcp full text"
@@ -448,7 +448,26 @@ class TestMCPGetSessionEvents:
         store.store_with_offset(events, "fp12", "claude", "/tmp/f.jsonl", 1200)
 
         results = _get_session_events(
-            str(store.db_path), "sess-001", include_full_text=False
+            str(store.db_path), "sess-001", text_mode="none"
         )
         assert len(results) == 1
         assert "full_text" not in results[0]
+
+    def test_mcp_get_session_events_snippet_mode(self, store):
+        from hub.mcp_server import _get_session_events
+
+        long_text = "x" * 1000
+        events = [
+            _make_event(
+                full_text=long_text,
+                timestamp="2026-06-26T10:00:00",
+            ),
+        ]
+        store.store_with_offset(events, "fp13", "claude", "/tmp/f.jsonl", 1300)
+
+        results = _get_session_events(
+            str(store.db_path), "sess-001", text_mode="snippet"
+        )
+        ft = results[-1].get("full_text", "")
+        assert len(ft) <= 520
+        assert ft.endswith("[truncated]")

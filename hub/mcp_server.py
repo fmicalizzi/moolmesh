@@ -89,8 +89,9 @@ def _get_recent_events(db_path: str, limit: int = 50) -> list[dict[str, Any]]:
     return _rows_to_dicts(reversed(rows))
 
 
-def _get_active_sessions(db_path: str, hours: int = 4) -> list[dict[str, Any]]:
+def _get_active_sessions(db_path: str, hours: int = 4, limit: int = 50) -> list[dict[str, Any]]:
     """Lista sesiones con actividad en las últimas N horas."""
+    limit = min(limit, 200)
     conn = _connect(db_path)
     rows = conn.execute("""
         SELECT provider, project, session_id,
@@ -107,7 +108,8 @@ def _get_active_sessions(db_path: str, hours: int = 4) -> list[dict[str, Any]]:
         WHERE timestamp >= datetime('now', '-' || ? || ' hours')
         GROUP BY provider, project, session_id
         ORDER BY last_event DESC
-    """, (hours,)).fetchall()
+        LIMIT ?
+    """, (hours, limit)).fetchall()
     conn.close()
     return _rows_to_dicts(rows)
 
@@ -257,8 +259,10 @@ def _get_sessions(
     hours: int = 24,
     provider: Optional[str] = None,
     branch: Optional[str] = None,
+    limit: int = 50,
 ) -> list[dict[str, Any]]:
     """Query sessions table with optional filters."""
+    limit = min(limit, 500)
     conn = _connect(db_path)
     where_parts = ["1=1"]
     params: list = []
@@ -283,7 +287,8 @@ def _get_sessions(
             FROM sessions s
             WHERE {where}
             ORDER BY s.last_event_at DESC
-        """, params).fetchall()
+            LIMIT ?
+        """, params + [limit]).fetchall()
     except Exception:
         conn.close()
         return []
@@ -325,10 +330,12 @@ def _get_session_detail(db_path: str, session_id: str) -> dict[str, Any] | None:
 
 
 def _get_session_events(
-    db_path: str, session_id: str, include_full_text: bool = False, limit: int = 200
+    db_path: str, session_id: str, text_mode: str = "none", limit: int = 100
 ) -> list[dict[str, Any]]:
+    """text_mode: 'none' (summary only), 'snippet' (500 chars), 'full' (complete text)."""
+    limit = min(limit, 500)
     conn = _connect(db_path)
-    if include_full_text:
+    if text_mode in ("snippet", "full"):
         rows = conn.execute("""
             SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
                    e.summary, e.session_id, e.tokens_json, e.tool_name,
@@ -358,7 +365,10 @@ def _get_session_events(
                 d.pop("tokens_json", None)
         else:
             d.pop("tokens_json", None)
-        if not d.get("full_text"):
+        ft = d.get("full_text")
+        if ft and text_mode == "snippet" and len(ft) > 500:
+            d["full_text"] = ft[:500] + " [truncated]"
+        elif not ft:
             d.pop("full_text", None)
         results.append(d)
     return results
@@ -442,10 +452,10 @@ def _get_session_chain(db_path: str, session_id: str) -> list[dict[str, Any]]:
 
 
 def _get_branch_sessions(
-    db_path: str, branch: str, hours: int = 168
+    db_path: str, branch: str, hours: int = 168, limit: int = 50
 ) -> list[dict[str, Any]]:
     """Get sessions associated with a specific git branch."""
-    return _get_sessions(db_path, hours=hours, branch=branch)
+    return _get_sessions(db_path, hours=hours, branch=branch, limit=limit)
 
 
 # ── MCP layer (guarded — only loads when mcp SDK is available) ──────
@@ -479,14 +489,15 @@ if _mcp is not None:
         return _get_recent_events(EVENTS_DB, limit)
 
     @_mcp.tool()
-    def get_active_sessions(hours: int = 4) -> list[dict[str, Any]]:
+    def get_active_sessions(hours: int = 4, limit: int = 50) -> list[dict[str, Any]]:
         """Lista las sesiones con actividad en las últimas N horas.
         Cada sesión muestra: provider, proyecto, eventos, tokens, modelos, última actividad.
 
         Args:
             hours: Ventana de tiempo en horas (default 4)
+            limit: Máximo de sesiones a devolver (max 200, default 50)
         """
-        return _get_active_sessions(EVENTS_DB, hours)
+        return _get_active_sessions(EVENTS_DB, hours, limit)
 
     @_mcp.tool()
     def get_token_usage(
@@ -555,6 +566,7 @@ if _mcp is not None:
         hours: int = 24,
         provider: Optional[str] = None,
         branch: Optional[str] = None,
+        limit: int = 50,
     ) -> list[dict[str, Any]]:
         """Lista sesiones con metadata enriquecida (título, branch, modelo, cwd).
         Usa la tabla sessions para datos que no están en events.
@@ -563,8 +575,9 @@ if _mcp is not None:
             hours: Ventana de tiempo en horas (default 24).
             provider: Filtrar por provider. None = todos.
             branch: Filtrar por git branch. None = todos.
+            limit: Máximo de sesiones a devolver (max 500, default 50).
         """
-        return _get_sessions(EVENTS_DB, hours, provider, branch)
+        return _get_sessions(EVENTS_DB, hours, provider, branch, limit)
 
     @_mcp.tool()
     def get_session_detail(session_id: str) -> dict[str, Any]:
@@ -580,18 +593,17 @@ if _mcp is not None:
     @_mcp.tool()
     def get_session_events(
         session_id: str,
-        include_full_text: bool = False,
-        limit: int = 200,
+        text_mode: str = "none",
+        limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Obtiene todos los eventos de una sesión, opcionalmente con texto completo.
-        Útil para exportar transcripts o analizar una sesión en detalle.
+        """Obtiene los eventos de una sesión con control de volumen de texto.
 
         Args:
             session_id: ID de la sesión.
-            include_full_text: Si True, incluye el texto completo (no truncado) de cada evento.
-            limit: Máximo de eventos a devolver (default 200).
+            text_mode: Control de texto devuelto. 'none' = solo summary (~120 chars). 'snippet' = texto completo truncado a 500 chars. 'full' = texto completo sin truncar (alto consumo de tokens).
+            limit: Máximo de eventos a devolver (max 500, default 100).
         """
-        return _get_session_events(EVENTS_DB, session_id, include_full_text, limit)
+        return _get_session_events(EVENTS_DB, session_id, text_mode, limit)
 
     @_mcp.tool()
     def search_session_content(
