@@ -318,6 +318,9 @@ def _get_session_detail(db_path: str, session_id: str) -> dict[str, Any] | None:
             d.pop("metadata_json", None)
     else:
         d.pop("metadata_json", None)
+    chain = _get_session_chain(db_path, session_id)
+    if chain:
+        d["linked_sessions"] = chain
     return d
 
 
@@ -390,6 +393,52 @@ def _search_session_content(
     """, [query] + params + [limit]).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def _get_session_chain(db_path: str, session_id: str) -> list[dict[str, Any]]:
+    """Get linked sessions (predecessors and successors)."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute("""
+            SELECT
+                sl.source_session, sl.source_provider,
+                sl.target_session, sl.target_provider,
+                sl.link_type, sl.confidence, sl.created_at,
+                CASE WHEN sl.source_session = ? THEN 'successor' ELSE 'predecessor' END AS direction,
+                s.title, s.model, s.project, s.first_event_at, s.last_event_at,
+                (SELECT COUNT(*) FROM events e WHERE e.session_id = s.id) AS event_count
+            FROM session_links sl
+            LEFT JOIN sessions s ON (
+                CASE WHEN sl.source_session = ?
+                    THEN s.id = sl.target_session AND s.provider = sl.target_provider
+                    ELSE s.id = sl.source_session AND s.provider = sl.source_provider
+                END
+            )
+            WHERE sl.source_session = ? OR sl.target_session = ?
+            ORDER BY sl.created_at ASC
+        """, (session_id, session_id, session_id, session_id)).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
+    conn.close()
+    results = []
+    for r in rows:
+        linked_id = r["target_session"] if r["source_session"] == session_id else r["source_session"]
+        linked_provider = r["target_provider"] if r["source_session"] == session_id else r["source_provider"]
+        results.append({
+            "session_id": linked_id,
+            "provider": linked_provider,
+            "direction": r["direction"],
+            "link_type": r["link_type"],
+            "confidence": r["confidence"],
+            "title": r["title"] or "",
+            "model": r["model"] or "",
+            "project": r["project"] or "",
+            "first_event_at": r["first_event_at"] or "",
+            "last_event_at": r["last_event_at"] or "",
+            "event_count": r["event_count"] or 0,
+        })
+    return results
 
 
 def _get_branch_sessions(
@@ -572,6 +621,16 @@ if _mcp is not None:
             hours: Ventana de tiempo en horas (default 168 = 7 días).
         """
         return _get_branch_sessions(EVENTS_DB, branch, hours)
+
+    @_mcp.tool()
+    def get_session_chain(session_id: str) -> list[dict[str, Any]]:
+        """Sesiones vinculadas (predecesoras y sucesoras) a una sesión dada.
+        Muestra la cadena de trabajo entre sesiones de diferentes proveedores.
+
+        Args:
+            session_id: ID de la sesión.
+        """
+        return _get_session_chain(EVENTS_DB, session_id)
 
 
 if __name__ == "__main__":

@@ -94,6 +94,7 @@ class EventStore:
         self._ensure_registry()
         self._ensure_sessions_table()
         self._ensure_event_content_table()
+        self._ensure_session_links_table()
 
     def _needs_migration(self) -> bool:
         """Check if the existing table needs the fingerprint column migration."""
@@ -222,6 +223,25 @@ class EventStore:
                 event_id INTEGER PRIMARY KEY REFERENCES events(id),
                 full_text TEXT NOT NULL
             )
+        """)
+        self._conn.commit()
+
+    def _ensure_session_links_table(self) -> None:
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS session_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_session TEXT NOT NULL,
+                source_provider TEXT NOT NULL,
+                target_session TEXT NOT NULL,
+                target_provider TEXT NOT NULL,
+                link_type TEXT NOT NULL,
+                confidence REAL DEFAULT 1.0,
+                metadata_json TEXT,
+                created_at REAL NOT NULL,
+                UNIQUE(source_session, target_session, link_type)
+            );
+            CREATE INDEX IF NOT EXISTS idx_links_source ON session_links(source_session);
+            CREATE INDEX IF NOT EXISTS idx_links_target ON session_links(target_session);
         """)
         self._conn.commit()
 
@@ -948,6 +968,141 @@ class EventStore:
                 conn.execute("ROLLBACK")
                 raise
         return result_events
+
+    def link_sessions(
+        self,
+        source_session: str,
+        source_provider: str,
+        target_session: str,
+        target_provider: str,
+        link_type: str = "references",
+        confidence: float = 1.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Create a link between two sessions. Returns True if created, False if duplicate."""
+        import time
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                cursor = conn.execute("""
+                    INSERT OR IGNORE INTO session_links
+                        (source_session, source_provider, target_session, target_provider,
+                         link_type, confidence, metadata_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    source_session, source_provider,
+                    target_session, target_provider,
+                    link_type, confidence,
+                    json.dumps(metadata) if metadata else None,
+                    time.time(),
+                ))
+                conn.commit()
+                return cursor.rowcount > 0
+            except Exception:
+                return False
+
+    def get_session_chain(self, session_id: str) -> list[dict[str, Any]]:
+        """Get all sessions linked to the given session (predecessors and successors)."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                rows = conn.execute("""
+                    SELECT
+                        sl.source_session, sl.source_provider,
+                        sl.target_session, sl.target_provider,
+                        sl.link_type, sl.confidence, sl.metadata_json, sl.created_at,
+                        CASE WHEN sl.source_session = ? THEN 'successor' ELSE 'predecessor' END AS direction,
+                        s.title, s.model, s.project, s.first_event_at, s.last_event_at, s.event_count
+                    FROM session_links sl
+                    LEFT JOIN sessions s ON (
+                        CASE WHEN sl.source_session = ?
+                            THEN s.id = sl.target_session AND s.provider = sl.target_provider
+                            ELSE s.id = sl.source_session AND s.provider = sl.source_provider
+                        END
+                    )
+                    WHERE sl.source_session = ? OR sl.target_session = ?
+                    ORDER BY sl.created_at ASC
+                """, (session_id, session_id, session_id, session_id)).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        results = []
+        for r in rows:
+            linked_id = r[2] if r[0] == session_id else r[0]
+            linked_provider = r[3] if r[0] == session_id else r[1]
+            d: dict[str, Any] = {
+                "session_id": linked_id,
+                "provider": linked_provider,
+                "direction": r[8],
+                "link_type": r[4],
+                "confidence": r[5],
+                "title": r[9] or "",
+                "model": r[10] or "",
+                "project": r[11] or "",
+                "first_event_at": r[12] or "",
+                "last_event_at": r[13] or "",
+                "event_count": r[14] or 0,
+            }
+            if r[6]:
+                try:
+                    d["metadata"] = json.loads(r[6])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            results.append(d)
+        return results
+
+    def detect_temporal_links(
+        self, session_id: str, hours: float = 4.0, min_shared_files: int = 1
+    ) -> list[dict[str, Any]]:
+        """Find sessions related by temporal and file proximity.
+
+        Returns candidate links (not yet stored) with confidence scores.
+        """
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                rows = conn.execute("""
+                    SELECT
+                        e2.session_id,
+                        e2.provider,
+                        s2.title,
+                        s2.model,
+                        s2.project,
+                        COUNT(DISTINCT e2.file_path) AS shared_files,
+                        MIN(e2.timestamp) AS first_event,
+                        MAX(e2.timestamp) AS last_event,
+                        (SELECT COUNT(*) FROM events WHERE session_id = e2.session_id) AS event_count
+                    FROM events e1
+                    JOIN events e2 ON e1.project = e2.project
+                        AND e1.file_path IS NOT NULL
+                        AND e2.file_path IS NOT NULL
+                        AND e1.file_path = e2.file_path
+                        AND e1.session_id != e2.session_id
+                        AND abs(julianday(e1.timestamp) - julianday(e2.timestamp)) < ?
+                    LEFT JOIN sessions s2 ON e2.session_id = s2.id AND e2.provider = s2.provider
+                    WHERE e1.session_id = ?
+                    GROUP BY e2.session_id, e2.provider
+                    HAVING shared_files >= ?
+                    ORDER BY shared_files DESC, first_event ASC
+                """, (hours / 24.0, session_id, min_shared_files)).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        results = []
+        for r in rows:
+            confidence = min(0.5 + (r[5] * 0.1), 0.9)
+            results.append({
+                "session_id": r[0],
+                "provider": r[1],
+                "title": r[2] or "",
+                "model": r[3] or "",
+                "project": r[4] or "",
+                "shared_files": r[5],
+                "first_event_at": r[6] or "",
+                "last_event_at": r[7] or "",
+                "event_count": r[8] or 0,
+                "confidence": confidence,
+                "link_type": "temporal",
+            })
+        return results
 
     def close(self) -> None:
         with self._lock:

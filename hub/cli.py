@@ -546,6 +546,9 @@ def main() -> None:
     q_project.add_argument("name", help="Project name (substring match)")
     q_project.add_argument("--since", help="ISO 8601 date")
 
+    q_chain = query_sub.add_parser("chain", help="Session chain as JSON")
+    q_chain.add_argument("session_id", help="Session ID to look up")
+
     # export
     p_export = subparsers.add_parser("export", help="Export session transcript")
     p_export.add_argument("session_id", help="Session ID to export")
@@ -558,6 +561,24 @@ def main() -> None:
     sess.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode"], help="Filter by provider")
     sess.add_argument("--branch", help="Filter by git branch (exact match)")
     sess.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
+
+    # link
+    p_link = subparsers.add_parser("link", help="Link two related sessions")
+    p_link.add_argument("source", help="Source session ID")
+    p_link.add_argument("target", help="Target session ID")
+    p_link.add_argument("--type", choices=["continues", "references", "reviews"], default="continues")
+
+    # chain
+    p_chain = subparsers.add_parser("chain", help="Show sessions linked to a session")
+    p_chain.add_argument("session_id", help="Session ID to look up")
+    p_chain.add_argument("--json", action="store_true", dest="json_output")
+
+    # detect-links
+    p_detect = subparsers.add_parser("detect-links", help="Detect temporal links between sessions")
+    p_detect.add_argument("--session", help="Specific session ID to analyze")
+    p_detect.add_argument("--hours", type=float, default=4.0, help="Time window in hours (default 4)")
+    p_detect.add_argument("--auto", action="store_true", help="Automatically store detected links")
+    p_detect.add_argument("--json", action="store_true", dest="json_output")
 
     # doctor
     subparsers.add_parser("doctor", help="Run system diagnostics")
@@ -593,6 +614,12 @@ def main() -> None:
             cmd_query(args)
         case "sessions":
             cmd_sessions(args)
+        case "link":
+            cmd_link(args)
+        case "chain":
+            cmd_chain(args)
+        case "detect-links":
+            cmd_detect_links(args)
         case "doctor":
             cmd_doctor(args)
         case "install":
@@ -744,6 +771,131 @@ def cmd_sessions(args: argparse.Namespace) -> None:
     print(f"\n  Total: {len(data)} sessions\n")
 
 
+def cmd_link(args: argparse.Namespace) -> None:
+    """Create an explicit link between two sessions."""
+    from hub.cache.event_store import EventStore
+    store = EventStore()
+
+    source = store.get_session_detail(args.source)
+    target = store.get_session_detail(args.target)
+
+    if not source:
+        print(red(f"Source session not found: {args.source}"))
+        store.close()
+        return
+    if not target:
+        print(red(f"Target session not found: {args.target}"))
+        store.close()
+        return
+
+    link_type = args.type or "continues"
+    created = store.link_sessions(
+        source_session=source["id"],
+        source_provider=source["provider"],
+        target_session=target["id"],
+        target_provider=target["provider"],
+        link_type=link_type,
+        confidence=1.0,
+    )
+    store.close()
+
+    if created:
+        print(green(f"Linked: {source['provider']}:{source['id'][:20]}... → {target['provider']}:{target['id'][:20]}... ({link_type})"))
+    else:
+        print(yellow("Link already exists."))
+
+
+def cmd_chain(args: argparse.Namespace) -> None:
+    """Show sessions linked to a given session."""
+    import json as _json
+    from hub.cache.event_store import EventStore
+    store = EventStore()
+
+    chain = store.get_session_chain(args.session_id)
+    store.close()
+
+    if not chain:
+        print(yellow(f"No linked sessions found for: {args.session_id}"))
+        return
+
+    if getattr(args, "json_output", False):
+        print(_json.dumps(chain, default=str))
+        return
+
+    print(f"\n  Session chain for {args.session_id[:30]}...")
+    print(f"  {'─' * 60}")
+    for link in chain:
+        arrow = "←" if link["direction"] == "predecessor" else "→"
+        title = link["title"][:40] if link["title"] else link["session_id"][:30]
+        conf = f"{link['confidence']:.0%}" if link["confidence"] < 1.0 else ""
+        conf_str = f" ({conf})" if conf else ""
+        print(f"  {arrow} [{link['provider']:8}] {title}  {link['event_count']} events  {link['link_type']}{conf_str}")
+    print()
+
+
+def cmd_detect_links(args: argparse.Namespace) -> None:
+    """Detect and optionally store temporal links between sessions."""
+    import json as _json
+    from hub.cache.event_store import EventStore
+    store = EventStore()
+
+    if args.session:
+        candidates = store.detect_temporal_links(args.session, hours=args.hours)
+    else:
+        sessions = store.get_sessions(hours=int(args.hours))
+        candidates = []
+        seen: set[tuple[str, str]] = set()
+        for s in sessions:
+            for c in store.detect_temporal_links(s["id"], hours=args.hours):
+                pair = tuple(sorted([s["id"], c["session_id"]]))
+                if pair not in seen:
+                    seen.add(pair)
+                    c["source_session"] = s["id"]
+                    c["source_provider"] = s["provider"]
+                    candidates.append(c)
+
+    if not candidates:
+        print(yellow("No temporal links detected."))
+        store.close()
+        return
+
+    if getattr(args, "json_output", False):
+        print(_json.dumps(candidates, default=str))
+        store.close()
+        return
+
+    print(f"\n  Detected {len(candidates)} potential link(s)")
+    print(f"  {'─' * 60}")
+    for c in candidates:
+        title = c["title"][:40] if c["title"] else c["session_id"][:30]
+        print(f"  [{c['provider']:8}] {title}  {c['shared_files']} shared files  {c['confidence']:.0%}")
+
+    if args.auto:
+        stored = 0
+        for c in candidates:
+            source = c.get("source_session", args.session)
+            source_provider = c.get("source_provider", "")
+            if not source_provider:
+                detail = store.get_session_detail(source)
+                source_provider = detail["provider"] if detail else ""
+            if source_provider:
+                created = store.link_sessions(
+                    source_session=source,
+                    source_provider=source_provider,
+                    target_session=c["session_id"],
+                    target_provider=c["provider"],
+                    link_type="temporal",
+                    confidence=c["confidence"],
+                )
+                if created:
+                    stored += 1
+        print(f"\n  Stored {stored} new link(s).")
+    else:
+        print(f"\n  Run with --auto to store these links.")
+    print()
+    store.close()
+
+
 def cmd_query(args: argparse.Namespace) -> None:
     import json as _json
     from hub.mcp_server import (
@@ -755,6 +907,7 @@ def cmd_query(args: argparse.Namespace) -> None:
         _search_events,
         _search_session_content,
         _get_project_activity,
+        _get_session_chain,
     )
 
     match args.query_command:
@@ -784,8 +937,10 @@ def cmd_query(args: argparse.Namespace) -> None:
                 )
         case "project":
             data = _get_project_activity(EVENTS_DB, args.name, args.since)
+        case "chain":
+            data = _get_session_chain(EVENTS_DB, args.session_id)
         case _:
-            print("Usage: mool query {events|sessions|tokens|tools|search|project}")
+            print("Usage: mool query {events|sessions|tokens|tools|search|project|chain}")
             return
 
     print(_json.dumps(data, default=str))
