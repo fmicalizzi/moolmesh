@@ -92,6 +92,7 @@ class EventStore:
             self._conn.commit()
 
         self._ensure_registry()
+        self._ensure_sessions_table()
 
     def _needs_migration(self) -> bool:
         """Check if the existing table needs the fingerprint column migration."""
@@ -160,6 +161,207 @@ class EventStore:
             )
         """)
         self._conn.commit()
+
+    def _ensure_sessions_table(self) -> None:
+        """Create the sessions table if it doesn't exist, backfill from events."""
+        exists = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'"
+        ).fetchone()
+        if exists:
+            return
+        self._conn.executescript("""
+            CREATE TABLE sessions (
+                id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                project TEXT NOT NULL,
+                title TEXT DEFAULT '',
+                cwd TEXT DEFAULT '',
+                git_branch TEXT DEFAULT '',
+                model TEXT DEFAULT '',
+                cli_version TEXT DEFAULT '',
+                source TEXT DEFAULT '',
+                cost REAL DEFAULT 0.0,
+                is_sidechain INTEGER DEFAULT 0,
+                first_event_at TEXT,
+                last_event_at TEXT,
+                event_count INTEGER DEFAULT 0,
+                is_active INTEGER DEFAULT 1,
+                initial_prompt TEXT DEFAULT '',
+                metadata_json TEXT,
+                created_at REAL NOT NULL,
+                PRIMARY KEY (id, provider)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
+            CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
+            CREATE INDEX IF NOT EXISTS idx_sessions_is_active ON sessions(is_active);
+            CREATE INDEX IF NOT EXISTS idx_sessions_git_branch ON sessions(git_branch);
+        """)
+        # Backfill from existing events
+        import time
+        now = time.time()
+        self._conn.execute(f"""
+            INSERT OR IGNORE INTO sessions
+                (id, provider, project, cwd, model,
+                 first_event_at, last_event_at, event_count,
+                 is_active, created_at)
+            SELECT
+                session_id, provider, project,
+                MAX(cwd), MAX(model),
+                MIN(timestamp), MAX(timestamp), COUNT(*),
+                1, {now}
+            FROM events
+            WHERE session_id IS NOT NULL
+            GROUP BY session_id, provider
+        """)
+        self._conn.commit()
+
+    def upsert_session(self, meta: dict[str, Any], timestamp: str) -> None:
+        """Insert or update session metadata.
+
+        Uses INSERT ON CONFLICT DO UPDATE to merge new info without losing
+        previously-stored fields (e.g. git_branch from an earlier event).
+        """
+        import time
+        now = time.time()
+        sid = meta.get("id", "")
+        if not sid:
+            return
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute("""
+                INSERT INTO sessions
+                    (id, provider, project, title, cwd, git_branch, model,
+                     cli_version, source, cost, is_sidechain,
+                     first_event_at, last_event_at, event_count,
+                     is_active, initial_prompt, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)
+                ON CONFLICT(id, provider) DO UPDATE SET
+                    project = COALESCE(NULLIF(excluded.project, ''), sessions.project),
+                    title = COALESCE(NULLIF(excluded.title, ''), sessions.title),
+                    cwd = COALESCE(NULLIF(excluded.cwd, ''), sessions.cwd),
+                    git_branch = COALESCE(NULLIF(excluded.git_branch, ''), sessions.git_branch),
+                    model = COALESCE(NULLIF(excluded.model, ''), sessions.model),
+                    cli_version = COALESCE(NULLIF(excluded.cli_version, ''), sessions.cli_version),
+                    source = COALESCE(NULLIF(excluded.source, ''), sessions.source),
+                    cost = CASE WHEN excluded.cost > sessions.cost THEN excluded.cost ELSE sessions.cost END,
+                    is_sidechain = excluded.is_sidechain,
+                    last_event_at = excluded.last_event_at,
+                    event_count = (SELECT COUNT(*) FROM events
+                                   WHERE session_id = excluded.id AND provider = excluded.provider),
+                    is_active = 1,
+                    initial_prompt = COALESCE(NULLIF(excluded.initial_prompt, ''), sessions.initial_prompt),
+                    metadata_json = COALESCE(excluded.metadata_json, sessions.metadata_json)
+            """, (
+                sid,
+                meta.get("provider", ""),
+                meta.get("project", ""),
+                meta.get("title", ""),
+                meta.get("cwd", ""),
+                meta.get("git_branch", ""),
+                meta.get("model", ""),
+                meta.get("cli_version", ""),
+                meta.get("source", ""),
+                meta.get("cost", 0.0),
+                1 if meta.get("is_sidechain") else 0,
+                timestamp,
+                timestamp,
+                meta.get("initial_prompt", ""),
+                json.dumps(meta.get("metadata")) if meta.get("metadata") else None,
+                now,
+            ))
+            conn.commit()
+
+    def get_sessions(
+        self,
+        hours: int = 24,
+        provider: str | None = None,
+        branch: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Query sessions with optional filters."""
+        where_parts = ["1=1"]
+        params: list[Any] = []
+        if hours:
+            where_parts.append("s.last_event_at >= datetime('now', '-' || ? || ' hours')")
+            params.append(hours)
+        if provider:
+            where_parts.append("s.provider = ?")
+            params.append(provider)
+        if branch:
+            where_parts.append("s.git_branch = ?")
+            params.append(branch)
+        where = " AND ".join(where_parts)
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                rows = conn.execute(f"""
+                    SELECT s.id, s.provider, s.project, s.title, s.cwd,
+                           s.git_branch, s.model, s.cli_version, s.source,
+                           s.cost, s.is_sidechain, s.first_event_at, s.last_event_at,
+                           (SELECT COUNT(*) FROM events e
+                            WHERE e.session_id = s.id AND e.provider = s.provider) AS event_count,
+                           s.is_active, s.initial_prompt, s.metadata_json
+                    FROM sessions s
+                    WHERE {where}
+                    ORDER BY s.last_event_at DESC
+                """, params).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        results = []
+        for r in rows:
+            d: dict[str, Any] = {
+                "id": r[0], "provider": r[1], "project": r[2],
+                "title": r[3] or "", "cwd": r[4] or "",
+                "git_branch": r[5] or "", "model": r[6] or "",
+                "cli_version": r[7] or "", "source": r[8] or "",
+                "cost": r[9] or 0.0, "is_sidechain": bool(r[10]),
+                "first_event_at": r[11] or "", "last_event_at": r[12] or "",
+                "event_count": r[13] or 0, "is_active": bool(r[14]),
+            }
+            if r[15]:
+                d["initial_prompt"] = r[15]
+            if r[16]:
+                try:
+                    d["metadata"] = json.loads(r[16])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            results.append(d)
+        return results
+
+    def get_session_detail(self, session_id: str) -> dict[str, Any] | None:
+        """Get detailed info for a single session."""
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                row = conn.execute("""
+                    SELECT s.id, s.provider, s.project, s.title, s.cwd,
+                           s.git_branch, s.model, s.cli_version, s.source,
+                           s.cost, s.is_sidechain, s.first_event_at, s.last_event_at,
+                           (SELECT COUNT(*) FROM events e
+                            WHERE e.session_id = s.id AND e.provider = s.provider) AS event_count,
+                           s.is_active, s.initial_prompt, s.metadata_json
+                    FROM sessions s WHERE s.id = ?
+                """, (session_id,)).fetchone()
+            except sqlite3.OperationalError:
+                return None
+        if not row:
+            return None
+        d: dict[str, Any] = {
+            "id": row[0], "provider": row[1], "project": row[2],
+            "title": row[3] or "", "cwd": row[4] or "",
+            "git_branch": row[5] or "", "model": row[6] or "",
+            "cli_version": row[7] or "", "source": row[8] or "",
+            "cost": row[9] or 0.0, "is_sidechain": bool(row[10]),
+            "first_event_at": row[11] or "", "last_event_at": row[12] or "",
+            "event_count": row[13] or 0, "is_active": bool(row[14]),
+        }
+        if row[15]:
+            d["initial_prompt"] = row[15]
+        if row[16]:
+            try:
+                d["metadata"] = json.loads(row[16])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return d
 
     def _get_conn(self) -> sqlite3.Connection:
         """Return the shared connection. Callers MUST hold self._lock."""

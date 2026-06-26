@@ -6,7 +6,7 @@ from datetime import datetime
 
 from hub.adapters.base import BaseAdapter
 from hub.models.base import (
-    MessageRole, Provider, TokenUsage, ToolCall, UnifiedEvent, UnifiedMessage,
+    MessageRole, Provider, SessionMeta, TokenUsage, ToolCall, UnifiedEvent, UnifiedMessage,
 )
 from hub.models.opencode import OpenCodeEntry
 
@@ -65,6 +65,17 @@ class OpenCodeAdapter(BaseAdapter):
             tool_name=tool_name,
             file_path=file_path if file_path else None,
             cwd=entry.cwd or None,
+        )
+
+    def to_session_meta(self, entry: OpenCodeEntry, project: str) -> SessionMeta | None:
+        return SessionMeta(
+            id=entry.session_id,
+            provider=Provider.OPENCODE,
+            project=project,
+            title=entry.session_title or "",
+            cwd=entry.cwd or "",
+            model=entry.model_id or "",
+            cost=entry.cost or 0.0,
         )
 
     def _map_role(self, entry: OpenCodeEntry) -> MessageRole | None:

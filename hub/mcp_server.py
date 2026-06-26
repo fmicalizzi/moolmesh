@@ -252,6 +252,82 @@ def _get_project_activity(
     }
 
 
+def _get_sessions(
+    db_path: str,
+    hours: int = 24,
+    provider: Optional[str] = None,
+    branch: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Query sessions table with optional filters."""
+    conn = _connect(db_path)
+    where_parts = ["1=1"]
+    params: list = []
+    if hours:
+        where_parts.append("s.last_event_at >= datetime('now', '-' || ? || ' hours')")
+        params.append(hours)
+    if provider:
+        where_parts.append("s.provider = ?")
+        params.append(provider)
+    if branch:
+        where_parts.append("s.git_branch = ?")
+        params.append(branch)
+    where = " AND ".join(where_parts)
+    try:
+        rows = conn.execute(f"""
+            SELECT s.id, s.provider, s.project, s.title, s.cwd,
+                   s.git_branch, s.model, s.cli_version, s.source,
+                   s.cost, s.is_sidechain, s.first_event_at, s.last_event_at,
+                   (SELECT COUNT(*) FROM events e
+                    WHERE e.session_id = s.id AND e.provider = s.provider) AS event_count,
+                   s.is_active
+            FROM sessions s
+            WHERE {where}
+            ORDER BY s.last_event_at DESC
+        """, params).fetchall()
+    except Exception:
+        conn.close()
+        return []
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _get_session_detail(db_path: str, session_id: str) -> dict[str, Any] | None:
+    """Get detailed info for a single session by ID."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute("""
+            SELECT s.id, s.provider, s.project, s.title, s.cwd,
+                   s.git_branch, s.model, s.cli_version, s.source,
+                   s.cost, s.is_sidechain, s.first_event_at, s.last_event_at,
+                   (SELECT COUNT(*) FROM events e
+                    WHERE e.session_id = s.id AND e.provider = s.provider) AS event_count,
+                   s.is_active, s.initial_prompt, s.metadata_json
+            FROM sessions s WHERE s.id = ?
+        """, (session_id,)).fetchone()
+    except Exception:
+        conn.close()
+        return None
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    if d.get("metadata_json"):
+        try:
+            d["metadata"] = json.loads(d.pop("metadata_json"))
+        except (json.JSONDecodeError, TypeError):
+            d.pop("metadata_json", None)
+    else:
+        d.pop("metadata_json", None)
+    return d
+
+
+def _get_branch_sessions(
+    db_path: str, branch: str, hours: int = 168
+) -> list[dict[str, Any]]:
+    """Get sessions associated with a specific git branch."""
+    return _get_sessions(db_path, hours=hours, branch=branch)
+
+
 # ── MCP layer (guarded — only loads when mcp SDK is available) ──────
 
 try:
@@ -353,6 +429,44 @@ if _mcp is not None:
             since: Fecha ISO 8601 desde. None = todo el historial.
         """
         return _get_project_activity(EVENTS_DB, project, since)
+
+    @_mcp.tool()
+    def get_sessions(
+        hours: int = 24,
+        provider: Optional[str] = None,
+        branch: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Lista sesiones con metadata enriquecida (título, branch, modelo, cwd).
+        Usa la tabla sessions para datos que no están en events.
+
+        Args:
+            hours: Ventana de tiempo en horas (default 24).
+            provider: Filtrar por provider. None = todos.
+            branch: Filtrar por git branch. None = todos.
+        """
+        return _get_sessions(EVENTS_DB, hours, provider, branch)
+
+    @_mcp.tool()
+    def get_session_detail(session_id: str) -> dict[str, Any]:
+        """Detalle completo de una sesión específica por ID.
+        Incluye metadata, prompt inicial, branch, modelo, eventos.
+
+        Args:
+            session_id: ID de la sesión.
+        """
+        result = _get_session_detail(EVENTS_DB, session_id)
+        return result or {"error": f"Session {session_id} not found"}
+
+    @_mcp.tool()
+    def get_branch_sessions(branch: str, hours: int = 168) -> list[dict[str, Any]]:
+        """Sesiones correlacionadas con un branch de git específico.
+        Útil para ver qué sesiones de agentes AI trabajaron en un branch.
+
+        Args:
+            branch: Nombre del branch (exact match).
+            hours: Ventana de tiempo en horas (default 168 = 7 días).
+        """
+        return _get_branch_sessions(EVENTS_DB, branch, hours)
 
 
 if __name__ == "__main__":

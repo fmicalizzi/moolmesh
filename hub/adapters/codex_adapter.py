@@ -9,6 +9,7 @@ from hub.adapters.base import BaseAdapter
 from hub.models.base import (
     MessageRole,
     Provider,
+    SessionMeta,
     TokenUsage,
     ToolCall,
     UnifiedEvent,
@@ -86,6 +87,17 @@ class CodexAdapter(BaseAdapter):
             tool_name=tool_name,
             file_path=file_path if file_path else None,
             cwd=entry.cwd or None,
+        )
+
+    def to_session_meta(self, entry: CodexEntry, project: str) -> SessionMeta | None:
+        return SessionMeta(
+            id=entry.session_id,
+            provider=Provider.CODEX,
+            project=project,
+            cwd=entry.cwd or "",
+            model=entry.model_provider or "",
+            cli_version=entry.cli_version or "",
+            source=entry.source or "",
         )
 
     def _map_role(self, entry: CodexEntry) -> MessageRole | None:

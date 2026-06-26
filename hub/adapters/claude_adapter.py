@@ -8,6 +8,7 @@ from hub.adapters.base import BaseAdapter
 from hub.models.base import (
     MessageRole,
     Provider,
+    SessionMeta,
     TokenUsage,
     ToolCall,
     UnifiedEvent,
@@ -91,6 +92,20 @@ class ClaudeAdapter(BaseAdapter):
             file_path=str(file_path) if file_path else None,
             model=entry.model,
             cwd=entry.cwd or None,
+        )
+
+    def to_session_meta(self, entry: ClaudeEntry, project: str) -> SessionMeta | None:
+        if entry.type in _SKIP_TYPES:
+            return None
+        return SessionMeta(
+            id=entry.session_id,
+            provider=Provider.CLAUDE,
+            project=project,
+            cwd=entry.cwd or "",
+            git_branch=entry.git_branch or "",
+            model=entry.model or "",
+            cli_version=entry.version or "",
+            is_sidechain=entry.is_sidechain,
         )
 
     def _map_role(self, entry: ClaudeEntry) -> MessageRole | None:

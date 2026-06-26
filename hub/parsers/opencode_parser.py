@@ -183,6 +183,7 @@ class OpenCodeParser(BaseParser):
             files_affected=files_affected,
             project_name=row["project_name"] or "",
             project_dir=row["session_dir"] or "",
+            session_title=row["session_title"] or "",
             raw=part_data,
         )
 

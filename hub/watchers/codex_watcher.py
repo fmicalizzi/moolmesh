@@ -50,9 +50,15 @@ class CodexWatcher(BaseHarvester):
     def _parse_and_adapt(self, path: Path, offset: int) -> tuple[list[dict], int]:
         entries, new_offset = self._parser.parse_incremental(path, offset)
         events = []
+        seen_sessions: set[str] = set()
         for entry in entries:
             project = self._file_projects.get(path, "codex-sessions")
             event = self._adapter.to_event(entry, project)
             if event:
                 events.append(event.to_dict())
+            if entry.session_id and entry.session_id not in seen_sessions:
+                seen_sessions.add(entry.session_id)
+                meta = self._adapter.to_session_meta(entry, project)
+                if meta:
+                    self._store.upsert_session(meta.to_dict(), entry.timestamp)
         return events, new_offset
