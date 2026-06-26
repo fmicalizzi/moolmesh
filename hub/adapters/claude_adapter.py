@@ -80,6 +80,8 @@ class ClaudeAdapter(BaseAdapter):
                     )
                 break
 
+        full_text = self._extract_full_text(entry)
+
         return UnifiedEvent(
             provider=Provider.CLAUDE,
             project=project,
@@ -92,6 +94,7 @@ class ClaudeAdapter(BaseAdapter):
             file_path=str(file_path) if file_path else None,
             model=entry.model,
             cwd=entry.cwd or None,
+            full_text=full_text,
         )
 
     def to_session_meta(self, entry: ClaudeEntry, project: str) -> SessionMeta | None:
@@ -169,6 +172,19 @@ class ClaudeAdapter(BaseAdapter):
             cache_creation=usage.cache_creation_input_tokens,
             cache_read=usage.cache_read_input_tokens,
         )
+
+    def _extract_full_text(self, entry: ClaudeEntry) -> str | None:
+        match entry.type:
+            case "user" | "assistant":
+                text = entry.content_text.strip()
+                if not text:
+                    return None
+                for block in entry.content_blocks:
+                    if block.type == "thinking" and block.thinking:
+                        return f"[thinking]\n{block.thinking}\n\n{text}"
+                return text
+            case _:
+                return None
 
     def _summarize(self, entry: ClaudeEntry) -> str:
         """Produce a human-readable one-liner for the event feed."""

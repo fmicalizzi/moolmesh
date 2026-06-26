@@ -321,6 +321,77 @@ def _get_session_detail(db_path: str, session_id: str) -> dict[str, Any] | None:
     return d
 
 
+def _get_session_events(
+    db_path: str, session_id: str, include_full_text: bool = False, limit: int = 200
+) -> list[dict[str, Any]]:
+    conn = _connect(db_path)
+    if include_full_text:
+        rows = conn.execute("""
+            SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
+                   e.summary, e.session_id, e.tokens_json, e.tool_name,
+                   e.file_path, e.model, e.cwd, ec.full_text
+            FROM events e
+            LEFT JOIN event_content ec ON e.id = ec.event_id
+            WHERE e.session_id = ?
+            ORDER BY e.timestamp ASC LIMIT ?
+        """, (session_id, limit)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
+                   e.summary, e.session_id, e.tokens_json, e.tool_name,
+                   e.file_path, e.model, e.cwd, NULL as full_text
+            FROM events e
+            WHERE e.session_id = ?
+            ORDER BY e.timestamp ASC LIMIT ?
+        """, (session_id, limit)).fetchall()
+    conn.close()
+    results = []
+    for r in rows:
+        d = dict(r)
+        if d.get("tokens_json"):
+            try:
+                d["tokens"] = json.loads(d.pop("tokens_json"))
+            except (json.JSONDecodeError, TypeError):
+                d.pop("tokens_json", None)
+        else:
+            d.pop("tokens_json", None)
+        if not d.get("full_text"):
+            d.pop("full_text", None)
+        results.append(d)
+    return results
+
+
+def _search_session_content(
+    db_path: str,
+    query: str,
+    provider: str | None = None,
+    project: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    limit = min(limit, 200)
+    conn = _connect(db_path)
+    where_parts = ["ec.full_text LIKE ?"]
+    params: list = [f"%{query}%"]
+    if provider:
+        where_parts.append("e.provider = ?")
+        params.append(provider)
+    if project:
+        where_parts.append("e.project LIKE ?")
+        params.append(f"%{project}%")
+    where = " AND ".join(where_parts)
+    rows = conn.execute(f"""
+        SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
+               e.summary, e.session_id, e.tool_name, e.model,
+               SUBSTR(ec.full_text, MAX(1, INSTR(ec.full_text, ?) - 100), 300) as context
+        FROM events e
+        JOIN event_content ec ON e.id = ec.event_id
+        WHERE {where}
+        ORDER BY e.timestamp DESC LIMIT ?
+    """, [query] + params + [limit]).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def _get_branch_sessions(
     db_path: str, branch: str, hours: int = 168
 ) -> list[dict[str, Any]]:
@@ -456,6 +527,40 @@ if _mcp is not None:
         """
         result = _get_session_detail(EVENTS_DB, session_id)
         return result or {"error": f"Session {session_id} not found"}
+
+    @_mcp.tool()
+    def get_session_events(
+        session_id: str,
+        include_full_text: bool = False,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Obtiene todos los eventos de una sesión, opcionalmente con texto completo.
+        Útil para exportar transcripts o analizar una sesión en detalle.
+
+        Args:
+            session_id: ID de la sesión.
+            include_full_text: Si True, incluye el texto completo (no truncado) de cada evento.
+            limit: Máximo de eventos a devolver (default 200).
+        """
+        return _get_session_events(EVENTS_DB, session_id, include_full_text, limit)
+
+    @_mcp.tool()
+    def search_session_content(
+        query: str,
+        provider: Optional[str] = None,
+        project: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Búsqueda de texto completo en el contenido de las sesiones.
+        Busca en el texto completo (no truncado) de los eventos almacenados.
+
+        Args:
+            query: Texto a buscar en el contenido completo.
+            provider: Filtrar por provider. None = todos.
+            project: Filtrar por proyecto (substring). None = todos.
+            limit: Máximo de resultados (max 200, default 50).
+        """
+        return _search_session_content(EVENTS_DB, query, provider, project, limit)
 
     @_mcp.tool()
     def get_branch_sessions(branch: str, hours: int = 168) -> list[dict[str, Any]]:

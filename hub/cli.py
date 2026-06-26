@@ -539,11 +539,18 @@ def main() -> None:
     q_search.add_argument("--provider", help="Filter by provider")
     q_search.add_argument("--project", help="Filter by project (substring)")
     q_search.add_argument("--type", dest="event_type", help="Filter by event type")
+    q_search.add_argument("--full", action="store_true", help="Search full text (slower)")
     q_search.add_argument("-n", "--limit", type=int, default=50, help="Max results (default: 50)")
 
     q_project = query_sub.add_parser("project", help="Project activity summary")
     q_project.add_argument("name", help="Project name (substring match)")
     q_project.add_argument("--since", help="ISO 8601 date")
+
+    # export
+    p_export = subparsers.add_parser("export", help="Export session transcript")
+    p_export.add_argument("session_id", help="Session ID to export")
+    p_export.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    p_export.add_argument("--output", "-o", help="Output file path")
 
     # sessions
     sess = subparsers.add_parser("sessions", help="List sessions with metadata")
@@ -576,6 +583,8 @@ def main() -> None:
             cmd_report(args)
         case "discover":
             cmd_discover(args)
+        case "export":
+            cmd_export(args)
         case "backfill":
             cmd_backfill(args)
         case "repo":
@@ -590,6 +599,101 @@ def main() -> None:
             cmd_install(args)
         case _:
             parser.print_help()
+
+
+def cmd_export(args: argparse.Namespace) -> None:
+    from pathlib import Path
+    from hub.cache.event_store import EventStore
+
+    store = EventStore()
+    detail = store.get_session_detail(args.session_id)
+    if not detail:
+        print(red(f"Session not found: {args.session_id}"))
+        store.close()
+        return
+
+    events = store.get_session_events(args.session_id, include_full_text=True)
+    store.close()
+    if not events:
+        print(yellow(f"No events found for session: {args.session_id}"))
+        return
+
+    if args.format == "json":
+        import json as _json
+        print(_json.dumps({"session": detail, "events": events}, default=str, indent=2))
+        return
+
+    lines: list[str] = []
+    title = detail.get("title") or detail.get("id", "Unknown")
+    lines.append(f"# Session: {title}")
+    lines.append("")
+    provider = detail.get("provider", "")
+    model = detail.get("model", "")
+    branch = detail.get("git_branch", "")
+    project = detail.get("project", "")
+    meta_parts = []
+    if provider:
+        meta_parts.append(f"**Provider**: {provider}")
+    if model:
+        meta_parts.append(f"**Model**: {model}")
+    if branch:
+        meta_parts.append(f"**Branch**: {branch}")
+    if project:
+        meta_parts.append(f"**Project**: {project}")
+    if meta_parts:
+        lines.append(" | ".join(meta_parts))
+        lines.append("")
+    first = detail.get("first_event_at", "")
+    last = detail.get("last_event_at", "")
+    if first and last:
+        lines.append(f"**Started**: {first} — **Ended**: {last}")
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    for ev in events:
+        ts = ev.get("timestamp", "")
+        ts_short = ts[11:19] if len(ts) >= 19 else ts
+        event_type = ev.get("event_type", "")
+        full_text = ev.get("full_text") or ev.get("summary", "")
+        tool_name = ev.get("tool_name")
+
+        if event_type == "user":
+            lines.append(f"### [{ts_short}] User")
+            lines.append("")
+            lines.append(full_text)
+        elif event_type == "assistant":
+            lines.append(f"### [{ts_short}] Assistant")
+            lines.append("")
+            lines.append(full_text)
+        elif event_type in ("tool_use", "tool_result") and tool_name:
+            lines.append(f"### [{ts_short}] Tool: {tool_name}")
+            file_path = ev.get("file_path", "")
+            if file_path:
+                lines.append(f"File: `{file_path}`")
+            lines.append("")
+            if full_text and full_text != ev.get("summary"):
+                lines.append("```")
+                lines.append(full_text)
+                lines.append("```")
+        elif event_type == "thinking":
+            lines.append(f"### [{ts_short}] Thinking")
+            lines.append("")
+            lines.append(f"*{full_text}*")
+        else:
+            lines.append(f"### [{ts_short}] {event_type}")
+            lines.append("")
+            lines.append(full_text)
+
+        lines.append("")
+
+    output = "\n".join(lines)
+
+    if args.output:
+        Path(args.output).write_text(output, encoding="utf-8")
+        print(green(f"Exported to {args.output}"))
+    else:
+        print(output)
 
 
 def cmd_sessions(args: argparse.Namespace) -> None:
@@ -649,6 +753,7 @@ def cmd_query(args: argparse.Namespace) -> None:
         _get_token_usage,
         _get_tool_stats,
         _search_events,
+        _search_session_content,
         _get_project_activity,
     )
 
@@ -662,13 +767,21 @@ def cmd_query(args: argparse.Namespace) -> None:
         case "tools":
             data = _get_tool_stats(EVENTS_DB, args.project, args.since, args.limit)
         case "search":
-            data = _search_events(
-                EVENTS_DB, args.text,
-                provider=args.provider,
-                project=args.project,
-                event_type=args.event_type,
-                limit=args.limit,
-            )
+            if getattr(args, "full", False):
+                data = _search_session_content(
+                    EVENTS_DB, args.text,
+                    provider=args.provider,
+                    project=args.project,
+                    limit=args.limit,
+                )
+            else:
+                data = _search_events(
+                    EVENTS_DB, args.text,
+                    provider=args.provider,
+                    project=args.project,
+                    event_type=args.event_type,
+                    limit=args.limit,
+                )
         case "project":
             data = _get_project_activity(EVENTS_DB, args.name, args.since)
         case _:

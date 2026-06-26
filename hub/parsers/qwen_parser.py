@@ -148,7 +148,7 @@ class QwenParser(BaseParser):
                         QwenFunctionResponse(
                             call_id=fr_data.get("id", ""),
                             name=fr_data.get("name", ""),
-                            output=str(output)[:500],  # truncate large outputs
+                            output=str(output),
                         )
                     )
 

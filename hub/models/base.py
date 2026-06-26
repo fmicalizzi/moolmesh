@@ -87,6 +87,7 @@ class UnifiedEvent:
     file_path: str | None = None
     model: str | None = None
     cwd: str | None = None  # working directory of the session
+    full_text: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -108,6 +109,8 @@ class UnifiedEvent:
             d["model"] = self.model
         if self.cwd:
             d["cwd"] = self.cwd
+        if self.full_text:
+            d["full_text"] = self.full_text
         return d
 
     def to_json(self) -> str:

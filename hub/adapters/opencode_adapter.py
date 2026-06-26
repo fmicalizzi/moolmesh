@@ -49,8 +49,10 @@ class OpenCodeAdapter(BaseAdapter):
             file_path = (entry.tool_call.input_data.get("path", "")
                          or entry.tool_call.input_data.get("command", ""))[:80]
 
-        text = entry.text.strip().replace("\n", " ")
+        raw_text = entry.text.strip()
+        text = raw_text.replace("\n", " ")
         summary = text[:120] if text else f"[{entry.part_type}]"
+        full_text = raw_text if raw_text else None
 
         parsed_ts = self._parse_timestamp(entry.timestamp)
         ts_str = parsed_ts.isoformat() if parsed_ts else str(entry.timestamp)
@@ -65,6 +67,7 @@ class OpenCodeAdapter(BaseAdapter):
             tool_name=tool_name,
             file_path=file_path if file_path else None,
             cwd=entry.cwd or None,
+            full_text=full_text,
         )
 
     def to_session_meta(self, entry: OpenCodeEntry, project: str) -> SessionMeta | None:

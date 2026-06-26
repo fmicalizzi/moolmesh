@@ -93,6 +93,7 @@ class EventStore:
 
         self._ensure_registry()
         self._ensure_sessions_table()
+        self._ensure_event_content_table()
 
     def _needs_migration(self) -> bool:
         """Check if the existing table needs the fingerprint column migration."""
@@ -212,6 +213,15 @@ class EventStore:
             FROM events
             WHERE session_id IS NOT NULL
             GROUP BY session_id, provider
+        """)
+        self._conn.commit()
+
+    def _ensure_event_content_table(self) -> None:
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS event_content (
+                event_id INTEGER PRIMARY KEY REFERENCES events(id),
+                full_text TEXT NOT NULL
+            )
         """)
         self._conn.commit()
 
@@ -363,6 +373,50 @@ class EventStore:
                 pass
         return d
 
+    def get_session_events(
+        self, session_id: str, include_full_text: bool = False, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            conn = self._get_conn()
+            if include_full_text:
+                rows = conn.execute("""
+                    SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
+                           e.summary, e.session_id, e.tokens_json, e.tool_name,
+                           e.file_path, e.model, e.cwd, ec.full_text
+                    FROM events e
+                    LEFT JOIN event_content ec ON e.id = ec.event_id
+                    WHERE e.session_id = ?
+                    ORDER BY e.timestamp ASC
+                    LIMIT ?
+                """, (session_id, limit)).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
+                           e.summary, e.session_id, e.tokens_json, e.tool_name,
+                           e.file_path, e.model, e.cwd, NULL as full_text
+                    FROM events e
+                    WHERE e.session_id = ?
+                    ORDER BY e.timestamp ASC
+                    LIMIT ?
+                """, (session_id, limit)).fetchall()
+        results = []
+        for r in rows:
+            d: dict[str, Any] = {
+                "id": r[0], "provider": r[1], "project": r[2],
+                "event_type": r[3], "timestamp": r[4], "summary": r[5],
+                "session_id": r[6], "tool_name": r[8],
+                "file_path": r[9], "model": r[10], "cwd": r[11],
+            }
+            if r[7]:
+                try:
+                    d["tokens"] = json.loads(r[7])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if r[12]:
+                d["full_text"] = r[12]
+            results.append(d)
+        return results
+
     def _get_conn(self) -> sqlite3.Connection:
         """Return the shared connection. Callers MUST hold self._lock."""
         return self._conn
@@ -375,7 +429,7 @@ class EventStore:
         fingerprint = _compute_fingerprint(event_dict)
         with self._lock:
             conn = self._get_conn()
-            conn.execute(
+            cursor = conn.execute(
                 """INSERT OR IGNORE INTO events
                    (provider, project, event_type, timestamp, summary,
                     session_id, tokens_json, tool_name, file_path, model, cwd,
@@ -397,6 +451,12 @@ class EventStore:
                     time.time(),
                 ),
             )
+            full_text = event_dict.get("full_text")
+            if cursor.rowcount > 0 and full_text and cursor.lastrowid:
+                conn.execute(
+                    "INSERT OR IGNORE INTO event_content (event_id, full_text) VALUES (?, ?)",
+                    (cursor.lastrowid, full_text),
+                )
             conn.commit()
 
     def store_batch(self, events: list[dict[str, Any]]) -> None:
@@ -409,34 +469,38 @@ class EventStore:
             return
         import time
         now = time.time()
-        rows = []
-        for e in events:
-            tokens = e.get("tokens")
-            rows.append((
-                e.get("provider", ""),
-                e.get("project", ""),
-                e.get("event_type", ""),
-                e.get("timestamp", ""),
-                e.get("summary", ""),
-                e.get("session_id"),
-                json.dumps(tokens) if tokens else None,
-                e.get("tool_name"),
-                e.get("file_path"),
-                e.get("model"),
-                e.get("cwd"),
-                _compute_fingerprint(e),
-                now,
-            ))
         with self._lock:
             conn = self._get_conn()
-            conn.executemany(
-                """INSERT OR IGNORE INTO events
-                   (provider, project, event_type, timestamp, summary,
-                    session_id, tokens_json, tool_name, file_path, model, cwd,
-                    fingerprint, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                rows,
-            )
+            for e in events:
+                tokens = e.get("tokens")
+                cursor = conn.execute(
+                    """INSERT OR IGNORE INTO events
+                       (provider, project, event_type, timestamp, summary,
+                        session_id, tokens_json, tool_name, file_path, model, cwd,
+                        fingerprint, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        e.get("provider", ""),
+                        e.get("project", ""),
+                        e.get("event_type", ""),
+                        e.get("timestamp", ""),
+                        e.get("summary", ""),
+                        e.get("session_id"),
+                        json.dumps(tokens) if tokens else None,
+                        e.get("tool_name"),
+                        e.get("file_path"),
+                        e.get("model"),
+                        e.get("cwd"),
+                        _compute_fingerprint(e),
+                        now,
+                    ),
+                )
+                full_text = e.get("full_text")
+                if cursor.rowcount > 0 and full_text and cursor.lastrowid:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO event_content (event_id, full_text) VALUES (?, ?)",
+                        (cursor.lastrowid, full_text),
+                    )
             conn.commit()
 
     def load_recent(self, limit: int = 500) -> list[dict[str, Any]]:
@@ -859,9 +923,14 @@ class EventStore:
                         row,
                     )
                     if cursor.rowcount > 0:
-                        # Event was inserted (not a duplicate)
                         ev = dict(events[i])
                         ev["id"] = cursor.lastrowid
+                        full_text = ev.pop("full_text", None)
+                        if full_text and cursor.lastrowid:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO event_content (event_id, full_text) VALUES (?, ?)",
+                                (cursor.lastrowid, full_text),
+                            )
                         result_events.append(ev)
 
                 if fingerprint:
