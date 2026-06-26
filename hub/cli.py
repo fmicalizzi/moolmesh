@@ -545,6 +545,13 @@ def main() -> None:
     q_project.add_argument("name", help="Project name (substring match)")
     q_project.add_argument("--since", help="ISO 8601 date")
 
+    # sessions
+    sess = subparsers.add_parser("sessions", help="List sessions with metadata")
+    sess.add_argument("--hours", type=int, default=24, help="Lookback window in hours (default: 24)")
+    sess.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode"], help="Filter by provider")
+    sess.add_argument("--branch", help="Filter by git branch (exact match)")
+    sess.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
+
     # doctor
     subparsers.add_parser("doctor", help="Run system diagnostics")
 
@@ -575,12 +582,62 @@ def main() -> None:
             cmd_repo(args)
         case "query":
             cmd_query(args)
+        case "sessions":
+            cmd_sessions(args)
         case "doctor":
             cmd_doctor(args)
         case "install":
             cmd_install(args)
         case _:
             parser.print_help()
+
+
+def cmd_sessions(args: argparse.Namespace) -> None:
+    from hub.mcp_server import EVENTS_DB, _get_sessions
+
+    data = _get_sessions(
+        EVENTS_DB,
+        hours=args.hours,
+        provider=args.provider,
+        branch=args.branch,
+    )
+
+    if getattr(args, "json_output", False):
+        import json as _json
+        print(_json.dumps(data, default=str))
+        return
+
+    if not data:
+        label = f" on branch '{args.branch}'" if args.branch else ""
+        print(yellow(f"No sessions found in the last {args.hours}h{label}."))
+        return
+
+    print(f"\n  {bold('Sessions')} (last {args.hours}h)")
+    if args.branch:
+        print(f"  Branch: {args.branch}")
+    print(f"  {'─' * 70}")
+    for s in data:
+        provider = s.get("provider", "?")
+        project = s.get("project", "unknown")
+        title = s.get("title", "")
+        branch = s.get("git_branch", "")
+        model = s.get("model", "")
+        events = s.get("event_count", 0)
+        last = (s.get("last_event_at") or "")[:19]
+        sid_short = (s.get("id") or "")[:12]
+
+        line1 = f"    {bold(provider):>12}  {project:<30} {events:>5} events  {dim(last)}"
+        print(line1)
+        details = []
+        if title:
+            details.append(f"title={title[:50]}")
+        if branch:
+            details.append(f"branch={branch}")
+        if model:
+            details.append(f"model={model[:30]}")
+        if details:
+            print(f"              {dim(sid_short)}  {dim(' | '.join(details))}")
+    print(f"\n  Total: {len(data)} sessions\n")
 
 
 def cmd_query(args: argparse.Namespace) -> None:

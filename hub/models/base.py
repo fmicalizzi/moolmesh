@@ -112,3 +112,50 @@ class UnifiedEvent:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict())
+
+
+@dataclass(slots=True)
+class SessionMeta:
+    """Metadata about a session, extracted from provider-specific entries."""
+
+    id: str
+    provider: Provider
+    project: str
+    title: str = ""
+    cwd: str = ""
+    git_branch: str = ""
+    model: str = ""
+    cli_version: str = ""
+    source: str = ""
+    cost: float = 0.0
+    is_sidechain: bool = False
+    initial_prompt: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "id": self.id,
+            "provider": self.provider.value,
+            "project": self.project,
+        }
+        if self.title:
+            d["title"] = self.title
+        if self.cwd:
+            d["cwd"] = self.cwd
+        if self.git_branch:
+            d["git_branch"] = self.git_branch
+        if self.model:
+            d["model"] = self.model
+        if self.cli_version:
+            d["cli_version"] = self.cli_version
+        if self.source:
+            d["source"] = self.source
+        if self.cost:
+            d["cost"] = self.cost
+        if self.is_sidechain:
+            d["is_sidechain"] = self.is_sidechain
+        if self.initial_prompt:
+            d["initial_prompt"] = self.initial_prompt
+        if self.metadata:
+            d["metadata"] = self.metadata
+        return d

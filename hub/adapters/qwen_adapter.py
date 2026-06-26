@@ -8,6 +8,7 @@ from hub.adapters.base import BaseAdapter
 from hub.models.base import (
     MessageRole,
     Provider,
+    SessionMeta,
     TokenUsage,
     ToolCall,
     UnifiedEvent,
@@ -80,6 +81,15 @@ class QwenAdapter(BaseAdapter):
             file_path=file_path if file_path else None,
             model=entry.model,
             cwd=entry.cwd or None,
+        )
+
+    def to_session_meta(self, entry: QwenEntry, project: str) -> SessionMeta | None:
+        return SessionMeta(
+            id=entry.session_id,
+            provider=Provider.QWEN,
+            project=project,
+            cwd=entry.cwd or "",
+            model=entry.model or "",
         )
 
     def _map_role(self, entry: QwenEntry) -> MessageRole | None:

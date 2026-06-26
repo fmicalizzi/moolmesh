@@ -37,4 +37,5 @@ class OpenCodeEntry:
     files_affected: list[str] = field(default_factory=list)
     project_name: str = ""
     project_dir: str = ""
+    session_title: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
