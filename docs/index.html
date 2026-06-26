@@ -535,7 +535,7 @@
 
 <span class="t-tagline t-dim">    congregating scattered signals
     into shared understanding</span>
-<span class="t-version">    v1.4.3</span>
+<span class="t-version" id="ver-display">    v1.6.0</span>
 
 <span class="t-watcher">  <span class="t-moss">Claude Code:</span>    watching 17 files</span>
 <span class="t-watcher">  <span class="t-moss">Codex (GPT-5):</span> watching 3 files</span>
@@ -736,5 +736,11 @@
   <p class="license">MIT License — Your telemetry is yours.</p>
 </footer>
 
+<script>
+fetch('https://pypi.org/pypi/moolmesh/json')
+  .then(r=>r.json())
+  .then(d=>{const v=d.info.version;document.getElementById('ver-display').textContent='    v'+v})
+  .catch(()=>{})
+</script>
 </body>
 </html>

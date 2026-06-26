@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="300" viewBox="0 0 560 300">
+  <defs>
+    <style>
+      .bg { fill: #1E1E2E; }
+      .bar { fill: #161622; }
+      .dot-r { fill: #FF5F57; }
+      .dot-y { fill: #FEBC2E; }
+      .dot-g { fill: #28C840; }
+      .bar-title { fill: #6C6C80; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 10px; }
+      .glyph { fill: #C8B88A; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; }
+      .prompt { fill: #4A7C59; }
+      .cmd { fill: #D4D4D8; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; }
+      .pyramid { fill: #C8B88A; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; }
+      .name { fill: #C8B88A; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; font-weight: 700; letter-spacing: 0.3em; }
+      .tagline { fill: #5A5A63; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; }
+      .version { fill: #5A5A63; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; }
+      .watcher-label { fill: #7A9E7E; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; }
+      .watcher-val { fill: #D4D4D8; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; }
+      .dash { fill: #D4D4D8; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; }
+      .jade { fill: #4A7C59; }
+      .dim { fill: #5A5A63; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 11px; }
+    </style>
+  </defs>
+
+  <!-- Terminal window -->
+  <rect class="bg" width="560" height="300" rx="8"/>
+
+  <!-- Title bar -->
+  <rect class="bar" width="560" height="28" rx="8"/>
+  <rect class="bar" y="20" width="560" height="8"/>
+  <circle class="dot-r" cx="16" cy="14" r="5"/>
+  <circle class="dot-y" cx="32" cy="14" r="5"/>
+  <circle class="dot-g" cx="48" cy="14" r="5"/>
+  <text class="bar-title" x="280" y="17" text-anchor="middle">mool dashboard — zsh</text>
+
+  <!-- Prompt -->
+  <text class="cmd" x="20" y="52">
+    <tspan class="prompt">❯</tspan><tspan> mool dashboard</tspan>
+  </text>
+
+  <!-- Pyramid -->
+  <text class="pyramid" x="168" y="76">██</text>
+  <text class="pyramid" x="148" y="89">██▓▓██</text>
+  <text class="pyramid" x="128" y="102">██▓▓▓▓▓▓██</text>
+  <text class="pyramid" x="108" y="115">██▓▓▓▓▓▓▓▓▓▓██</text>
+  <text class="pyramid" x="88" y="128">██▓▓▓▓▓▓▓▓▓▓▓▓▓▓██</text>
+  <text class="pyramid" x="88" y="141">██████████████████</text>
+
+  <!-- Name -->
+  <text class="name" x="100" y="162">M O O L M E S H</text>
+
+  <!-- Tagline -->
+  <text class="tagline" x="60" y="182">congregating scattered signals</text>
+  <text class="tagline" x="60" y="195">into shared understanding</text>
+
+  <!-- Version (editable on release) -->
+  <text class="version" x="60" y="210">v1.6.0</text>
+
+  <!-- Watchers -->
+  <text y="232" x="36">
+    <tspan class="watcher-label">Claude Code:</tspan><tspan class="watcher-val">    watching 17 files</tspan>
+  </text>
+  <text y="245" x="36">
+    <tspan class="watcher-label">Codex (GPT-5):</tspan><tspan class="watcher-val"> watching 3 files</tspan>
+  </text>
+  <text y="258" x="36">
+    <tspan class="watcher-label">Qwen CLI:</tspan><tspan class="watcher-val">      watching 5 files</tspan>
+  </text>
+  <text y="271" x="36">
+    <tspan class="watcher-label">OpenCode:</tspan><tspan class="watcher-val">      watching 1 files</tspan>
+  </text>
+
+  <!-- Dashboard link -->
+  <text y="291" x="36">
+    <tspan class="jade">→</tspan><tspan class="dash"> Dashboard </tspan><tspan class="glyph">http://localhost:5200</tspan>
+  </text>
+</svg>

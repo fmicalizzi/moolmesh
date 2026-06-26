@@ -510,6 +510,9 @@ class DashboardServer:
                 except FileNotFoundError:
                     self.send_error(404)
                     return
+                if content_type == "text/html" and b"{{VERSION}}" in data:
+                    from hub import __version__
+                    data = data.replace(b"{{VERSION}}", __version__.encode())
                 self.send_response(200)
                 self.send_header("Content-Type", f"{content_type}; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))

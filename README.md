@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/cli-banner.png" alt="MoolMesh CLI" width="560">
+  <img src="docs/cli-banner.svg" alt="MoolMesh CLI" width="560">
 </p>
 
 # MoolMesh
@@ -10,7 +10,7 @@ Unified observability, telemetry, and inter-agent coordination — running entir
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
-[![Tests: 509 passing](https://img.shields.io/badge/Tests-509%20passing-green.svg)](#development)
+[![Tests: 574 passing](https://img.shields.io/badge/Tests-574%20passing-green.svg)](#development)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#)
 [![PyPI](https://img.shields.io/pypi/v/moolmesh.svg)](https://pypi.org/project/moolmesh/)
 [![Español](https://img.shields.io/badge/Docs-Espa%C3%B1ol-orange.svg)](README.es.md)
@@ -408,7 +408,7 @@ pytest tests/ -v
 pytest tests/ -v --cov=hub
 ```
 
-509 tests. Zero external dependencies. Python stdlib + SQLite.
+574 tests. Zero external dependencies. Python stdlib + SQLite.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
