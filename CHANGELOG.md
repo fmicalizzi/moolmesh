@@ -6,6 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.5.0] — 2026-06-26
+
+### Added
+- **Full text storage** — new `event_content` table stores complete message text alongside the truncated 120-char summary. The events table stays lean for SSE/dashboard; full text is queried on demand.
+- **Session export** (`mool export`) — generates complete transcripts of any AI session. Supports `--format markdown` (default) and `--format json`, with optional `-o` file output.
+- **Full-text search** — `mool query search "text" --full` searches across complete session content instead of truncated summaries. Also available as MCP tool `search_session_content`.
+- **`get_session_events` MCP tool** — retrieves all events from a session with optional `include_full_text` parameter.
+- **Session metadata table** — `sessions` table captures titles, models, git branches, costs, and initial prompts. Automatic backfill from existing events on first startup. (#4)
+- **`mool sessions` CLI** — lists sessions with human-readable output. Filters: `--hours`, `--provider`, `--branch`, `--json`. (#7)
+- **Git branch correlation** — `--branch` filter on `mool sessions` + `get_branch_sessions` MCP tool. Claude's `gitBranch` field now stored in sessions table. (#9)
+- **`to_session_meta()` on all 4 adapters** — Claude, Codex, OpenCode, Qwen adapters extract provider-specific metadata (titles, costs, git branches, CLI versions) into the sessions table.
+- 22 new tests for full text storage, export, and search. 17 new tests for session metadata.
+
+### Fixed
+- **Parser truncation removed** — tool output previously cut at 500 chars in opencode_parser, qwen_parser, and codex_adapter is now stored in full.
+- **OpenCode parser ignoring session title** — `_row_to_entry()` now uses the `session_title` column that was already SELECTed but never mapped.
+
+### Changed
+- `UnifiedEvent` gains `full_text: str | None` field. `full_text` is stripped from SSE broadcast to keep the dashboard stream lightweight.
+- `store_with_offset()`, `store()`, and `store_batch()` insert into `event_content` when `full_text` is present, within the same transaction.
+
+---
+
 ## [1.4.3] — 2026-06-23
 
 ### Fixed

@@ -377,14 +377,16 @@ Ambas bases de datos se crean automáticamente. El esquema migra al iniciar.
 
 MoolMesh empezó con agentes de programación, pero la visión es más amplia — cualquier agente autónomo que genere señales observables pertenece a la malla.
 
-| Estado | Alcance | Detalles |
-|--------|---------|----------|
-| **Disponible** | Claude Code, Codex (GPT-5), Qwen CLI, OpenCode | Parsing completo de sesiones, monitoreo en vivo, MCP |
-| **Planeado** | Aider, Pi, GitHub Copilot CLI, Antigravity CLI | Adaptadores en progreso — PRs bienvenidos |
-| **Futuro** | Hermes, Odyssey, Goose, propuestas de la comunidad | Abre un issue para proponer un nuevo proveedor |
-| **Visión** | Analytics de uso de modelos cross-repo | Monitorear consumo de tokens y actividad de agentes en los repositorios de una organización |
+| Estado | Versión | Alcance |
+|--------|---------|---------|
+| **Entregado** | v1.5 | 4 proveedores (Claude, Codex, Qwen, OpenCode), metadata de sesiones, export de transcripts, búsqueda full-text, correlación por branch |
+| **En progreso** | v1.6 | Vinculación cruzada de sesiones entre proveedores (#6) |
+| **Planeado** | v1.7 | Nuevos proveedores: Aider, GitHub Copilot CLI, Pi |
+| **Planeado** | v1.8 | Template de proveedor y guía de contribución |
+| **Futuro** | v2.0 | Soporte para agentes autónomos: Hermes, Odyssey, Goose |
+| **Visión** | v2.x | Observabilidad a nivel organización, multi-usuario, analytics cross-repo |
 
-El objetivo a largo plazo: una capa de observabilidad unificada para cualquier ecosistema de agentes — programación, ops, investigación, orquestación — para que los equipos vean qué hacen sus agentes, qué gastan, y si interfieren entre sí.
+Consulta [ROADMAP.md](ROADMAP.md) para planes detallados, preguntas abiertas y principios de diseño.
 
 ---
 

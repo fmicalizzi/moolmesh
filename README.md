@@ -376,14 +376,16 @@ Both databases are created automatically. Schema migrates on startup.
 
 MoolMesh started with coding agents but the vision is broader — any autonomous agent that generates observable signals belongs in the mesh.
 
-| Status | Scope | Details |
-|--------|-------|---------|
-| **Shipping** | Claude Code, Codex (GPT-5), Qwen CLI, OpenCode | Full session parsing, live monitoring, MCP |
-| **Planned** | Aider, Pi, GitHub Copilot CLI, Antigravity CLI | Adapters in progress — PRs welcome |
-| **Future** | Hermes, Odyssey, Goose, community requests | Open an issue to propose a new provider |
-| **Vision** | Cross-repo model usage analytics | Monitor AI token consumption and agent activity across an organization's repositories |
+| Status | Version | Scope |
+|--------|---------|-------|
+| **Shipped** | v1.5 | 4 providers (Claude, Codex, Qwen, OpenCode), session metadata, full text export, full-text search, git branch correlation |
+| **In progress** | v1.6 | Cross-session linking across providers (#6) |
+| **Planned** | v1.7 | New providers: Aider, GitHub Copilot CLI, Pi |
+| **Planned** | v1.8 | Provider template & contributor guide |
+| **Future** | v2.0 | Autonomous agent support: Hermes, Odyssey, Goose |
+| **Vision** | v2.x | Organization-scale observability, multi-user, cross-repo analytics |
 
-The long-term goal: a unified observability layer for any agent ecosystem — coding, ops, research, orchestration — so teams can see what their agents are doing, what they're spending, and whether they're stepping on each other.
+See [ROADMAP.md](ROADMAP.md) for detailed plans, open questions, and design principles.
 
 ---
 
