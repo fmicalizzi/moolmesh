@@ -119,8 +119,8 @@ class TestQwenParserEdgeCases:
             entries = parser.parse_file(fpath)
             assert len(entries) == 2
 
-    def test_truncates_large_function_output(self):
-        """Function response output should be truncated to 500 chars."""
+    def test_preserves_full_function_output(self):
+        """Function response output is preserved in full (no parser truncation)."""
         with tempfile.TemporaryDirectory() as tmp:
             fpath = Path(tmp) / "test.jsonl"
             long_output = "x" * 1000
@@ -136,4 +136,4 @@ class TestQwenParserEdgeCases:
             parser = QwenParser()
             entries = parser.parse_file(fpath)
             assert len(entries[0].function_responses) == 1
-            assert len(entries[0].function_responses[0].output) == 500
+            assert len(entries[0].function_responses[0].output) == 1000

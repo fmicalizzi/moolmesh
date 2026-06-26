@@ -200,7 +200,7 @@ class OpenCodeParser(BaseParser):
                 return ""
             case "tool":
                 state = part_data.get("state", {}) or {}
-                return state.get("output", "")[:500] if state.get("output") else ""
+                return state.get("output", "") if state.get("output") else ""
             case "file":
                 return part_data.get("path", "") or ""
             case "patch":
@@ -220,7 +220,7 @@ class OpenCodeParser(BaseParser):
             return OpenCodeToolCall(
                 name=tool_name,
                 input_data=state.get("input", {}) if isinstance(state.get("input"), dict) else {"raw": str(state.get("input", ""))},
-                output_data={"output": str(state.get("output", ""))[:500]} if state.get("output") else {},
+                output_data={"output": str(state.get("output", ""))} if state.get("output") else {},
                 tool_id=part_data.get("id", ""),
             )
         if part_type == "file":

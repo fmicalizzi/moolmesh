@@ -69,6 +69,8 @@ class QwenAdapter(BaseAdapter):
                 or str(fc.args)[:80]
             )
 
+        full_text = self._extract_full_text(entry)
+
         return UnifiedEvent(
             provider=Provider.QWEN,
             project=project,
@@ -81,6 +83,7 @@ class QwenAdapter(BaseAdapter):
             file_path=file_path if file_path else None,
             model=entry.model,
             cwd=entry.cwd or None,
+            full_text=full_text,
         )
 
     def to_session_meta(self, entry: QwenEntry, project: str) -> SessionMeta | None:
@@ -132,6 +135,18 @@ class QwenAdapter(BaseAdapter):
             input_tokens=entry.usage.prompt_tokens,
             output_tokens=entry.usage.candidates_tokens,
         )
+
+    def _extract_full_text(self, entry: QwenEntry) -> str | None:
+        match entry.type:
+            case "user" | "assistant":
+                text = entry.text.strip()
+                return text if text else None
+            case "tool_result":
+                if entry.function_responses:
+                    return entry.function_responses[0].output or None
+                return None
+            case _:
+                return None
 
     def _summarize(self, entry: QwenEntry) -> str:
         match entry.type:

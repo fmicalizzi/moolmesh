@@ -76,6 +76,8 @@ class CodexAdapter(BaseAdapter):
                 "reasoning": entry.token_reasoning,
             }
 
+        full_text = self._extract_full_text(entry)
+
         return UnifiedEvent(
             provider=Provider.CODEX,
             project=project,
@@ -87,6 +89,7 @@ class CodexAdapter(BaseAdapter):
             tool_name=tool_name,
             file_path=file_path if file_path else None,
             cwd=entry.cwd or None,
+            full_text=full_text,
         )
 
     def to_session_meta(self, entry: CodexEntry, project: str) -> SessionMeta | None:
@@ -179,7 +182,7 @@ class CodexAdapter(BaseAdapter):
         if entry.function_call:
             return f"{entry.function_call.name}({entry.function_call.arguments[:200]})"
         if entry.function_output:
-            return entry.function_output.output[:500]
+            return entry.function_output.output
         return ""
 
     def _extract_tool_calls(self, entry: CodexEntry) -> list[ToolCall]:
@@ -197,6 +200,29 @@ class CodexAdapter(BaseAdapter):
                 operation_type="exec",
             )
         ]
+
+    def _extract_full_text(self, entry: CodexEntry) -> str | None:
+        match entry.event_type:
+            case "event_msg":
+                text = entry.event_msg_text.strip() if entry.event_msg_text else ""
+                return text if text else None
+            case "response_item":
+                match entry.payload_type:
+                    case "message":
+                        text = entry.text.strip() if entry.text else ""
+                        return text if text else None
+                    case "function_call_output":
+                        if entry.function_output and entry.function_output.output:
+                            return entry.function_output.output
+                        return None
+                    case "reasoning":
+                        if entry.reasoning_text:
+                            return entry.reasoning_text.strip()
+                        return None
+                    case _:
+                        return None
+            case _:
+                return None
 
     def _summarize(self, entry: CodexEntry) -> str:
         match entry.event_type:
