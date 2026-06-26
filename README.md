@@ -378,8 +378,7 @@ MoolMesh started with coding agents but the vision is broader — any autonomous
 
 | Status | Version | Scope |
 |--------|---------|-------|
-| **Shipped** | v1.5 | 4 providers (Claude, Codex, Qwen, OpenCode), session metadata, full text export, full-text search, git branch correlation |
-| **In progress** | v1.6 | Cross-session linking across providers (#6) |
+| **Shipped** | v1.6 | 4 providers (Claude, Codex, Qwen, OpenCode), session metadata, full text export, full-text search, git branch correlation, cross-session linking |
 | **Planned** | v1.7 | New providers: Aider, GitHub Copilot CLI, Pi |
 | **Planned** | v1.8 | Provider template & contributor guide |
 | **Future** | v2.0 | Autonomous agent support: Hermes, Odyssey, Goose |

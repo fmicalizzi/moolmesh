@@ -1,6 +1,6 @@
 [project]
 name = "moolmesh"
-version = "1.5.0"
+version = "1.6.0"
 description = "The context mesh for autonomous agents — unified observability, telemetry, and inter-agent coordination"
 requires-python = ">=3.11"
 license = "MIT"

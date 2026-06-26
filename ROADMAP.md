@@ -26,23 +26,14 @@ Last updated: June 2026
 - Git branch correlation — link sessions to branches
 - `mool sessions` CLI with filters by provider, branch, time window
 
----
+### v1.6 — Cross-Session Linking
 
-## In Progress
-
-### v1.6 — Cross-Session Linking (#6)
-
-Link related sessions across providers and time. Three phases:
-
-| Phase | What | Confidence | Status |
-|-------|------|-----------|--------|
-| Explicit links | Record when an agent queries another session via MCP | High | Ready to implement |
-| Temporal + file proximity | SQL-based detection: same project, same files, close in time | Medium | Ready to implement |
-| Semantic similarity | LLM-based comparison of session summaries (uses existing digest infra) | Lower | Planned |
-
-New table: `session_links`. New MCP tool: `get_session_chain(session_id)`.
-
-Small, additive change — no modifications to existing tables or hot paths.
+- Explicit linking via `mool link` between any two sessions
+- Temporal detection via `mool detect-links` — finds sessions sharing files within a time window
+- `mool chain` / `mool query chain` — view session chains across providers
+- `get_session_chain` MCP tool — agents can query related sessions
+- `get_session_detail` enriched with `linked_sessions` automatically
+- Phase 3 (semantic similarity via LLM) remains planned for a future version
 
 ---
 

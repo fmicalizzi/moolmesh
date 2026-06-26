@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.6.0] — 2026-06-26
+
+### Added
+- **Cross-session linking** — `session_links` table tracks relationships between sessions across providers with type (`continues`, `references`, `reviews`, `temporal`) and confidence score. (#6)
+- **`mool link`** — explicitly link two sessions by ID with `--type` flag.
+- **`mool chain`** — view the chain of linked sessions (predecessors and successors). `--json` for agents.
+- **`mool detect-links`** — Phase 2 temporal detection: finds sessions in the same project that share files within a configurable time window. `--auto` stores detected links automatically.
+- **`mool query chain`** — agent-friendly JSON output of session chains.
+- **`get_session_chain` MCP tool** — read-only query of linked sessions for agents connected via MCP.
+- **`get_session_detail` enriched** — automatically includes `linked_sessions` when links exist, so agents see related sessions without a second call.
+- 26 new tests for link creation, dedup, chain queries, temporal detection, and MCP integration.
+
+### Changed
+- MCP server stays fully read-only (`?mode=ro`) — links are created via CLI, read via both CLI and MCP.
+
+---
+
 ## [1.5.0] — 2026-06-26
 
 ### Added

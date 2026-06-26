@@ -379,8 +379,7 @@ MoolMesh empezó con agentes de programación, pero la visión es más amplia �
 
 | Estado | Versión | Alcance |
 |--------|---------|---------|
-| **Entregado** | v1.5 | 4 proveedores (Claude, Codex, Qwen, OpenCode), metadata de sesiones, export de transcripts, búsqueda full-text, correlación por branch |
-| **En progreso** | v1.6 | Vinculación cruzada de sesiones entre proveedores (#6) |
+| **Entregado** | v1.6 | 4 proveedores (Claude, Codex, Qwen, OpenCode), metadata de sesiones, export de transcripts, búsqueda full-text, correlación por branch, vinculación cruzada de sesiones |
 | **Planeado** | v1.7 | Nuevos proveedores: Aider, GitHub Copilot CLI, Pi |
 | **Planeado** | v1.8 | Template de proveedor y guía de contribución |
 | **Futuro** | v2.0 | Soporte para agentes autónomos: Hermes, Odyssey, Goose |
