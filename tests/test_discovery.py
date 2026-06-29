@@ -313,6 +313,7 @@ class TestDiscoverAll:
             qwen_base=tmp_path / "qwen",
             codex_base=tmp_path / "codex",
             opencode_base=tmp_path / "nonexistent.db",
+            cursor_base=tmp_path / "nonexistent",
         )
         result = discovery.discover_all()
         assert len(result) == 2

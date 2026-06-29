@@ -1,11 +1,11 @@
 [project]
 name = "moolmesh"
-version = "1.6.3"
+version = "1.7.0"
 description = "The context mesh for autonomous agents — unified observability, telemetry, and inter-agent coordination"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = []
-keywords = ["ai", "agents", "observability", "telemetry", "mcp", "claude", "codex", "opencode", "developer-tools"]
+keywords = ["ai", "agents", "observability", "telemetry", "mcp", "claude", "codex", "opencode", "cursor", "developer-tools"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",

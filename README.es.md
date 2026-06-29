@@ -12,7 +12,7 @@ Observabilidad unificada, telemetría y coordinación entre agentes — ejecutá
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
-[![Tests: 574 passing](https://img.shields.io/badge/Tests-574%20passing-green.svg)](#desarrollo)
+[![Tests: 592 passing](https://img.shields.io/badge/Tests-592%20passing-green.svg)](#desarrollo)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#)
 [![PyPI](https://img.shields.io/pypi/v/moolmesh.svg)](https://pypi.org/project/moolmesh/)
 
@@ -119,6 +119,7 @@ systemctl --user status moolmesh
 | **Codex (GPT-5)** | `~/.codex/sessions/` + `state_5.sqlite` | Rollout JSONL + metadatos SQLite |
 | **Qwen CLI** | `~/.qwen/projects/` | JSONL por chat |
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | SQLite (sesion → mensaje → parte) |
+| **Cursor** | `~/Library/Application Support/Cursor/User/` (macOS) | SQLite (`state.vscdb` clave-valor: bubbles del composer) |
 
 Las sesiones se auto-descubren al iniciar. Sin configuración, sin claves API, sin servicios en la nube.
 
@@ -434,6 +435,7 @@ Consulta [ROADMAP.md](ROADMAP.md) para planes detallados, preguntas abiertas y p
 - **Diseño mono-usuario** — no está pensado para despliegues multi-usuario o en servidor
 - **Python 3.11+** — utiliza `tomllib` de la biblioteca estandar
 - **Solo GitHub Projects v2** — Projects clasicos (v1) no estan soportados
+- **Limitaciones de Cursor** — Cursor no guarda timestamps por mensaje localmente (MoolMesh los aproxima desde la metadata del composer) y su esquema en disco es reverse-engineered, por lo que una actualización de Cursor puede reducir temporalmente la ingesta hasta ajustar el parser
 
 ---
 
@@ -447,7 +449,7 @@ pytest tests/ -v
 pytest tests/ -v --cov=hub
 ```
 
-574 tests. Cero dependencias externas. Python stdlib + SQLite.
+592 tests. Cero dependencias externas. Python stdlib + SQLite.
 
 Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para las guías de contribución.
 
