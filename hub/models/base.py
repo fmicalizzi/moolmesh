@@ -14,6 +14,7 @@ class Provider(str, Enum):
     CODEX = "codex"
     QWEN = "qwen"
     OPENCODE = "opencode"
+    CURSOR = "cursor"
 
 
 class MessageRole(str, Enum):
