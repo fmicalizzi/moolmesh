@@ -54,7 +54,7 @@
   <text class="tagline" x="60" y="195">into shared understanding</text>
 
   <!-- Version (editable on release) -->
-  <text class="version" x="60" y="210">v1.7.0</text>
+  <text class="version" x="60" y="210">v1.7.1</text>
 
   <!-- Watchers -->
   <text y="232" x="36">
