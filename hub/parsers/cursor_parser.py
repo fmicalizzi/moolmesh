@@ -213,17 +213,31 @@ class CursorParser(BaseParser):
 
     @staticmethod
     def _extract_tool(data: dict[str, Any]) -> tuple[str, str]:
-        """Best-effort tool name + file path from a bubble (schema is loose)."""
+        """Best-effort tool name + file path from a bubble (schema is loose).
+
+        Cursor's values are not guaranteed to be strings — `codeBlocks[i].uri`
+        is often a VS Code URI object (dict). Everything is coerced to a string
+        defensively so a slice never fails.
+        """
         tool_name = ""
         file_path = ""
         tool_results = data.get("toolResults")
-        if isinstance(tool_results, list) and tool_results:
-            first = tool_results[0]
-            if isinstance(first, dict):
-                tool_name = first.get("tool", "") or first.get("name", "") or ""
+        if isinstance(tool_results, list) and tool_results and isinstance(tool_results[0], dict):
+            name = tool_results[0].get("tool") or tool_results[0].get("name") or ""
+            if isinstance(name, str):
+                tool_name = name
         code_blocks = data.get("codeBlocks")
-        if isinstance(code_blocks, list) and code_blocks:
-            first = code_blocks[0]
-            if isinstance(first, dict):
-                file_path = first.get("uri", "") or first.get("file", "") or ""
+        if isinstance(code_blocks, list) and code_blocks and isinstance(code_blocks[0], dict):
+            file_path = CursorParser._coerce_path(code_blocks[0].get("uri")) \
+                or CursorParser._coerce_path(code_blocks[0].get("file"))
         return tool_name[:80], file_path[:80]
+
+    @staticmethod
+    def _coerce_path(value: Any) -> str:
+        """Coerce a Cursor uri/file value (str or VS Code URI dict) to a path string."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            candidate = value.get("fsPath") or value.get("path") or ""
+            return candidate if isinstance(candidate, str) else ""
+        return ""

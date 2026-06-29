@@ -92,6 +92,26 @@ def test_parse_incremental_skips_malformed(tmp_path):
     assert [b.text for b in bubbles] == ["ok"]
 
 
+def test_parse_incremental_handles_uri_object_in_codeblocks(tmp_path):
+    """Real Cursor data stores codeBlocks[i].uri as a VS Code URI object (dict)."""
+    base = tmp_path / "User"
+    base.mkdir()
+    (base / "globalStorage").mkdir()
+    gdb = base / "globalStorage" / "state.vscdb"
+    _make_global_db(gdb, [
+        ("c1", "b1", {
+            "type": 2, "text": "edited",
+            "toolResults": [{"tool": "edit_file"}],
+            "codeBlocks": [{"uri": {"fsPath": "/dev/myproj/x.py", "path": "/dev/myproj/x.py"}}],
+        }),
+    ])
+    parser = CursorParser(cursor_base=base)
+    bubbles, _ = parser.parse_incremental(gdb, 0)
+    assert len(bubbles) == 1
+    assert bubbles[0].tool_name == "edit_file"
+    assert bubbles[0].file_path == "/dev/myproj/x.py"
+
+
 def test_can_parse_requires_cursordiskkv(tmp_path):
     good = tmp_path / "state.vscdb"
     conn = sqlite3.connect(str(good))
