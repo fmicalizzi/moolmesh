@@ -666,7 +666,7 @@ def main() -> None:
     rep.add_argument("mode", nargs="?", default=None, choices=["auto"],
                      help="'auto': generate to ~/.moolmesh/reports/YYYY-MM-DD/")
     rep.add_argument("--project", help="Filter to project name (substring match)")
-    rep.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode"], help="Filter by provider")
+    rep.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode", "cursor"], help="Filter by provider")
     rep.add_argument("--output", help="Output directory (default: reports/)")
     rep.add_argument("--daily", action="store_true", help="Only generate day-level reports (for auto mode)")
     rep.add_argument("--complete", action="store_true",
@@ -674,7 +674,7 @@ def main() -> None:
 
     # discover
     disc = subparsers.add_parser("discover", help="List discovered projects")
-    disc.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode"], help="Filter by provider")
+    disc.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode", "cursor"], help="Filter by provider")
     disc.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
 
     # backfill
@@ -750,7 +750,7 @@ def main() -> None:
     # sessions
     sess = subparsers.add_parser("sessions", help="List sessions with metadata")
     sess.add_argument("--hours", type=int, default=24, help="Lookback window in hours (default: 24)")
-    sess.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode"], help="Filter by provider")
+    sess.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode", "cursor"], help="Filter by provider")
     sess.add_argument("--branch", help="Filter by git branch (exact match)")
     sess.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
 

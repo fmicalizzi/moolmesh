@@ -208,6 +208,7 @@ def generate_report(
             "codex": discovery.discover_codex,
             "qwen": discovery.discover_qwen,
             "opencode": discovery.discover_opencode,
+            "cursor": discovery.discover_cursor,
         }
         func = provider_map.get(provider_filter)
         all_projects = func() if func else []
