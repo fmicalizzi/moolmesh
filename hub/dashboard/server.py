@@ -166,7 +166,7 @@ class DashboardServer:
         self.event_store = EventStore()
 
         # Determine which providers to harvest
-        active = set(providers) if providers else {"claude", "codex", "qwen", "opencode"}
+        active = set(providers) if providers else {"claude", "codex", "qwen", "opencode", "cursor"}
 
         # Harvesters — write directly to SQLite, push to sse_buffer
         self.watchers: list = []
@@ -190,6 +190,10 @@ class DashboardServer:
             from hub.watchers.opencode_watcher import OpenCodeWatcher
             self.opencode_watcher = OpenCodeWatcher(self.event_store, self.sse_buffer)
             self.watchers.append(("OpenCode", self.opencode_watcher))
+        if "cursor" in active:
+            from hub.watchers.cursor_watcher import CursorWatcher
+            self.cursor_watcher = CursorWatcher(self.event_store, self.sse_buffer)
+            self.watchers.append(("Cursor", self.cursor_watcher))
 
         # GitHarvester — runs in background for registered repos
         self.git_store: GitStore | None = None
