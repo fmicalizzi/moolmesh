@@ -173,7 +173,31 @@ Sin un token válido, `mool repo add` funciona igual — ingesta el historial lo
 
 ## Servidor MCP (API inter-agentes)
 
-MoolMesh expone un servidor MCP de solo lectura vía stdio, permitiendo que cualquier agente compatible con MCP consulte los datos de sesión:
+MoolMesh expone un servidor MCP de solo lectura vía stdio, permitiendo que cualquier agente compatible con MCP consulte los datos de sesión.
+
+El servidor MCP usa [PEP 723](https://peps.python.org/pep-0723/) (inline script metadata) para sus dependencias (el paquete `mcp`). Esto mantiene MoolMesh con cero dependencias externas mientras permite que el servidor MCP funcione de forma independiente.
+
+### Configuración rápida
+
+```bash
+mool mcp setup                  # Claude Code (global, scope usuario)
+mool mcp setup claude-desktop   # Claude Desktop (macOS/Linux/Windows)
+mool mcp setup json             # Imprimir JSON para cualquier cliente MCP
+```
+
+El comando auto-detecta el método de instalación (pipx/pip/source), encuentra las rutas correctas de Python y del servidor, y verifica la dependencia `mcp`. Si `mcp` no está instalado, muestra el comando exacto, o usa `--install-deps` para instalarlo automáticamente:
+
+```bash
+mool mcp setup --install-deps   # También ejecuta: pipx inject moolmesh mcp
+```
+
+Usa `--dry-run` para previsualizar cambios sin modificar archivos.
+
+### Configuración manual
+
+Si preferís configurar manualmente, estos son los dos escenarios comunes:
+
+**Desde el código fuente** (requiere [uv](https://docs.astral.sh/uv/)):
 
 ```json
 {
@@ -186,7 +210,20 @@ MoolMesh expone un servidor MCP de solo lectura vía stdio, permitiendo que cual
 }
 ```
 
-Herramientas disponibles:
+**Desde pipx/pip** (requiere `pipx inject moolmesh mcp`):
+
+```json
+{
+  "mcpServers": {
+    "moolmesh": {
+      "command": "/ruta/a/pipx/venvs/moolmesh/bin/python",
+      "args": ["/ruta/a/pipx/venvs/moolmesh/lib/.../hub/mcp_server.py"]
+    }
+  }
+}
+```
+
+### Herramientas disponibles
 
 | Herramienta | Descripción |
 |-------------|-------------|
@@ -256,6 +293,7 @@ Comandos:
   daemon status          Mostrar PID, uptime, tamaño de log
   daemon restart         Reiniciar el servicio en background
   status [--json]        Atajo rápido para daemon status
+  mcp setup [TARGET]     Configurar servidor MCP (claude-code|claude-desktop|json)
   doctor                 Ejecutar diagnóstico del sistema
   install                Instalar comando mool globalmente (~/.local/bin)
   report                 Generar reportes de análisis en Markdown por lotes

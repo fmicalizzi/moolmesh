@@ -378,6 +378,197 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print(yellow(f"  {checks_ok} passed, {checks_fail} failed\n"))
 
 
+def cmd_mcp_setup(args: argparse.Namespace) -> None:
+    import json
+    import platform
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    target = getattr(args, "target", "claude-code")
+    mcp_script = (Path(__file__).parent / "mcp_server.py").resolve()
+
+    # ── Detect install method ──────────────────────────────────────
+    is_pipx = "pipx" in sys.prefix
+    in_venv = sys.prefix != sys.base_prefix
+
+    if is_pipx:
+        method = "pipx"
+        python = Path(sys.prefix) / "bin" / "python"
+        if not python.exists():
+            python = Path(sys.executable)
+    elif in_venv:
+        method = "venv"
+        python = Path(sys.executable)
+    else:
+        method = "pip"
+        python = Path(sys.executable)
+
+    print(bold("MoolMesh MCP Setup\n"))
+    print(f"  Python:    {python}")
+    print(f"  Server:    {mcp_script}")
+    print(f"  Install:   {method}")
+    print()
+
+    # ── Check mcp dependency ───────────────────────────────────────
+    try:
+        subprocess.run(
+            [str(python), "-c", "import mcp"],
+            capture_output=True, check=True, timeout=10,
+        )
+        mcp_available = True
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        mcp_available = False
+
+    if not mcp_available:
+        print(yellow("  ⚠ The 'mcp' package is not installed in this environment."))
+        if method == "pipx":
+            inject_cmd = ["pipx", "inject", "moolmesh", "mcp"]
+        else:
+            inject_cmd = [str(python), "-m", "pip", "install", "mcp"]
+
+        print(f"  Run:  {bold(' '.join(inject_cmd))}")
+        print()
+
+        if getattr(args, "install_mcp", False) and not getattr(args, "dry_run", False):
+            print(dim(f"  Running: {' '.join(inject_cmd)}"))
+            try:
+                subprocess.run(inject_cmd, check=True, timeout=120)
+                mcp_available = True
+                print(green("  ✓ mcp installed successfully.\n"))
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                print(red(f"  ✗ Failed: {exc}"))
+                return
+        else:
+            print(dim("  Use --install-deps to install it automatically."))
+            print()
+
+    if not mcp_available:
+        return
+
+    # ── Build the MCP config ───────────────────────────────────────
+    uv_available = shutil.which("uv") is not None
+    if method == "venv" and uv_available:
+        server_cmd = ["uv", "run", str(mcp_script)]
+    else:
+        server_cmd = [str(python), str(mcp_script)]
+
+    config_block = {
+        "command": server_cmd[0],
+        "args": server_cmd[1:],
+    }
+
+    # ── Target: claude-code ────────────────────────────────────────
+    if target == "claude-code":
+        claude_bin = shutil.which("claude")
+        if claude_bin:
+            already = _claude_code_has_mcp(claude_bin, "moolmesh")
+            if already:
+                print(yellow("  ⚠ 'moolmesh' is already registered in Claude Code."))
+                print(dim("  Re-registering will overwrite the current config."))
+                print()
+
+            print(dim("  Registering via: claude mcp add --scope user"))
+            cmd = [
+                claude_bin, "mcp", "add",
+                "--scope", "user",
+                "--transport", "stdio",
+                "moolmesh",
+            ] + server_cmd
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    verb = "updated" if already else "registered"
+                    print(green(f"  ✓ MCP server 'moolmesh' {verb} globally in Claude Code."))
+                else:
+                    err = result.stderr.strip() or result.stdout.strip()
+                    print(yellow(f"  ⚠ claude mcp add returned: {err}"))
+                    print(dim("  You can add it manually — config shown below."))
+                    _print_mcp_json(config_block)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                print(yellow("  ⚠ Could not run 'claude mcp add'."))
+                _print_mcp_json(config_block)
+        else:
+            print(yellow("  'claude' CLI not found in PATH."))
+            print(dim("  Add this to ~/.claude.json under mcpServers:"))
+            _print_mcp_json(config_block)
+
+    # ── Target: claude-desktop ─────────────────────────────────────
+    elif target == "claude-desktop":
+        system = platform.system()
+        if system == "Darwin":
+            config_path = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+        elif system == "Linux":
+            config_path = Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+        elif system == "Windows":
+            appdata = os.environ.get("APPDATA", "")
+            config_path = Path(appdata) / "Claude" / "claude_desktop_config.json" if appdata else None
+        else:
+            config_path = None
+
+        if not config_path:
+            print(red(f"  Unsupported platform for Claude Desktop: {system}"))
+            _print_mcp_json(config_block)
+            return
+
+        if getattr(args, "dry_run", False):
+            print(f"  Config file: {config_path}")
+            print(dim("  Would add:"))
+            _print_mcp_json(config_block)
+            return
+
+        # Read-merge-write
+        existing: dict = {}
+        if config_path.exists():
+            try:
+                existing = json.loads(config_path.read_text())
+            except (json.JSONDecodeError, OSError) as exc:
+                print(red(f"  ✗ Cannot parse {config_path}: {exc}"))
+                print(dim("  Add manually:"))
+                _print_mcp_json(config_block)
+                return
+
+        mcp_servers = existing.setdefault("mcpServers", {})
+        already = "moolmesh" in mcp_servers
+        if already:
+            print(yellow("  ⚠ 'moolmesh' already exists in Claude Desktop config."))
+            print(dim("  Overwriting with updated config."))
+            print()
+        mcp_servers["moolmesh"] = config_block
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(existing, indent=2) + "\n")
+        verb = "Updated" if already else "Written to"
+        print(green(f"  ✓ {verb} {config_path}"))
+        print(dim("  Restart Claude Desktop to load the new server."))
+
+    # ── Target: json (just print) ──────────────────────────────────
+    elif target == "json":
+        _print_mcp_json(config_block)
+
+    print()
+
+
+def _claude_code_has_mcp(claude_bin: str, name: str) -> bool:
+    import subprocess
+    try:
+        result = subprocess.run(
+            [claude_bin, "mcp", "list"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return f"{name}:" in result.stdout or f" {name} " in result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _print_mcp_json(config_block: dict) -> None:
+    import json
+    wrapper = {"mcpServers": {"moolmesh": config_block}}
+    print()
+    print(json.dumps(wrapper, indent=2))
+    print()
+
+
 def cmd_install(args: argparse.Namespace) -> None:
     import sys
     from pathlib import Path
@@ -580,6 +771,21 @@ def main() -> None:
     p_detect.add_argument("--auto", action="store_true", help="Automatically store detected links")
     p_detect.add_argument("--json", action="store_true", dest="json_output")
 
+    # mcp
+    mcp_parser = subparsers.add_parser("mcp", help="MCP server management")
+    mcp_sub = mcp_parser.add_subparsers(dest="mcp_command")
+
+    mcp_setup = mcp_sub.add_parser("setup", help="Configure MCP server for an AI client")
+    mcp_setup.add_argument(
+        "target", nargs="?", default="claude-code",
+        choices=["claude-code", "claude-desktop", "json"],
+        help="Target client (default: claude-code)",
+    )
+    mcp_setup.add_argument("--install-deps", action="store_true", dest="install_mcp",
+                           help="Auto-install the 'mcp' package if missing")
+    mcp_setup.add_argument("--dry-run", action="store_true",
+                           help="Show what would be written without modifying files")
+
     # doctor
     subparsers.add_parser("doctor", help="Run system diagnostics")
 
@@ -620,6 +826,11 @@ def main() -> None:
             cmd_chain(args)
         case "detect-links":
             cmd_detect_links(args)
+        case "mcp":
+            if getattr(args, "mcp_command", None) == "setup":
+                cmd_mcp_setup(args)
+            else:
+                mcp_parser.print_help()
         case "doctor":
             cmd_doctor(args)
         case "install":

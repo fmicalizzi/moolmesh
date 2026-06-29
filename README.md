@@ -172,7 +172,31 @@ Without a valid token, `mool repo add` still works — it ingests local git hist
 
 ## MCP Server (Inter-Agent API)
 
-MoolMesh exposes a read-only MCP server over stdio, allowing any MCP-compatible agent to query session data:
+MoolMesh exposes a read-only MCP server over stdio, allowing any MCP-compatible agent to query session data.
+
+The MCP server uses [PEP 723](https://peps.python.org/pep-0723/) inline script metadata for its dependencies (the `mcp` package). This keeps MoolMesh itself zero-dependency while allowing the MCP server to run standalone.
+
+### Quick setup
+
+```bash
+mool mcp setup                  # Claude Code (global, user scope)
+mool mcp setup claude-desktop   # Claude Desktop (macOS/Linux/Windows)
+mool mcp setup json             # Print config JSON for any MCP client
+```
+
+The command auto-detects your install method (pipx/pip/source), finds the correct Python and server paths, and checks for the `mcp` dependency. If `mcp` is missing it shows the exact command to install it, or use `--install-deps` to install automatically:
+
+```bash
+mool mcp setup --install-deps   # Also runs: pipx inject moolmesh mcp
+```
+
+Use `--dry-run` to preview changes without modifying any config files.
+
+### Manual configuration
+
+If you prefer to configure manually, here are the two common setups:
+
+**From source** (requires [uv](https://docs.astral.sh/uv/)):
 
 ```json
 {
@@ -185,7 +209,20 @@ MoolMesh exposes a read-only MCP server over stdio, allowing any MCP-compatible 
 }
 ```
 
-Available tools:
+**From pipx/pip** (requires `pipx inject moolmesh mcp`):
+
+```json
+{
+  "mcpServers": {
+    "moolmesh": {
+      "command": "/path/to/pipx/venvs/moolmesh/bin/python",
+      "args": ["/path/to/pipx/venvs/moolmesh/lib/.../hub/mcp_server.py"]
+    }
+  }
+}
+```
+
+### Available tools
 
 | Tool | Description |
 |------|-------------|
@@ -255,6 +292,7 @@ Commands:
   daemon status          Show daemon PID, uptime, log size
   daemon restart         Restart the background service
   status [--json]        Quick alias for daemon status
+  mcp setup [TARGET]     Configure MCP server (claude-code|claude-desktop|json)
   doctor                 Run system diagnostics
   install                Install mool command globally (~/.local/bin)
   report                 Generate batch Markdown analysis reports
