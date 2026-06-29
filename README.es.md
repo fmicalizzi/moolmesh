@@ -183,6 +183,10 @@ El servidor MCP usa [PEP 723](https://peps.python.org/pep-0723/) (inline script 
 ```bash
 mool mcp setup                  # Claude Code (global, scope usuario)
 mool mcp setup claude-desktop   # Claude Desktop (macOS/Linux/Windows)
+mool mcp setup cursor           # Cursor IDE
+mool mcp setup codex            # Codex (OpenAI CLI)
+mool mcp setup qwen             # Qwen CLI
+mool mcp setup opencode         # OpenCode
 mool mcp setup json             # Imprimir JSON para cualquier cliente MCP
 ```
 
@@ -294,7 +298,7 @@ Comandos:
   daemon status          Mostrar PID, uptime, tamaño de log
   daemon restart         Reiniciar el servicio en background
   status [--json]        Atajo rápido para daemon status
-  mcp setup [TARGET]     Configurar servidor MCP (claude-code|claude-desktop|json)
+  mcp setup [TARGET]     Configurar servidor MCP (claude-code|claude-desktop|cursor|codex|qwen|opencode|json)
   doctor                 Ejecutar diagnóstico del sistema
   install                Instalar comando mool globalmente (~/.local/bin)
   report                 Generar reportes de análisis en Markdown por lotes

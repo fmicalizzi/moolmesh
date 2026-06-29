@@ -496,59 +496,167 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
             print(dim("  Add this to ~/.claude.json under mcpServers:"))
             _print_mcp_json(config_block)
 
-    # ── Target: claude-desktop ─────────────────────────────────────
-    elif target == "claude-desktop":
-        system = platform.system()
-        if system == "Darwin":
-            config_path = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
-        elif system == "Linux":
-            config_path = Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
-        elif system == "Windows":
-            appdata = os.environ.get("APPDATA", "")
-            config_path = Path(appdata) / "Claude" / "claude_desktop_config.json" if appdata else None
-        else:
-            config_path = None
-
+    # ── Target: JSON-config clients ───────────────────────────────
+    elif target in ("claude-desktop", "cursor", "qwen"):
+        config_path = _mcp_config_path(target, platform.system())
         if not config_path:
-            print(red(f"  Unsupported platform for Claude Desktop: {system}"))
+            print(red(f"  Unsupported platform: {platform.system()}"))
             _print_mcp_json(config_block)
             return
+        client_names = {"claude-desktop": "Claude Desktop", "cursor": "Cursor", "qwen": "Qwen CLI"}
+        _write_mcp_json_config(config_path, config_block, client_names[target], args)
 
-        if getattr(args, "dry_run", False):
-            print(f"  Config file: {config_path}")
-            print(dim("  Would add:"))
-            _print_mcp_json(config_block)
+    # ── Target: opencode (different JSON schema) ───────────────────
+    elif target == "opencode":
+        config_path = _mcp_config_path(target, platform.system())
+        if not config_path:
+            print(red(f"  Unsupported platform: {platform.system()}"))
             return
+        oc_block = {
+            "type": "local",
+            "command": [config_block["command"]] + config_block["args"],
+            "enabled": True,
+        }
+        _write_opencode_mcp(config_path, oc_block, args)
 
-        # Read-merge-write
-        existing: dict = {}
-        if config_path.exists():
-            try:
-                existing = json.loads(config_path.read_text())
-            except (json.JSONDecodeError, OSError) as exc:
-                print(red(f"  ✗ Cannot parse {config_path}: {exc}"))
-                print(dim("  Add manually:"))
-                _print_mcp_json(config_block)
-                return
-
-        mcp_servers = existing.setdefault("mcpServers", {})
-        already = "moolmesh" in mcp_servers
-        if already:
-            print(yellow("  ⚠ 'moolmesh' already exists in Claude Desktop config."))
-            print(dim("  Overwriting with updated config."))
-            print()
-        mcp_servers["moolmesh"] = config_block
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(json.dumps(existing, indent=2) + "\n")
-        verb = "Updated" if already else "Written to"
-        print(green(f"  ✓ {verb} {config_path}"))
-        print(dim("  Restart Claude Desktop to load the new server."))
+    # ── Target: codex (TOML format) ────────────────────────────────
+    elif target == "codex":
+        config_path = _mcp_config_path(target, platform.system())
+        if not config_path:
+            print(red(f"  Unsupported platform: {platform.system()}"))
+            return
+        _write_codex_mcp(config_path, server_cmd, args)
 
     # ── Target: json (just print) ──────────────────────────────────
     elif target == "json":
         _print_mcp_json(config_block)
 
     print()
+
+
+def _mcp_config_path(target: str, system: str):
+    from pathlib import Path
+    import os
+    if target == "claude-desktop":
+        if system == "Darwin":
+            return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+        if system == "Linux":
+            return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+        if system == "Windows":
+            appdata = os.environ.get("APPDATA", "")
+            return Path(appdata) / "Claude" / "claude_desktop_config.json" if appdata else None
+    elif target == "cursor":
+        return Path.home() / ".cursor" / "mcp.json"
+    elif target == "qwen":
+        return Path.home() / ".qwen" / "settings.json"
+    elif target == "opencode":
+        return Path.home() / ".config" / "opencode" / "opencode.json"
+    elif target == "codex":
+        return Path.home() / ".codex" / "config.toml"
+    return None
+
+
+def _write_mcp_json_config(config_path, config_block: dict, client_name: str, args) -> None:
+    import json
+    from hub.colors import green, yellow, red, dim
+
+    if getattr(args, "dry_run", False):
+        print(f"  Config file: {config_path}")
+        print(dim("  Would add:"))
+        _print_mcp_json(config_block)
+        return
+
+    existing: dict = {}
+    if config_path.exists():
+        try:
+            existing = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            print(red(f"  ✗ Cannot parse {config_path}: {exc}"))
+            print(dim("  Add manually:"))
+            _print_mcp_json(config_block)
+            return
+
+    mcp_servers = existing.setdefault("mcpServers", {})
+    already = "moolmesh" in mcp_servers
+    if already:
+        print(yellow(f"  ⚠ 'moolmesh' already exists in {client_name} config."))
+        print(dim("  Overwriting with updated config."))
+        print()
+    mcp_servers["moolmesh"] = config_block
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(existing, indent=2) + "\n")
+    verb = "Updated" if already else "Written to"
+    print(green(f"  ✓ {verb} {config_path}"))
+    print(dim(f"  Restart {client_name} to load the new server."))
+
+
+def _write_opencode_mcp(config_path, oc_block: dict, args) -> None:
+    import json
+    from hub.colors import green, yellow, red, dim
+
+    if getattr(args, "dry_run", False):
+        print(f"  Config file: {config_path}")
+        print(dim("  Would add:"))
+        print(json.dumps({"mcp": {"moolmesh": oc_block}}, indent=2))
+        return
+
+    existing: dict = {}
+    if config_path.exists():
+        try:
+            existing = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            print(red(f"  ✗ Cannot parse {config_path}: {exc}"))
+            return
+
+    mcp = existing.setdefault("mcp", {})
+    already = "moolmesh" in mcp
+    if already:
+        print(yellow("  ⚠ 'moolmesh' already exists in OpenCode config."))
+        print(dim("  Overwriting with updated config."))
+        print()
+    mcp["moolmesh"] = oc_block
+    config_path.write_text(json.dumps(existing, indent=2) + "\n")
+    verb = "Updated" if already else "Written to"
+    print(green(f"  ✓ {verb} {config_path}"))
+    print(dim("  Restart OpenCode to load the new server."))
+
+
+def _write_codex_mcp(config_path, server_cmd: list, args) -> None:
+    from hub.colors import green, yellow, dim
+
+    cmd_str = " ".join(f'"{c}"' if " " in c else c for c in server_cmd)
+
+    if getattr(args, "dry_run", False):
+        print(f"  Config file: {config_path}")
+        print(dim("  Would add:"))
+        print(f'\n  [mcp_servers.moolmesh]\n  command = "{server_cmd[0]}"')
+        if len(server_cmd) > 1:
+            args_str = ", ".join(f'"{a}"' for a in server_cmd[1:])
+            print(f"  args = [{args_str}]")
+        print()
+        return
+
+    content = config_path.read_text() if config_path.exists() else ""
+    already = "mcp_servers.moolmesh" in content
+
+    if already:
+        print(yellow("  ⚠ 'moolmesh' already exists in Codex config."))
+        print(dim("  Check ~/.codex/config.toml and update manually:"))
+        print(f'\n  [mcp_servers.moolmesh]\n  command = "{server_cmd[0]}"')
+        if len(server_cmd) > 1:
+            args_str = ", ".join(f'"{a}"' for a in server_cmd[1:])
+            print(f"  args = [{args_str}]")
+        print()
+        return
+
+    entry = f'\n[mcp_servers.moolmesh]\ncommand = "{server_cmd[0]}"\n'
+    if len(server_cmd) > 1:
+        args_str = ", ".join(f'"{a}"' for a in server_cmd[1:])
+        entry += f"args = [{args_str}]\n"
+
+    config_path.write_text(content + entry)
+    print(green(f"  ✓ Written to {config_path}"))
+    print(dim("  Restart Codex to load the new server."))
 
 
 def _claude_code_has_mcp_user(claude_bin: str, name: str) -> bool:
@@ -779,7 +887,7 @@ def main() -> None:
     mcp_setup = mcp_sub.add_parser("setup", help="Configure MCP server for an AI client")
     mcp_setup.add_argument(
         "target", nargs="?", default="claude-code",
-        choices=["claude-code", "claude-desktop", "json"],
+        choices=["claude-code", "claude-desktop", "cursor", "codex", "qwen", "opencode", "json"],
         help="Target client (default: claude-code)",
     )
     mcp_setup.add_argument("--install-deps", action="store_true", dest="install_mcp",
