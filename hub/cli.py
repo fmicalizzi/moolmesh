@@ -463,11 +463,13 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
     if target == "claude-code":
         claude_bin = shutil.which("claude")
         if claude_bin:
-            already = _claude_code_has_mcp(claude_bin, "moolmesh")
+            already = _claude_code_has_mcp_user(claude_bin, "moolmesh")
             if already:
-                print(yellow("  ⚠ 'moolmesh' is already registered in Claude Code."))
-                print(dim("  Re-registering will overwrite the current config."))
-                print()
+                print(dim("  Replacing existing user-scope registration."))
+                subprocess.run(
+                    [claude_bin, "mcp", "remove", "moolmesh", "-s", "user"],
+                    capture_output=True, timeout=15,
+                )
 
             print(dim("  Registering via: claude mcp add --scope user"))
             cmd = [
@@ -549,15 +551,14 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
     print()
 
 
-def _claude_code_has_mcp(claude_bin: str, name: str) -> bool:
-    import subprocess
+def _claude_code_has_mcp_user(claude_bin: str, name: str) -> bool:
+    import json
+    from pathlib import Path
+    claude_json = Path.home() / ".claude.json"
     try:
-        result = subprocess.run(
-            [claude_bin, "mcp", "list"],
-            capture_output=True, text=True, timeout=15,
-        )
-        return f"{name}:" in result.stdout or f" {name} " in result.stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        data = json.loads(claude_json.read_text())
+        return name in data.get("mcpServers", {})
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         return False
 
 
