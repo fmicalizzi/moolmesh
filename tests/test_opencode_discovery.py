@@ -135,6 +135,7 @@ class TestDiscoverAllIncludesOpencode:
             codex_base=tmp_path / "codex",
             qwen_base=tmp_path / "qwen",
             opencode_base=db,
+            cursor_base=tmp_path / "nonexistent",
         )
         result = discovery.discover_all()
         providers = {p.provider for p in result}

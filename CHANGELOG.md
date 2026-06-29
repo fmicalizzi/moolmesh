@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.7.0] — 2026-06-29
+
+### Added
+- **Cursor provider** — MoolMesh now auto-discovers and ingests Cursor agent/composer conversations. Bubbles are read incrementally from Cursor's global `state.vscdb` (`cursorDiskKV`) by `rowid`, and attributed to projects via each workspace's `composer.composerData` + `workspace.json` mapping. Captures user/assistant messages, per-bubble `tokenCount`, tool/file hints, and composer line/file statistics in session metadata.
+- New per-provider quartet: `hub/models/cursor.py`, `hub/parsers/cursor_parser.py`, `hub/adapters/cursor_adapter.py`, `hub/watchers/cursor_watcher.py`; `Provider.CURSOR`; `discover_cursor()`; dashboard provider styling.
+- Multi-platform Cursor base path (macOS / Linux / Windows), read-only DB access (`?mode=ro`, WAL-safe), and graceful degradation on unrecognized schema.
+- 18 new tests across models, parser, adapter, watcher, discovery, and server registration.
+
+### Notes
+- Cursor stores no per-message timestamps locally; MoolMesh approximates them from composer metadata. Token counts come from Cursor's own `tokenCount` and may not split input/output.
+
+---
+
 ## [1.6.0] — 2026-06-26
 
 ### Added

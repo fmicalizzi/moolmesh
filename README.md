@@ -10,7 +10,7 @@ Unified observability, telemetry, and inter-agent coordination — running entir
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
-[![Tests: 574 passing](https://img.shields.io/badge/Tests-574%20passing-green.svg)](#development)
+[![Tests: 593 passing](https://img.shields.io/badge/Tests-593%20passing-green.svg)](#development)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#)
 [![PyPI](https://img.shields.io/pypi/v/moolmesh.svg)](https://pypi.org/project/moolmesh/)
 [![Español](https://img.shields.io/badge/Docs-Espa%C3%B1ol-orange.svg)](README.es.md)
@@ -118,6 +118,7 @@ systemctl --user status moolmesh
 | **Codex (GPT-5)** | `~/.codex/sessions/` + `state_5.sqlite` | Rollout JSONL + SQLite metadata |
 | **Qwen CLI** | `~/.qwen/projects/` | JSONL per chat |
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | SQLite (session → message → part) |
+| **Cursor** | `~/Library/Application Support/Cursor/User/` (macOS) | SQLite (`state.vscdb` key-value: composer bubbles) |
 
 Sessions are auto-discovered on startup. No configuration, no API keys, no cloud services.
 
@@ -433,6 +434,7 @@ See [ROADMAP.md](ROADMAP.md) for detailed plans, open questions, and design prin
 - **Single-user design** — not intended for multi-user or server deployment
 - **Python 3.11+** — uses `tomllib` from stdlib
 - **GitHub Projects v2 only** — classic Projects (v1) not supported
+- **Cursor caveats** — Cursor stores no per-message timestamps locally (MoolMesh approximates them from composer metadata) and its on-disk schema is reverse-engineered, so a Cursor update may temporarily reduce ingestion until the parser is adjusted
 
 ---
 
@@ -446,7 +448,7 @@ pytest tests/ -v
 pytest tests/ -v --cov=hub
 ```
 
-574 tests. Zero external dependencies. Python stdlib + SQLite.
+593 tests. Zero external dependencies. Python stdlib + SQLite.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from hub.models.base import Provider
+from hub.parsers.cursor_parser import decode_project_name, default_cursor_base
 from hub.log import get as get_logger
 
 _log = get_logger("Discovery")
@@ -42,6 +44,7 @@ class ProjectDiscovery:
         codex_base: Path | None = None,
         qwen_base: Path | None = None,
         opencode_base: Path | None = None,
+        cursor_base: Path | None = None,
     ):
         home = Path.home()
         self.claude_base = claude_base or home / ".claude" / "projects"
@@ -50,6 +53,7 @@ class ProjectDiscovery:
         self.opencode_db = opencode_base or (
             home / ".local" / "share" / "opencode" / "opencode.db"
         )
+        self.cursor_base = cursor_base or default_cursor_base()
 
     # ── Public API ──────────────────────────────────────────────
 
@@ -59,6 +63,7 @@ class ProjectDiscovery:
         projects.extend(self.discover_codex())
         projects.extend(self.discover_qwen())
         projects.extend(self.discover_opencode())
+        projects.extend(self.discover_cursor())
         return projects
 
     def discover_claude(self) -> list[DiscoveredProject]:
@@ -257,6 +262,46 @@ class ProjectDiscovery:
         except Exception:
             _log.warning("No se pudo leer SQLite de OpenCode", exc_info=True)
 
+        return projects
+
+    def discover_cursor(self) -> list[DiscoveredProject]:
+        """Discover Cursor projects from workspaceStorage folder mappings.
+
+        Each workspace's workspace.json 'folder' is treated as a project.
+        Bubbles live in the shared globalStorage/state.vscdb.
+        """
+        projects: list[DiscoveredProject] = []
+        ws_root = self.cursor_base / "workspaceStorage"
+        if not ws_root.is_dir():
+            return projects
+        global_db = self.cursor_base / "globalStorage" / "state.vscdb"
+        session_files = [global_db] if global_db.exists() else []
+        seen: set[str] = set()
+        try:
+            ws_dirs = sorted(ws_root.iterdir())
+        except OSError:
+            return projects
+        for ws_dir in ws_dirs:
+            if not ws_dir.is_dir():
+                continue
+            try:
+                meta = json.loads((ws_dir / "workspace.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            name, cwd = decode_project_name(meta.get("folder", "") or "")
+            if not cwd or cwd in seen:
+                continue
+            seen.add(cwd)
+            projects.append(
+                DiscoveredProject(
+                    name=name or "cursor",
+                    path=cwd,
+                    provider=Provider.CURSOR,
+                    session_dir=ws_dir,
+                    session_files=session_files,
+                    encoded_name=f"cursor-{self.encode_project_path(cwd)}",
+                )
+            )
         return projects
 
     def find_active_sessions(
