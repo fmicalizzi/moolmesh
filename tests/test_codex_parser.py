@@ -21,7 +21,7 @@ class TestCodexParserParseFile:
 
     def test_parse_file_returns_entries(self):
         entries = self.parser.parse_file(FIXTURES_DIR / "codex_sample.jsonl")
-        assert len(entries) == 7
+        assert len(entries) == 12
 
     def test_session_meta_parsed(self):
         entries = self.parser.parse_file(FIXTURES_DIR / "codex_sample.jsonl")
@@ -340,3 +340,83 @@ class TestCodexParserConcurrency:
                 if e.event_type != "session_meta":
                     assert e.session_id == "session-b", f"File B entry has wrong session_id: {e.session_id}"
                     assert e.cwd == "/path/b", f"File B entry has wrong cwd: {e.cwd}"
+
+
+class TestCodexParserEventMsgSubtypes:
+    """Verify correct dispatch of event_msg subtypes."""
+
+    def setup_method(self):
+        self.parser = CodexParser()
+        self.entries = self.parser.parse_file(FIXTURES_DIR / "codex_sample.jsonl")
+
+    def test_user_message_real_format(self):
+        msg = self.entries[7]  # user_message with "message" field
+        assert msg.event_type == "event_msg"
+        assert msg.event_subtype == "user_message"
+        assert msg.role == "user"
+        assert "quiero revisar las issues" in msg.event_msg_text
+
+    def test_agent_message_role_assistant(self):
+        msg = self.entries[8]  # agent_message
+        assert msg.event_type == "event_msg"
+        assert msg.event_subtype == "agent_message"
+        assert msg.role == "assistant"
+        assert "gathering the repo" in msg.event_msg_text
+
+    def test_exec_command_end_role_tool_result(self):
+        msg = self.entries[9]  # exec_command_end
+        assert msg.event_type == "event_msg"
+        assert msg.event_subtype == "exec_command_end"
+        assert msg.role == "tool_result"
+        assert "/bin/zsh" in msg.event_msg_text
+        assert "/Users/test/project" in msg.event_msg_text
+
+    def test_patch_apply_end_role_tool_result(self):
+        msg = self.entries[10]  # patch_apply_end
+        assert msg.event_type == "event_msg"
+        assert msg.event_subtype == "patch_apply_end"
+        assert msg.role == "tool_result"
+        assert "Success" in msg.event_msg_text
+
+    def test_task_complete_role_system(self):
+        msg = self.entries[11]  # task_complete
+        assert msg.event_type == "event_msg"
+        assert msg.event_subtype == "task_complete"
+        assert msg.role == "system"
+        assert "Analysis complete" in msg.event_msg_text
+
+    def test_thread_rolled_back_skipped(self):
+        assert len(self.entries) == 12
+
+    def test_legacy_content_format_still_works(self):
+        msg = self.entries[1]  # old format with "content" field
+        assert msg.event_type == "event_msg"
+        assert msg.role == "user"
+        assert msg.event_msg_text == "fix the bug"
+
+    def test_task_started_skipped(self):
+        parser = CodexParser()
+        entry = parser._parse_line({
+            "type": "event_msg",
+            "timestamp": "2026-01-01",
+            "payload": {"type": "task_started", "task_id": "t1"}
+        })
+        assert entry is None
+
+    def test_turn_aborted_skipped(self):
+        parser = CodexParser()
+        entry = parser._parse_line({
+            "type": "event_msg",
+            "timestamp": "2026-01-01",
+            "payload": {"type": "turn_aborted"}
+        })
+        assert entry is None
+
+    def test_thread_name_updated_skipped(self):
+        parser = CodexParser()
+        entry = parser._parse_line({
+            "type": "event_msg",
+            "timestamp": "2026-01-01",
+            "payload": {"type": "thread_name_updated"}
+        })
+        assert entry is None

@@ -21,10 +21,12 @@ from hub.parsers.claude_parser import ClaudeParser
 from hub.parsers.codex_parser import CodexParser
 from hub.parsers.qwen_parser import QwenParser
 from hub.parsers.opencode_parser import OpenCodeParser
+from hub.parsers.cursor_parser import CursorParser
 from hub.adapters.claude_adapter import ClaudeAdapter
 from hub.adapters.codex_adapter import CodexAdapter
 from hub.adapters.qwen_adapter import QwenAdapter
 from hub.adapters.opencode_adapter import OpenCodeAdapter
+from hub.adapters.cursor_adapter import CursorAdapter
 from hub.renderers.markdown import MarkdownRenderer
 
 
@@ -33,6 +35,7 @@ _PARSERS = {
     Provider.CODEX: CodexParser(),
     Provider.QWEN: QwenParser(),
     Provider.OPENCODE: OpenCodeParser(),
+    Provider.CURSOR: CursorParser(),
 }
 
 _ADAPTERS = {
@@ -40,6 +43,7 @@ _ADAPTERS = {
     Provider.CODEX: CodexAdapter(),
     Provider.QWEN: QwenAdapter(),
     Provider.OPENCODE: OpenCodeAdapter(),
+    Provider.CURSOR: CursorAdapter(),
 }
 
 _opencode_cache: dict[Path, list] = {}
@@ -47,8 +51,7 @@ _opencode_cache: dict[Path, list] = {}
 
 def _safe_dirname(name: str) -> str:
     """Convert project name to a flat safe directory name using '-' as separator."""
-    # Join path components with '-' to keep flat structure like Claude encoding
-    flat = name.replace("/", "-")
+    flat = name.replace("\\", "-").replace("/", "-")
     return re.sub(r'[^\w\-.]', '_', flat) or "_unknown"
 
 

@@ -41,8 +41,9 @@ class CodexEntry:
     function_output: CodexFunctionOutput | None = None
     reasoning_text: str = ""
 
-    # event_msg fields (user input)
+    # event_msg fields
     event_msg_text: str = ""
+    event_subtype: str = ""  # user_message, agent_message, exec_command_end, etc.
 
     # token_count fields
     token_input: int = 0

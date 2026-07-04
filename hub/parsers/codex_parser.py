@@ -125,8 +125,9 @@ class CodexParser(BaseParser):
                 )
 
             case "event_msg":
-                # Check if this is a token_count event
-                if payload.get("type") == "token_count":
+                subtype = payload.get("type", "")
+
+                if subtype == "token_count":
                     info = payload.get("info") or {}
                     last = info.get("last_token_usage") or {}
                     if not last:
@@ -142,20 +143,74 @@ class CodexParser(BaseParser):
                         raw=raw,
                     )
 
-                # User input event
-                text = ""
-                if isinstance(payload, dict):
-                    content = payload.get("content", "")
-                    if isinstance(content, str):
-                        text = content
-                    elif isinstance(content, list):
-                        text = " ".join(
-                            c.get("text", "") for c in content if isinstance(c, dict)
-                        )
+                if subtype in ("thread_rolled_back", "thread_name_updated",
+                               "context_compacted", "turn_aborted"):
+                    return None
+
+                if subtype == "agent_message":
+                    text = payload.get("message", "")
+                    return CodexEntry(
+                        event_type=event_type,
+                        timestamp=timestamp,
+                        event_subtype=subtype,
+                        event_msg_text=text,
+                        role="assistant",
+                        raw=raw,
+                    )
+
+                if subtype == "exec_command_end":
+                    cmd = payload.get("command", [])
+                    cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+                    stdout = payload.get("stdout", "")
+                    exit_code = payload.get("exit_code", None)
+                    text = f"$ {cmd_str}\n{stdout}"
+                    if exit_code is not None and exit_code != 0:
+                        text += f"\n[exit code: {exit_code}]"
+                    return CodexEntry(
+                        event_type=event_type,
+                        timestamp=timestamp,
+                        event_subtype=subtype,
+                        event_msg_text=text,
+                        role="tool_result",
+                        raw=raw,
+                    )
+
+                if subtype == "patch_apply_end":
+                    stdout = payload.get("stdout", "")
+                    return CodexEntry(
+                        event_type=event_type,
+                        timestamp=timestamp,
+                        event_subtype=subtype,
+                        event_msg_text=stdout,
+                        role="tool_result",
+                        raw=raw,
+                    )
+
+                if subtype == "task_started":
+                    return None
+
+                if subtype == "task_complete":
+                    text = payload.get("last_agent_message", "")
+                    return CodexEntry(
+                        event_type=event_type,
+                        timestamp=timestamp,
+                        event_subtype=subtype,
+                        event_msg_text=text,
+                        role="system",
+                        raw=raw,
+                    )
+
+                # user_message or legacy format (no subtype)
+                text = payload.get("message", "") or payload.get("content", "")
+                if isinstance(text, list):
+                    text = " ".join(
+                        c.get("text", "") for c in text if isinstance(c, dict)
+                    )
                 return CodexEntry(
                     event_type=event_type,
                     timestamp=timestamp,
-                    event_msg_text=text,
+                    event_subtype=subtype or "user_message",
+                    event_msg_text=text if isinstance(text, str) else "",
                     role="user",
                     raw=raw,
                 )

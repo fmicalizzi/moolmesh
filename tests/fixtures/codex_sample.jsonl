@@ -5,3 +5,10 @@
 {"type":"response_item","timestamp":"2026-04-01T10:00:20Z","payload":{"type":"function_call_output","call_id":"fc1","output":"diff --git a/main.py b/main.py"}}
 {"type":"response_item","timestamp":"2026-04-01T10:00:25Z","payload":{"type":"reasoning","summary":[{"text":"The bug is in the config parser"}]}}
 {"type":"event_msg","timestamp":"2026-04-01T10:00:30Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"output_tokens":350,"cached_input_tokens":800,"reasoning_output_tokens":120,"total_tokens":2470}}}}
+{"type":"event_msg","timestamp":"2026-04-01T10:00:35Z","payload":{"type":"user_message","message":"quiero revisar las issues","images":[],"local_images":[],"text_elements":[]}}
+{"type":"event_msg","timestamp":"2026-04-01T10:00:40Z","payload":{"type":"agent_message","message":"I'm gathering the repo structure...","phase":"commentary","memory_citation":null}}
+{"type":"event_msg","timestamp":"2026-04-01T10:00:45Z","payload":{"type":"exec_command_end","call_id":"call_xxx","command":["/bin/zsh","-lc","pwd"],"cwd":"/Users/test/project","exit_code":0,"stdout":"/Users/test/project"}}
+{"type":"event_msg","timestamp":"2026-04-01T10:00:50Z","payload":{"type":"patch_apply_end","call_id":"call_yyy","stdout":"Success. Updated: A docs/REVISION.md","success":true}}
+{"type":"event_msg","timestamp":"2026-04-01T10:00:55Z","payload":{"type":"task_complete","turn_id":"019d","last_agent_message":"Analysis complete."}}
+{"type":"event_msg","timestamp":"2026-04-01T10:01:00Z","payload":{"type":"thread_rolled_back"}}
+{"type":"event_msg","timestamp":"2026-04-01T10:01:05Z","payload":{"type":"context_compacted"}}

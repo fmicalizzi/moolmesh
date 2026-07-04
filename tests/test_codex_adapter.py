@@ -116,7 +116,7 @@ class TestCodexAdapterToUnified:
         entries = parser.parse_file(fixture)
         messages = [self.adapter.to_unified(e, "test") for e in entries]
         messages = [m for m in messages if m is not None]
-        assert len(messages) == 7
+        assert len(messages) == 12
         # All should have session_id and cwd from the stateful parser
         for m in messages:
             assert m.session_id == "abc123-def456"
@@ -277,6 +277,58 @@ class TestCodexAdapterSystemPrompts:
             payload_type="message",
             role="user",
             text="<permissions>\nFull access granted.\n</permissions>",
+        )
+        adapter = CodexAdapter()
+        msg = adapter.to_unified(entry, "test")
+        assert msg is not None
+        assert msg.role == MessageRole.SYSTEM
+
+
+class TestCodexAdapterEventMsgSubtypes:
+    """Verify adapter correctly maps new event_msg subtypes."""
+
+    def test_agent_message_maps_to_assistant(self):
+        entry = CodexEntry(
+            event_type="event_msg",
+            event_subtype="agent_message",
+            event_msg_text="I'm gathering...",
+            role="assistant",
+        )
+        adapter = CodexAdapter()
+        msg = adapter.to_unified(entry, "test")
+        assert msg is not None
+        assert msg.role == MessageRole.ASSISTANT
+
+    def test_exec_command_end_maps_to_tool_result(self):
+        entry = CodexEntry(
+            event_type="event_msg",
+            event_subtype="exec_command_end",
+            event_msg_text="$ pwd\n/Users/test",
+            role="tool_result",
+        )
+        adapter = CodexAdapter()
+        msg = adapter.to_unified(entry, "test")
+        assert msg is not None
+        assert msg.role == MessageRole.TOOL_RESULT
+
+    def test_patch_apply_end_maps_to_tool_result(self):
+        entry = CodexEntry(
+            event_type="event_msg",
+            event_subtype="patch_apply_end",
+            event_msg_text="Success. Updated: A docs/X.md",
+            role="tool_result",
+        )
+        adapter = CodexAdapter()
+        msg = adapter.to_unified(entry, "test")
+        assert msg is not None
+        assert msg.role == MessageRole.TOOL_RESULT
+
+    def test_task_complete_maps_to_system(self):
+        entry = CodexEntry(
+            event_type="event_msg",
+            event_subtype="task_complete",
+            event_msg_text="Analysis done.",
+            role="system",
         )
         adapter = CodexAdapter()
         msg = adapter.to_unified(entry, "test")

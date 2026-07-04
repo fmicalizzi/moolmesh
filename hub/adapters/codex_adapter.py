@@ -108,11 +108,18 @@ class CodexAdapter(BaseAdapter):
             case "session_meta":
                 return MessageRole.SYSTEM
             case "event_msg":
-                # Some event_msg entries contain system prompts, not user input
-                text = entry.event_msg_text
-                if text and self._is_system_prompt(text):
-                    return MessageRole.SYSTEM
-                return MessageRole.USER
+                match entry.role:
+                    case "assistant":
+                        return MessageRole.ASSISTANT
+                    case "tool_result":
+                        return MessageRole.TOOL_RESULT
+                    case "system":
+                        return MessageRole.SYSTEM
+                    case _:
+                        text = entry.event_msg_text
+                        if text and self._is_system_prompt(text):
+                            return MessageRole.SYSTEM
+                        return MessageRole.USER
             case "token_count":
                 return MessageRole.SUMMARY
             case "response_item":
@@ -232,7 +239,17 @@ class CodexAdapter(BaseAdapter):
                 return f"[tokens] in={entry.token_input:,} out={entry.token_output:,} cached={entry.token_cached_input:,} reasoning={entry.token_reasoning:,}"
             case "event_msg":
                 text = entry.event_msg_text.strip().replace("\n", " ")
-                return text[:120] if text else "[user input]"
+                match entry.event_subtype:
+                    case "agent_message":
+                        return text[:120] if text else "[agent message]"
+                    case "exec_command_end":
+                        return text[:120] if text else "[command output]"
+                    case "patch_apply_end":
+                        return text[:120] if text else "[patch result]"
+                    case "task_complete":
+                        return text[:120] if text else "[task complete]"
+                    case _:
+                        return text[:120] if text else "[user input]"
             case "response_item":
                 match entry.payload_type:
                     case "message":
