@@ -102,8 +102,8 @@ class TestShortCwd:
 
     def test_short_path(self):
         result = ProjectDiscovery.short_cwd("/tmp/foo")
-        # No known prefix found, returns full path
-        assert result == "/tmp/foo"
+        # No known prefix found, returns path components joined with /
+        assert result == "tmp/foo"
 
 
 class TestDiscoverClaude:
@@ -320,3 +320,65 @@ class TestDiscoverAll:
         providers = {p.provider for p in result}
         assert Provider.CLAUDE in providers
         assert Provider.QWEN in providers
+
+
+class TestCrossPlatformPaths:
+    """Verify path utilities handle Windows-style paths correctly."""
+
+    def test_normalize_path_str_backslashes(self):
+        result = ProjectDiscovery._normalize_path_str("C:\\Users\\Johny\\project")
+        assert result == "C:/Users/Johny/project"
+
+    def test_normalize_path_str_unc_prefix(self):
+        result = ProjectDiscovery._normalize_path_str("\\\\?\\C:\\Users\\Johny\\project")
+        assert result == "C:/Users/Johny/project"
+
+    def test_normalize_path_str_unix_unchanged(self):
+        result = ProjectDiscovery._normalize_path_str("/Users/franco/project")
+        assert result == "/Users/franco/project"
+
+    def test_split_path_windows(self):
+        result = ProjectDiscovery._split_path("C:\\Users\\Johny\\Documents\\myproject")
+        assert result == ["C:", "Users", "Johny", "Documents", "myproject"]
+
+    def test_split_path_unix(self):
+        result = ProjectDiscovery._split_path("/Users/franco/Downloads/Claude/moolmesh")
+        assert result == ["Users", "franco", "Downloads", "Claude", "moolmesh"]
+
+    def test_extract_project_name_windows(self):
+        result = ProjectDiscovery.extract_project_name(
+            "C:\\Users\\Johny\\Documents\\Programming\\GitHub Projects\\feedback_yaahub"
+        )
+        assert result == "feedback_yaahub"
+
+    def test_extract_project_name_windows_unc(self):
+        result = ProjectDiscovery.extract_project_name(
+            "\\\\?\\C:\\Users\\Johny\\Documents\\myproject"
+        )
+        assert result == "myproject"
+
+    def test_extract_project_name_unix_still_works(self):
+        result = ProjectDiscovery.extract_project_name(
+            "/Users/franco/Downloads/Claude/tools/moolmesh"
+        )
+        assert result == "tools/moolmesh"
+
+    def test_encode_project_path_windows(self):
+        result = ProjectDiscovery.encode_project_path("C:\\Users\\Johny\\project")
+        assert result == "C:-Users-Johny-project"
+
+    def test_encode_project_path_unix(self):
+        result = ProjectDiscovery.encode_project_path("/Users/franco/project")
+        assert result == "-Users-franco-project"
+
+    def test_short_cwd_windows(self):
+        result = ProjectDiscovery.short_cwd(
+            "C:\\Users\\Johny\\Downloads\\Claude\\tools\\moolmesh"
+        )
+        assert result == "Claude/tools/moolmesh"
+
+    def test_short_cwd_unix_still_works(self):
+        result = ProjectDiscovery.short_cwd(
+            "/Users/franco/Downloads/Claude/tools/moolmesh"
+        )
+        assert result == "Claude/tools/moolmesh"

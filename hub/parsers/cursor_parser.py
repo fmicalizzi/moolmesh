@@ -44,7 +44,9 @@ def decode_project_name(folder_uri: str) -> tuple[str, str]:
     path = folder_uri
     if folder_uri.startswith("file:"):
         path = unquote(urlparse(folder_uri).path)
-    path = path.rstrip("/")
+    if path.startswith("\\\\?\\"):
+        path = path[4:]
+    path = path.replace("\\", "/").rstrip("/")
     name = path.rsplit("/", 1)[-1] if path else ""
     return name, path
 

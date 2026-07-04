@@ -132,24 +132,29 @@ class ProjectDiscovery:
                 for rpath, cwd, tokens_used, source in rows:
                     if not rpath:
                         continue
-                    rollout_cwd[rpath] = cwd or "/"
-                    # Skip noise: exec sessions with 0 tokens (health checks)
+                    norm_rpath = str(Path(rpath))
+                    rollout_cwd[norm_rpath] = cwd or "/"
                     if source == "exec" and (tokens_used or 0) == 0 and cwd == "/":
                         continue
-                    active_rollouts.add(rpath)
+                    active_rollouts.add(norm_rpath)
             except Exception:
                 _log.warning("No se pudo leer SQLite de Codex", exc_info=True)
 
         # Collect all rollout files, filtering out noise if we have SQLite data
         all_rollouts: list[Path] = []
+        all_on_disk: list[Path] = []
         for root, _dirs, files in os.walk(sessions_dir):
             for f in files:
                 if f.startswith("rollout-") and f.endswith(".jsonl"):
                     full = Path(root) / f
-                    # If we have SQLite data, only include active rollouts
+                    all_on_disk.append(full)
                     if active_rollouts and str(full) not in active_rollouts:
                         continue
                     all_rollouts.append(full)
+
+        # Fallback: if SQLite filtered everything out (path mismatch), use all files
+        if not all_rollouts and all_on_disk:
+            all_rollouts = all_on_disk
 
         if not all_rollouts:
             return projects
@@ -353,19 +358,30 @@ class ProjectDiscovery:
     # ── Path utilities ──────────────────────────────────────────
 
     @staticmethod
+    def _normalize_path_str(path: str) -> str:
+        """Strip \\\\?\\ prefix and normalize backslashes to forward slashes."""
+        if path.startswith("\\\\?\\"):
+            path = path[4:]
+        return path.replace("\\", "/")
+
+    @staticmethod
+    def _split_path(path: str) -> list[str]:
+        """Split path cross-platform, handling both / and \\."""
+        normalized = ProjectDiscovery._normalize_path_str(path)
+        return [p for p in normalized.split("/") if p]
+
+    @staticmethod
     def decode_project_path(encoded: str) -> str:
         """Decode encoded path: '-Users-foo-bar' -> '/Users/foo/bar'."""
         if not encoded:
             return ""
-        # The encoding replaces / with - and path separators with --
-        # But the simplest approach: leading - is /, rest - are /
-        # Note: this is lossy if dir names contain hyphens
         return encoded.replace("-", "/")
 
     @staticmethod
     def encode_project_path(cwd: str) -> str:
         """Encode CWD path: '/Users/foo/bar' -> '-Users-foo-bar'."""
-        return cwd.replace("/", "-")
+        normalized = ProjectDiscovery._normalize_path_str(cwd)
+        return normalized.replace("/", "-")
 
     @staticmethod
     def extract_project_name(decoded_path: str) -> str:
@@ -383,9 +399,9 @@ class ProjectDiscovery:
         if not decoded_path or decoded_path == "/":
             return decoded_path or "unknown"
 
-        parts = decoded_path.rstrip("/").split("/")
-        # Remove empty parts from leading slash or double slashes
-        parts = [p for p in parts if p]
+        parts = ProjectDiscovery._split_path(decoded_path)
+        if not parts:
+            return "unknown"
 
         # Find where the meaningful suffix starts by stripping known prefixes
         # Common roots: Users/<name>, Volumes/<name>, home/<name>
@@ -405,7 +421,7 @@ class ProjectDiscovery:
         # Now strip common intermediate dirs
         strip_dirs = {
             "Downloads", "Documents", "Projects", "repos", "src", "code",
-            "Desktop", "workspace",
+            "Desktop", "workspace", "Programming", "GitHub", "GitHub Projects",
         }
         while parts and parts[0] in strip_dirs:
             parts = parts[1:]
@@ -442,15 +458,14 @@ class ProjectDiscovery:
             parts = parts[1:]
 
         if not parts:
-            # Fallback: last 2 components of original path
-            orig = decoded_path.rstrip("/").split("/")
-            parts = [p for p in orig[-2:] if p]
+            orig = ProjectDiscovery._split_path(decoded_path)
+            parts = orig[-2:] if orig else []
 
         # For very deep paths (>3 components), keep last 3
         if len(parts) > 3:
             parts = parts[-3:]
 
-        return "/".join(parts) if parts else decoded_path.rstrip("/").split("/")[-1]
+        return "/".join(parts) if parts else ProjectDiscovery._split_path(decoded_path)[-1]
 
     @staticmethod
     def short_cwd(cwd: str, depth: int = 3) -> str:
@@ -460,9 +475,7 @@ class ProjectDiscovery:
         """
         if not cwd:
             return ""
-        parts = cwd.rstrip("/").split("/")
-        # Skip common prefixes like /Users/xxx/Downloads/Claude
-        # Find the most meaningful suffix
+        parts = ProjectDiscovery._split_path(cwd)
         meaningful = parts
         for i, p in enumerate(parts):
             if p in ("Downloads", "Documents", "Projects", "repos", "src", "code"):

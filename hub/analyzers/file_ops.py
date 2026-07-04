@@ -87,7 +87,7 @@ class FileOpsAnalyzer(BaseAnalyzer):
             lines.append("| # | Archivo | Operaciones | Tipos |")
             lines.append("|---|---------|-------------|-------|")
             for i, f in enumerate(hot_files, 1):
-                display = f["file"] if self.complete else (f["file"].split("/")[-1] if "/" in f["file"] else f["file"])
+                display = f["file"] if self.complete else f["file"].replace("\\", "/").rsplit("/", 1)[-1]
                 lines.append(f"| {i} | `{display}` | {f['ops']} | {', '.join(f['types'])} |")
 
         ops_list = results["operations"] if self.complete else results["operations"][:100]
