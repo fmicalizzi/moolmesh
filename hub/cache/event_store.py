@@ -76,7 +76,10 @@ class EventStore:
         self.db_path = db_path or DEFAULT_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass  # fallback to default journal mode (DELETE) on exotic filesystems
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA mmap_size=268435456")   # 256MB — zero-copy reads
         self._conn.execute("PRAGMA temp_store=MEMORY")       # sorts in RAM
