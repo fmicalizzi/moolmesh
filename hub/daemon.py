@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
+
+_IS_WINDOWS = sys.platform.startswith("win")
 
 CONFIG_DIR = Path.home() / ".moolmesh"
 PID_FILE = CONFIG_DIR / "moolmesh.pid"
@@ -15,7 +18,7 @@ LOG_FILE = CONFIG_DIR / "daemon.log"
 
 def read_pid() -> int | None:
     try:
-        pid = int(PID_FILE.read_text().strip())
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
         os.kill(pid, 0)
         return pid
     except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
@@ -25,7 +28,7 @@ def read_pid() -> int | None:
 
 def write_pid(pid: int) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(pid))
+    PID_FILE.write_text(str(pid), encoding="utf-8")
 
 
 def _is_supervised() -> bool:
@@ -38,6 +41,10 @@ def daemonize(host: str, port: int, project_filter: str | None, providers: list[
 
     Returns child PID to the caller (or own PID in supervised mode).
     """
+    if _IS_WINDOWS:
+        print("Daemon mode is not available on Windows. Use: mool dashboard", file=sys.stderr)
+        sys.exit(1)
+
     if _is_supervised():
         return _run_foreground(host, port, project_filter, providers)
 
@@ -92,7 +99,10 @@ def _run_server(host: str, port: int, project_filter: str | None, providers: lis
     def _handle_term(signum, frame):
         raise KeyboardInterrupt
 
-    signal.signal(signal.SIGTERM, _handle_term)
+    try:
+        signal.signal(signal.SIGTERM, _handle_term)
+    except OSError:
+        pass
 
     try:
         server.start()
@@ -106,7 +116,10 @@ def stop_daemon() -> bool:
     if pid is None:
         return False
 
-    os.kill(pid, signal.SIGTERM)
+    if _IS_WINDOWS:
+        subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
+    else:
+        os.kill(pid, signal.SIGTERM)
 
     for _ in range(20):
         time.sleep(0.5)
@@ -118,7 +131,10 @@ def stop_daemon() -> bool:
 
     # Force kill
     try:
-        os.kill(pid, signal.SIGKILL)
+        if _IS_WINDOWS:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+        else:
+            os.kill(pid, signal.SIGKILL)
         PID_FILE.unlink(missing_ok=True)
     except ProcessLookupError:
         PID_FILE.unlink(missing_ok=True)

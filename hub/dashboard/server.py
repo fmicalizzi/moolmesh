@@ -926,7 +926,7 @@ class DashboardServer:
                 """Suppress noisy ConnectionResetError from browser disconnects."""
                 try:
                     super().handle()
-                except (ConnectionResetError, BrokenPipeError):
+                except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
                     pass
 
         return Handler
