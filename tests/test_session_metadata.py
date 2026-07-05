@@ -2,6 +2,7 @@
 
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,11 @@ from hub.models.claude import ClaudeEntry
 from hub.models.codex import CodexEntry
 from hub.models.opencode import OpenCodeEntry
 from hub.models.qwen import QwenEntry
+
+
+def _recent_ts(minutes_ago: int = 5) -> str:
+    dt = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 @pytest.fixture
@@ -117,7 +123,7 @@ class TestEventStoreSessionsTable:
             "id": "s1", "provider": "claude", "project": "proj",
             "git_branch": "main", "model": "opus-4",
         }
-        store.upsert_session(meta, "2026-06-25T10:00:00")
+        store.upsert_session(meta, _recent_ts())
         sessions = store.get_sessions(hours=48)
         assert len(sessions) == 1
         assert sessions[0]["id"] == "s1"
@@ -128,13 +134,13 @@ class TestEventStoreSessionsTable:
             "id": "s1", "provider": "claude", "project": "proj",
             "git_branch": "feat/x", "model": "opus-4",
         }
-        store.upsert_session(meta1, "2026-06-25T10:00:00")
+        store.upsert_session(meta1, _recent_ts(10))
 
         meta2 = {
             "id": "s1", "provider": "claude", "project": "proj",
             "git_branch": "", "model": "sonnet-4",
         }
-        store.upsert_session(meta2, "2026-06-25T10:05:00")
+        store.upsert_session(meta2, _recent_ts(5))
 
         sessions = store.get_sessions(hours=48)
         assert len(sessions) == 1
@@ -150,7 +156,7 @@ class TestEventStoreSessionsTable:
             "id": "detail-1", "provider": "claude", "project": "proj",
             "git_branch": "main", "model": "opus-4", "title": "Testing",
         }
-        store.upsert_session(meta, "2026-06-25T10:00:00")
+        store.upsert_session(meta, _recent_ts())
         detail = store.get_session_detail("detail-1")
         assert detail is not None
         assert detail["title"] == "Testing"
@@ -164,10 +170,10 @@ class TestEventStoreSessionsTable:
         s1 = EventStore(db)
         s1.store_batch([
             {"provider": "claude", "project": "p1", "event_type": "user",
-             "timestamp": "2026-06-25T10:00:00", "summary": "hello",
+             "timestamp": _recent_ts(10), "summary": "hello",
              "session_id": "bf-1"},
             {"provider": "claude", "project": "p1", "event_type": "assistant",
-             "timestamp": "2026-06-25T10:00:05", "summary": "hi",
+             "timestamp": _recent_ts(9), "summary": "hi",
              "session_id": "bf-1"},
         ])
         s1.close()
@@ -190,13 +196,14 @@ class TestEventStoreSessionsTable:
 
 class TestSessionsFilter:
     def test_filter_by_branch(self, store):
+        ts = _recent_ts()
         store.upsert_session(
             {"id": "s1", "provider": "claude", "project": "p", "git_branch": "main"},
-            "2026-06-25T10:00:00",
+            ts,
         )
         store.upsert_session(
             {"id": "s2", "provider": "claude", "project": "p", "git_branch": "feat/x"},
-            "2026-06-25T10:00:00",
+            ts,
         )
         main_sessions = store.get_sessions(hours=48, branch="main")
         assert len(main_sessions) == 1
@@ -207,13 +214,14 @@ class TestSessionsFilter:
         assert feat_sessions[0]["id"] == "s2"
 
     def test_filter_by_provider(self, store):
+        ts = _recent_ts()
         store.upsert_session(
             {"id": "s1", "provider": "claude", "project": "p"},
-            "2026-06-25T10:00:00",
+            ts,
         )
         store.upsert_session(
             {"id": "s2", "provider": "codex", "project": "p"},
-            "2026-06-25T10:00:00",
+            ts,
         )
         claude_only = store.get_sessions(hours=48, provider="claude")
         assert len(claude_only) == 1
@@ -229,7 +237,7 @@ class TestMcpSessionFunctions:
         s.upsert_session(
             {"id": "mcp-1", "provider": "claude", "project": "p",
              "git_branch": "main", "model": "opus-4"},
-            "2026-06-25T10:00:00",
+            _recent_ts(),
         )
         s.close()
 

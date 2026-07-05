@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -38,12 +39,16 @@ def test_db(tmp_path):
     conn.execute("CREATE INDEX idx_events_session ON events(session_id)")
 
     now = time.time()
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    def _ts(minutes_offset: int) -> str:
+        return (base + timedelta(minutes=minutes_offset)).strftime("%Y-%m-%dT%H:%M:%S")
 
     events = []
     for i in range(30):
         events.append((
             "claude", "tools/live/monitor", "tool_use",
-            f"2026-06-22T{10 + i // 6:02d}:{(i * 10) % 60:02d}:00",
+            _ts(i),
             f"Read hub/server.py" if i % 3 == 0 else f"Edit line {i * 10}",
             "ses-claude-001",
             json.dumps({"input": 500 + i * 10, "output": 200 + i * 5}),
@@ -56,7 +61,7 @@ def test_db(tmp_path):
     for i in range(15):
         events.append((
             "opencode", "/Users/test/Downloads/Claude/ddtyi/YAAHub", "tool_use",
-            f"2026-06-22T{11 + i // 6:02d}:{(i * 8) % 60:02d}:00",
+            _ts(30 + i),
             f"glob apps/api/*.ts",
             "ses-oc-001",
             json.dumps({"input": 300, "output": 100}),
@@ -69,7 +74,7 @@ def test_db(tmp_path):
     for i in range(5):
         events.append((
             "codex", "eventsmx/backend", "user",
-            f"2026-06-22T09:{i * 10:02d}:00",
+            _ts(45 + i),
             f"Fix the login bug in auth.py",
             "ses-codex-001",
             json.dumps({"input": 1000, "output": 800}),
