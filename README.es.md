@@ -47,11 +47,51 @@ Además, un **servidor MCP** que permite a otros agentes de IA consultar los dat
 
 ## Inicio rápido
 
-```bash
-# Instalar
-pip install moolmesh
+### Instalar
 
-# Iniciar el dashboard
+```bash
+# Recomendado — instalación aislada, comando global
+pipx install moolmesh
+
+# O con pip (dentro de un entorno virtual)
+pip install moolmesh
+```
+
+> **Nota:** En Linux moderno (Ubuntu 22.04+, Debian 12+, Fedora 38+),
+> `pip install` fuera de un entorno virtual está bloqueado por
+> [PEP 668](https://peps.python.org/pep-0668/). Usa `pipx` en su lugar,
+> o crea un venv primero:
+> ```bash
+> python3 -m venv ~/.venvs/moolmesh && source ~/.venvs/moolmesh/bin/activate
+> pip install moolmesh
+> ```
+
+### Windows
+
+```powershell
+# Opción 1: pipx (recomendado)
+pipx install moolmesh
+
+# Opción 2: pip (puede requerir agregar Scripts al PATH)
+pip install moolmesh
+```
+
+Si `mool` no se encuentra después de instalar con pip, agrega el directorio Scripts a tu PATH:
+
+```powershell
+# Encontrar dónde pip instaló el script
+pip show -f moolmesh | findstr Scripts
+
+# Agregar al PATH (sesión actual)
+$env:PATH += ";C:\Users\TuUsuario\AppData\Local\...\Scripts"
+
+# O ejecutar directamente con Python
+python -m hub.cli dashboard
+```
+
+### Iniciar
+
+```bash
 mool dashboard
 # → abrir http://localhost:5200
 ```
@@ -62,7 +102,13 @@ Eso es todo. MoolMesh auto-descubre tus sesiones de IA inmediatamente. No requie
 > ```bash
 > git clone https://github.com/fmicalizzi/moolmesh.git
 > cd moolmesh
-> python -m venv .venv && source .venv/bin/activate
+>
+> # macOS / Linux
+> python3 -m venv .venv && source .venv/bin/activate
+>
+> # Windows (PowerShell)
+> python -m venv .venv; .venv\Scripts\Activate.ps1
+>
 > pip install -e ".[dev]"
 > mool dashboard
 > ```
