@@ -548,8 +548,10 @@ def _mcp_config_path(target: str, system: str):
     elif target == "cursor":
         return Path.home() / ".cursor" / "mcp.json"
     elif target == "qwen":
+        # TODO: Windows path unverified — may need %APPDATA%\Qwen\ instead of ~/.qwen/
         return Path.home() / ".qwen" / "settings.json"
     elif target == "opencode":
+        # TODO: Windows path unverified — may need %APPDATA%\opencode\ instead of ~/.config/opencode/
         return Path.home() / ".config" / "opencode" / "opencode.json"
     elif target == "codex":
         return Path.home() / ".codex" / "config.toml"
