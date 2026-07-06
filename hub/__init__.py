@@ -1,4 +1,8 @@
 """MoolMesh — the context mesh for AI coding agents."""
 
-__version__ = "1.7.1"
+try:
+    from importlib.metadata import version as _v
+    __version__ = _v("moolmesh")
+except Exception:
+    __version__ = "dev"
 USER_AGENT = f"moolmesh/{__version__}"
