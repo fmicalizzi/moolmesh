@@ -48,6 +48,8 @@ Plus a **MCP server** that lets other AI agents query your session data programm
 
 ### Install
 
+**Requires Python 3.11 or later.** MoolMesh uses `match/case`, `tomllib`, and other features that don't exist in earlier versions. Python 3.10 reached end-of-life in October 2026.
+
 ```bash
 # Recommended — isolated install, global command
 pipx install moolmesh
