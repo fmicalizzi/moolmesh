@@ -69,32 +69,35 @@ pip install moolmesh
 ### Windows
 
 ```powershell
-# Opción 1: pipx (recomendado)
+# Recomendado — maneja PATH y dependencias automáticamente
+uv tool install moolmesh
+
+# Alternativa
 pipx install moolmesh
 
-# Opción 2: pip (puede requerir agregar Scripts al PATH)
+# O con pip (puede requerir agregar Scripts al PATH)
 pip install moolmesh
 ```
 
 Si `mool` no se encuentra después de instalar con pip, agrega el directorio Scripts a tu PATH:
 
 ```powershell
-# Encontrar dónde pip instaló el script
 pip show -f moolmesh | findstr Scripts
-
-# Agregar al PATH (sesión actual)
 $env:PATH += ";C:\Users\TuUsuario\AppData\Local\...\Scripts"
-
-# O ejecutar directamente con Python
-python -m hub.cli dashboard
 ```
 
 ### Iniciar
 
 ```bash
+# Primer plano (bloquea la terminal)
 mool dashboard
+
+# Daemon en background (recomendado — sigue corriendo al cerrar la terminal)
+mool daemon start
 # → abrir http://localhost:5200
 ```
+
+El daemon funciona en todas las plataformas (macOS, Linux, Windows). Usa `mool daemon stop` para detenerlo, `mool daemon status` para verificar.
 
 Eso es todo. MoolMesh auto-descubre tus sesiones de IA inmediatamente. No requiere configuración.
 

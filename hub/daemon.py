@@ -37,17 +37,46 @@ def _is_supervised() -> bool:
 
 
 def daemonize(host: str, port: int, project_filter: str | None, providers: list[str] | None) -> int:
-    """Fork to background, or run foreground if under a process supervisor.
+    """Launch dashboard in background. Returns child PID.
 
-    Returns child PID to the caller (or own PID in supervised mode).
+    Unix: classic double-fork. Windows: subprocess with CREATE_NO_WINDOW.
+    Supervised (systemd/Docker): stays in foreground.
     """
-    if _IS_WINDOWS:
-        print("Daemon mode is not available on Windows. Use: mool dashboard", file=sys.stderr)
-        sys.exit(1)
-
     if _is_supervised():
         return _run_foreground(host, port, project_filter, providers)
 
+    if _IS_WINDOWS:
+        return _daemonize_windows(host, port, project_filter, providers)
+
+    return _daemonize_unix(host, port, project_filter, providers)
+
+
+def _daemonize_windows(host: str, port: int, project_filter: str | None, providers: list[str] | None) -> int:
+    """Windows background process via subprocess.Popen + CREATE_NO_WINDOW."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    cmd = [sys.executable, "-m", "hub.cli", "dashboard",
+           "--host", host, "--port", str(port)]
+    if project_filter:
+        cmd += ["--project", project_filter]
+    if providers:
+        cmd += ["--providers", ",".join(providers)]
+
+    log_fh = open(LOG_FILE, "a", encoding="utf-8")
+    CREATE_NO_WINDOW = 0x08000000
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fh,
+        stderr=log_fh,
+        stdin=subprocess.DEVNULL,
+        creationflags=CREATE_NO_WINDOW,
+    )
+    write_pid(proc.pid)
+    return proc.pid
+
+
+def _daemonize_unix(host: str, port: int, project_filter: str | None, providers: list[str] | None) -> int:
+    """Unix double-fork daemon."""
     pid = os.fork()
     if pid > 0:
         time.sleep(0.3)
@@ -125,7 +154,7 @@ def stop_daemon() -> bool:
         time.sleep(0.5)
         try:
             os.kill(pid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, OSError):
             PID_FILE.unlink(missing_ok=True)
             return True
 

@@ -28,16 +28,41 @@ class TestReadPidEncoding:
 
 
 class TestDaemonizeWindows:
-    def test_exits_on_windows(self, monkeypatch):
+    def test_launches_background_process(self, monkeypatch, tmp_path):
         monkeypatch.setattr(daemon, "_IS_WINDOWS", True)
-        with pytest.raises(SystemExit, match="1"):
-            daemon.daemonize("0.0.0.0", 9876, None, None)
+        monkeypatch.setattr(daemon, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(daemon, "PID_FILE", tmp_path / "moolmesh.pid")
+        monkeypatch.setattr(daemon, "LOG_FILE", tmp_path / "daemon.log")
 
-    def test_prints_message_on_windows(self, monkeypatch, capsys):
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            pid = daemon.daemonize("0.0.0.0", 9876, None, None)
+
+        assert pid == 12345
+        assert (tmp_path / "moolmesh.pid").read_text(encoding="utf-8") == "12345"
+        call_args = mock_popen.call_args
+        assert "dashboard" in call_args[0][0]
+        assert call_args[1]["creationflags"] == 0x08000000
+
+    def test_passes_project_and_providers(self, monkeypatch, tmp_path):
         monkeypatch.setattr(daemon, "_IS_WINDOWS", True)
-        with pytest.raises(SystemExit):
-            daemon.daemonize("0.0.0.0", 9876, None, None)
-        assert "not available on Windows" in capsys.readouterr().err
+        monkeypatch.setattr(daemon, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(daemon, "PID_FILE", tmp_path / "moolmesh.pid")
+        monkeypatch.setattr(daemon, "LOG_FILE", tmp_path / "daemon.log")
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 999
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            daemon.daemonize("127.0.0.1", 5200, "myproject", ["claude", "codex"])
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--project" in cmd
+        assert "myproject" in cmd
+        assert "--providers" in cmd
+        assert "claude,codex" in cmd
 
 
 class TestStopDaemonWindows:
