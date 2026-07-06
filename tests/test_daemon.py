@@ -26,6 +26,14 @@ class TestReadPidEncoding:
         daemon.write_pid(99999)
         assert pid_file.read_text(encoding="utf-8").strip() == "99999"
 
+    def test_stale_pid_oserror_clears_file(self, tmp_path, monkeypatch):
+        pid_file = tmp_path / "moolmesh.pid"
+        pid_file.write_text("42", encoding="utf-8")
+        monkeypatch.setattr(daemon, "PID_FILE", pid_file)
+        with patch("os.kill", side_effect=OSError("[WinError 11]")):
+            assert daemon.read_pid() is None
+        assert not pid_file.exists()
+
 
 class TestDaemonizeWindows:
     def test_launches_background_process(self, monkeypatch, tmp_path):
@@ -45,6 +53,7 @@ class TestDaemonizeWindows:
         call_args = mock_popen.call_args
         assert "dashboard" in call_args[0][0]
         assert call_args[1]["creationflags"] == 0x08000000
+        assert call_args[1]["env"]["PYTHONIOENCODING"] == "utf-8"
 
     def test_passes_project_and_providers(self, monkeypatch, tmp_path):
         monkeypatch.setattr(daemon, "_IS_WINDOWS", True)

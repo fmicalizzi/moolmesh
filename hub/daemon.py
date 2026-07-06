@@ -21,7 +21,7 @@ def read_pid() -> int | None:
         pid = int(PID_FILE.read_text(encoding="utf-8").strip())
         os.kill(pid, 0)
         return pid
-    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError, OSError):
         PID_FILE.unlink(missing_ok=True)
         return None
 
@@ -62,6 +62,9 @@ def _daemonize_windows(host: str, port: int, project_filter: str | None, provide
     if providers:
         cmd += ["--providers", ",".join(providers)]
 
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+
     log_fh = open(LOG_FILE, "a", encoding="utf-8")
     CREATE_NO_WINDOW = 0x08000000
     proc = subprocess.Popen(
@@ -70,6 +73,7 @@ def _daemonize_windows(host: str, port: int, project_filter: str | None, provide
         stderr=log_fh,
         stdin=subprocess.DEVNULL,
         creationflags=CREATE_NO_WINDOW,
+        env=env,
     )
     write_pid(proc.pid)
     return proc.pid
