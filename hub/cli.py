@@ -411,48 +411,53 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
     print(f"  Install:   {method}")
     print()
 
-    # ── Check mcp dependency ───────────────────────────────────────
-    try:
-        subprocess.run(
-            [str(python), "-c", "import mcp"],
-            capture_output=True, check=True, timeout=10,
-        )
-        mcp_available = True
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        mcp_available = False
-
-    if not mcp_available:
-        print(yellow("  ⚠ The 'mcp' package is not installed in this environment."))
-        if method == "pipx":
-            inject_cmd = ["pipx", "inject", "moolmesh", "mcp"]
-        else:
-            inject_cmd = [str(python), "-m", "pip", "install", "mcp"]
-
-        print(f"  Run:  {bold(' '.join(inject_cmd))}")
-        print()
-
-        if getattr(args, "install_mcp", False) and not getattr(args, "dry_run", False):
-            print(dim(f"  Running: {' '.join(inject_cmd)}"))
-            try:
-                subprocess.run(inject_cmd, check=True, timeout=120)
-                mcp_available = True
-                print(green("  ✓ mcp installed successfully.\n"))
-            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
-                print(red(f"  ✗ Failed: {exc}"))
-                return
-        else:
-            print(dim("  Use --install-deps to install it automatically."))
-            print()
-
-    if not mcp_available:
-        return
-
     # ── Build the MCP config ───────────────────────────────────────
     uv_available = shutil.which("uv") is not None
-    if method == "venv" and uv_available:
+    if uv_available:
         server_cmd = ["uv", "run", str(mcp_script)]
     else:
         server_cmd = [str(python), str(mcp_script)]
+
+    # ── Check mcp dependency ───────────────────────────────────────
+    if uv_available:
+        mcp_available = True
+        print(dim("  mcp dependency: resolved by uv run (PEP 723 inline deps)"))
+        print()
+    else:
+        try:
+            subprocess.run(
+                [str(python), "-c", "import mcp"],
+                capture_output=True, check=True, timeout=10,
+            )
+            mcp_available = True
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            mcp_available = False
+
+        if not mcp_available:
+            print(yellow("  ⚠ The 'mcp' package is not installed in this environment."))
+            if method == "pipx":
+                inject_cmd = ["pipx", "inject", "moolmesh", "mcp"]
+            else:
+                inject_cmd = [str(python), "-m", "pip", "install", "mcp"]
+
+            print(f"  Run:  {bold(' '.join(inject_cmd))}")
+            print()
+
+            if getattr(args, "install_mcp", False) and not getattr(args, "dry_run", False):
+                print(dim(f"  Running: {' '.join(inject_cmd)}"))
+                try:
+                    subprocess.run(inject_cmd, check=True, timeout=120)
+                    mcp_available = True
+                    print(green("  ✓ mcp installed successfully.\n"))
+                except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                    print(red(f"  ✗ Failed: {exc}"))
+                    return
+            else:
+                print(dim("  Use --install-deps to install it automatically."))
+                print()
+
+    if not mcp_available:
+        return
 
     config_block = {
         "command": server_cmd[0],

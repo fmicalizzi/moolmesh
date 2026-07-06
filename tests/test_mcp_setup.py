@@ -39,13 +39,24 @@ class TestMcpSetupDetection:
         assert "args" in server
 
     def test_missing_mcp_shows_install_hint(self, capsys):
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, \
+             patch("shutil.which", return_value=None):
             mock_run.side_effect = subprocess.CalledProcessError(1, "python")
             cmd_mcp_setup(_make_args(target="json"))
 
         out = capsys.readouterr().out
         assert "not installed" in out.lower()
         assert "pip install mcp" in out or "pipx inject" in out
+
+    def test_uv_skips_mcp_check(self, capsys):
+        with patch("subprocess.run") as mock_run, \
+             patch("shutil.which", return_value="/usr/bin/uv"):
+            mock_run.return_value = MagicMock(returncode=0)
+            cmd_mcp_setup(_make_args(target="json"))
+
+        out = capsys.readouterr().out
+        assert "resolved by uv run" in out.lower()
+        assert "uv" in out
 
 
 class TestMcpSetupDesktop:
