@@ -14,16 +14,41 @@ jobs:
         with:
           ref: main
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Sync version to banner SVG
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           sed -i "s|>v[0-9]\+\.[0-9]\+\.[0-9]\+<|>v${VERSION}<|" docs/cli-banner.svg
 
+      - name: Count tests and sync to assets
+        run: |
+          pip install -e . --quiet 2>/dev/null
+          COUNT=$(python -m pytest tests/ -q --co 2>&1 | tail -1 | grep -oP '^\d+')
+          if [ -n "$COUNT" ]; then
+            python -c "
+          import re, pathlib
+          # Landing page: update the number before 'Tests passing'
+          html = pathlib.Path('docs/index.html').read_text()
+          html = re.sub(
+              r'(<span class=\"val\">)\d+(</span>\s*<span class=\"label\">Tests passing)',
+              rf'\g<1>${COUNT}\2', html)
+          pathlib.Path('docs/index.html').write_text(html)
+          "
+            sed -i "s|Tests-[0-9]\+%20passing|Tests-${COUNT}%20passing|g" README.md README.es.md
+            sed -i "s|Tests: [0-9]\+ passing|Tests: ${COUNT} passing|g" README.md README.es.md
+            sed -i "s|^[0-9]\+ tests\. |${COUNT} tests. |" README.md README.es.md
+            sed -i "s|contains [0-9]\+ tests|contains ${COUNT} tests|g" CONTRIBUTING.md
+            echo "Updated test count to ${COUNT}"
+          fi
+
       - name: Commit updated assets
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git diff --quiet || (git add docs/cli-banner.svg && git commit -m "chore: sync banner version to ${GITHUB_REF_NAME} [skip ci]" && git push origin main)
+          git diff --quiet || (git add docs/cli-banner.svg docs/index.html README.md README.es.md CONTRIBUTING.md && git commit -m "chore: sync version, test count to ${GITHUB_REF_NAME} [skip ci]" && git push origin main)
 
   build:
     runs-on: ubuntu-latest

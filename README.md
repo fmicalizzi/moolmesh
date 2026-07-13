@@ -503,7 +503,7 @@ pytest tests/ -v
 pytest tests/ -v --cov=hub
 ```
 
-593 tests. Zero external dependencies. Python stdlib + SQLite.
+628 tests. Zero external dependencies. Python stdlib + SQLite.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 

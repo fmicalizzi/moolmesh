@@ -6,6 +6,67 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.8.1] — 2026-07-06
+
+### Fixed
+- **Daemon crash on Windows due to cp1252 encoding** (#14) — ASCII art banner uses Unicode block characters that `cp1252` can't encode. Daemon subprocess now runs with `PYTHONIOENCODING=utf-8`.
+- **Stale PID file blocking all daemon commands on Windows** (#15) — `read_pid()` now catches `OSError` (raised by `os.kill(pid, 0)` on Windows for certain stale PIDs).
+
+---
+
+## [1.8.0] — 2026-07-06
+
+### Added
+- **Windows daemon support** — `mool daemon start` now works on Windows via `subprocess.Popen` with `CREATE_NO_WINDOW`. Same commands on all platforms: `start`, `stop`, `status`, `restart`.
+- **`uv` as recommended Windows installer** — `uv tool install moolmesh` handles PATH and MCP deps automatically.
+
+### Changed
+- Quick Start updated to recommend `mool daemon start` over `mool dashboard`.
+- Windows section in README now lists `uv` as primary install option.
+
+---
+
+## [1.7.4] — 2026-07-06
+
+### Fixed
+- **`mool mcp setup` failing on `uv` environments** — when `uv` is available, skip the `mcp` package check entirely since `uv run` resolves PEP 723 inline deps automatically. Previously demanded `pip install mcp` which doesn't exist in uv-managed venvs.
+
+---
+
+## [1.7.3] — 2026-07-06
+
+### Fixed
+- **`mool --version` showing stale version** — now reads from `importlib.metadata` instead of a hardcoded string in `hub/__init__.py`.
+
+---
+
+## [1.7.2] — 2026-07-05
+
+### Fixed
+- **Codex parser field mismatch** — reading `payload.content` instead of `payload.message`, causing blank user messages in reports.
+- **Codex event subtype classification** — all 11 `event_msg` subtypes now classified correctly (were all treated as USER).
+- **Cursor sessions silently discarded** — added Cursor parser/adapter to batch reporter.
+- **Windows path handling** — centralized with `_normalize_path_str()` and `_split_path()`, fixing 8 locations that assumed Unix `/` separators. Strips `\\?\` Extended-Length Path prefix.
+- **Daemon graceful degradation on Windows** — uses `taskkill` instead of `signal.SIGKILL`, catches `ConnectionAbortedError` in SSE handler.
+- **PID file encoding** — added `encoding="utf-8"` to read/write.
+- **WAL pragma defensiveness** — try/except on `PRAGMA journal_mode=WAL` for exotic filesystems.
+
+### Changed
+- README: `pipx install` as primary method, PEP 668 note, Windows section with PATH troubleshooting, dual-OS venv instructions.
+- Added Python 3.14 classifier to `pyproject.toml`.
+
+### Removed
+- Dead code: `KqueueWatcher`, `PollingWatcher`, and orphaned test.
+
+---
+
+## [1.7.1] — 2026-06-29
+
+### Added
+- **`mool mcp setup` — universal MCP client configuration** for all major AI agents: Cursor (`mool mcp setup cursor`), Codex (`mool mcp setup codex`), Qwen (`mool mcp setup qwen`), OpenCode (`mool mcp setup opencode`). Each uses its native config format.
+
+---
+
 ## [1.7.0] — 2026-06-29
 
 ### Added
@@ -16,6 +77,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ### Notes
 - Cursor stores no per-message timestamps locally; MoolMesh approximates them from composer metadata. Token counts come from Cursor's own `tokenCount` and may not split input/output.
+
+---
+
+## [1.6.3] — 2026-06-29
+
+### Fixed
+- **`mool mcp setup` idempotency** — handles existing registrations by removing before re-adding instead of failing. Detection reads `~/.claude.json` directly (user scope only).
+
+---
+
+## [1.6.2] — 2026-06-29
+
+### Added
+- **`mool mcp setup`** — cross-platform MCP server configuration command. Auto-detects install method (pipx/pip/source) and OS. Supports `claude-code`, `claude-desktop`, and `json` targets. `--install-deps` auto-installs `mcp` package, `--dry-run` previews changes.
+
+---
+
+## [1.6.1] — 2026-06-26
+
+### Fixed
+- Dynamic version display in dashboard and landing page.
+- Token-conscious limits on MCP server tools (`get_sessions`, `get_active_sessions`, `get_session_events`).
+- `text_mode` parameter for `get_session_events`: `none` | `snippet` | `full` (replaces `include_full_text` boolean).
+
+### Changed
+- SVG banner replaces static PNG.
 
 ---
 
@@ -59,11 +146,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
-## [1.4.3] — 2026-06-23
+## [1.4.3] — 2026-06-24
 
 ### Fixed
 - **systemd compatibility** — `mool daemon start` auto-detects process supervisors (`$INVOCATION_ID`, `$NOTIFY_SOCKET`) and stays in foreground instead of double-forking. `Type=simple` systemd services now work correctly. (#1)
 - **Global install docs** — added "Production Install" section with `pipx install moolmesh` as recommended method and systemd unit file example. (#2)
+
+---
+
+## [1.4.2] — 2026-06-23
+
+### Added
+- **`mool query`** — 6 JSON-output subcommands (`events`, `sessions`, `tokens`, `tools`, `search`, `project`) for agents without MCP.
+- **`--json` flag** on `status` and `discover` for machine-parseable output.
+- **Enhanced `mool status`** — shows live port, events count, and monitored repos from running daemon.
+
+### Fixed
+- **Auto port fallback** — if the default port is busy, auto-increments up to 10 tries.
+- **Running instance detection** — checks `/health` before trying another port; informs user if MoolMesh is already running.
 
 ---
 
