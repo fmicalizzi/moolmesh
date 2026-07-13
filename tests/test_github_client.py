@@ -95,6 +95,54 @@ class TestGitHubClient:
         assert data is None
         assert etag is None
 
+    def test_rest_get_read_fails_after_urlopen(self):
+        """resp.read() lanza IncompleteRead tras urlopen exitoso → (0, None, None).
+
+        No debe devolver el ETag nuevo: guardarlo con body vacío haría que
+        los polls siguientes reciban 304 sin haber sincronizado nunca.
+        """
+        import http.client
+        client = GitHubClient("test-token")
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {"ETag": '"nuevo"'}
+        mock_response.read.side_effect = http.client.IncompleteRead(b"x" * 100, 50)
+
+        with patch('urllib.request.urlopen', return_value=mock_response):
+            status, data, etag = client.rest_get("/repos/test/repo")
+
+        assert status == 0
+        assert data is None
+        assert etag is None
+
+    def test_rest_get_truncated_json(self):
+        """Body con JSON truncado → (0, None, None), sin JSONDecodeError."""
+        client = GitHubClient("test-token")
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {"ETag": '"abc"'}
+        mock_response.read.return_value = b'[{"number": 1, "title": "trunc'
+
+        with patch('urllib.request.urlopen', return_value=mock_response):
+            status, data, etag = client.rest_get("/repos/test/repo")
+
+        assert status == 0
+        assert data is None
+        assert etag is None
+
+    def test_graphql_truncated_json(self):
+        """GraphQL con body truncado → None, sin JSONDecodeError."""
+        client = GitHubClient("test-token")
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {}
+        mock_response.read.return_value = b'{"data": {"repo'
+
+        with patch('urllib.request.urlopen', return_value=mock_response):
+            result = client.graphql("query { viewer { login } }")
+
+        assert result is None
+
     def test_graphql_success(self):
         """POST body correct, response parsed."""
         client = GitHubClient("test-token")

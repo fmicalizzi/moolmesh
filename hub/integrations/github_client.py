@@ -54,17 +54,29 @@ class GitHubClient:
         req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
         try:
             resp = urllib.request.urlopen(req, timeout=timeout)
-            status = resp.status
-            resp_headers = dict(resp.headers)
-            resp_body = resp.read()
         except urllib.error.HTTPError as e:
             status = e.code
             resp_headers = dict(e.headers)
-            resp_body = e.read()
+            try:
+                resp_body = e.read()
+            except (http.client.HTTPException, OSError, TimeoutError):
+                resp_body = b""
         except (urllib.error.URLError, http.client.HTTPException,
                 OSError, TimeoutError) as e:
             _log.debug("GitHub API network error: %s %s — %s", method, url, e)
             return 0, {}, b""  # Network error
+        else:
+            status = resp.status
+            resp_headers = dict(resp.headers)
+            try:
+                resp_body = resp.read()
+            except (http.client.HTTPException, OSError, TimeoutError) as e:
+                # Body truncado tras un urlopen exitoso. Se reporta como error
+                # de red (0) y no como 200 vacío: devolver el ETag nuevo con
+                # body vacío haría que el caller lo guarde y los siguientes
+                # polls reciban 304 sin haber sincronizado nunca los datos.
+                _log.debug("GitHub API truncated body: %s %s — %s", method, url, e)
+                return 0, {}, b""
 
         # Track rate limit
         if "X-RateLimit-Remaining" in resp_headers:
@@ -98,7 +110,13 @@ class GitHubClient:
             return 304, None, etag
         if status == 200:
             new_etag = resp_headers.get("ETag")
-            data = json.loads(body) if body else None
+            data = None
+            if body:
+                try:
+                    data = json.loads(body)
+                except json.JSONDecodeError as e:
+                    _log.debug("GitHub API JSON inválido en %s: %s", path, e)
+                    return 0, None, None
             return 200, data, new_etag
 
         return status, None, None
@@ -120,7 +138,11 @@ class GitHubClient:
         )
 
         if status == 200 and resp_body:
-            result = json.loads(resp_body)
+            try:
+                result = json.loads(resp_body)
+            except json.JSONDecodeError as e:
+                _log.debug("GitHub GraphQL JSON inválido: %s", e)
+                return None
             if "errors" in result:
                 return None  # GraphQL error
             return result.get("data")
