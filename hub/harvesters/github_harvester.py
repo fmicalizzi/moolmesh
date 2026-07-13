@@ -35,6 +35,9 @@ class GitHubHarvester:
         self._threads: list[threading.Thread] = []
         # ETags por repo para conditional requests
         self._etags: dict[str, str] = {}  # "owner/repo/issues" -> etag
+        # Backoff de log por repo+poll: fallos consecutivos y tipo del último error
+        self._error_counts: dict[str, int] = {}
+        self._error_types: dict[str, str] = {}
         # Cache config para evitar re-read en cada tick
         self._config_cache: dict | None = None
         self._config_cache_time: float = 0
@@ -99,10 +102,33 @@ class GitHubHarvester:
             repo_id = self._store.get_repo_id(repo_config.path)
             if repo_id is None:
                 continue
+            repo_name = f"{repo_config.owner}/{repo_config.repo}"
+            error_key = f"{poll_fn.__name__}:{repo_name}"
             try:
                 poll_fn(repo_id, repo_config.owner, repo_config.repo)
-            except Exception:
-                _log.warning("Error en %s/%s", repo_config.owner, repo_config.repo, exc_info=True)
+            except Exception as e:
+                self._log_repo_error(error_key, repo_name, e)
+            else:
+                self._error_counts.pop(error_key, None)
+                self._error_types.pop(error_key, None)
+
+    def _log_repo_error(self, error_key: str, repo_name: str, exc: Exception) -> None:
+        """Log con backoff: traceback completo solo en el primer fallo o si
+        cambia el tipo de error; los fallos consecutivos repetidos van en
+        una línea para no spamear el log cada ciclo de polling."""
+        err_type = type(exc).__name__
+        if self._error_types.get(error_key) == err_type:
+            count = self._error_counts.get(error_key, 0) + 1
+        else:
+            count = 1
+        self._error_counts[error_key] = count
+        self._error_types[error_key] = err_type
+
+        if count == 1:
+            _log.warning("Error en %s (%s)", repo_name, err_type, exc_info=True)
+        else:
+            _log.warning("Error en %s (%s, fallo consecutivo #%d): %s",
+                         repo_name, err_type, count, exc)
 
     def _poll_issues_prs(self, repo_id: int, owner: str, repo: str) -> None:
         """Fetch issues+PRs via REST, detect cambios, upsert en SQLite."""

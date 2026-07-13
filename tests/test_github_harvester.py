@@ -212,3 +212,82 @@ class TestGitHubHarvester:
         harvester.stop()
 
         assert harvester._running is False
+
+
+class TestLogBackoff:
+    """P4 — errores consecutivos no generan traceback repetido."""
+
+    def _make_harvester(self):
+        mock_store = MagicMock(spec=GitStore)
+        mock_client = MagicMock()
+        return GitHubHarvester(mock_store, mock_client)
+
+    def test_first_error_logs_traceback(self):
+        harvester = self._make_harvester()
+        with patch("hub.harvesters.github_harvester._log") as mock_log:
+            harvester._log_repo_error("poll:o/r", "o/r", ValueError("boom"))
+
+        assert mock_log.warning.call_count == 1
+        assert mock_log.warning.call_args.kwargs.get("exc_info") is True
+
+    def test_repeated_error_logs_one_line(self):
+        harvester = self._make_harvester()
+        with patch("hub.harvesters.github_harvester._log") as mock_log:
+            for _ in range(5):
+                harvester._log_repo_error("poll:o/r", "o/r", ValueError("boom"))
+
+        assert mock_log.warning.call_count == 5
+        # Solo la primera llamada lleva exc_info=True
+        with_traceback = [c for c in mock_log.warning.call_args_list
+                          if c.kwargs.get("exc_info")]
+        assert len(with_traceback) == 1
+        # Las siguientes reportan el contador de fallos consecutivos
+        last = mock_log.warning.call_args_list[-1]
+        assert 5 in last.args
+
+    def test_error_type_change_logs_traceback_again(self):
+        harvester = self._make_harvester()
+        with patch("hub.harvesters.github_harvester._log") as mock_log:
+            harvester._log_repo_error("poll:o/r", "o/r", ValueError("boom"))
+            harvester._log_repo_error("poll:o/r", "o/r", ValueError("boom"))
+            harvester._log_repo_error("poll:o/r", "o/r", KeyError("otro"))
+
+        with_traceback = [c for c in mock_log.warning.call_args_list
+                          if c.kwargs.get("exc_info")]
+        assert len(with_traceback) == 2
+
+    def test_counter_resets_on_success(self):
+        """Un poll exitoso limpia el contador del repo."""
+        harvester = self._make_harvester()
+        harvester._error_counts["_poll_fn:o/r"] = 4
+        harvester._error_types["_poll_fn:o/r"] = "ValueError"
+
+        repo_config = MagicMock()
+        repo_config.github_enabled = True
+        repo_config.owner = "o"
+        repo_config.repo = "r"
+        repo_config.path = "/tmp/r"
+        config = MagicMock()
+        config.repos = [repo_config]
+        harvester._config_cache = config
+        harvester._config_cache_time = float("inf")
+        harvester._store.get_repo_id.return_value = 1
+        harvester._running = True
+
+        poll_fn = MagicMock()
+        poll_fn.__name__ = "_poll_fn"
+        harvester._poll_all_repos(poll_fn)
+
+        assert "_poll_fn:o/r" not in harvester._error_counts
+        assert "_poll_fn:o/r" not in harvester._error_types
+
+    def test_keys_are_independent_per_poll_type(self):
+        """Fallos en issues no comparten contador con milestones."""
+        harvester = self._make_harvester()
+        with patch("hub.harvesters.github_harvester._log") as mock_log:
+            harvester._log_repo_error("issues:o/r", "o/r", ValueError("a"))
+            harvester._log_repo_error("milestones:o/r", "o/r", ValueError("b"))
+
+        with_traceback = [c for c in mock_log.warning.call_args_list
+                          if c.kwargs.get("exc_info")]
+        assert len(with_traceback) == 2
