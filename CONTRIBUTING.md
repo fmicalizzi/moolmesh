@@ -40,7 +40,7 @@ Before contributing, please read [PHILOSOPHY.md](PHILOSOPHY.md) to understand th
    pytest tests/
    ```
 
-   The suite currently contains 628 tests. All of them should pass before you start making changes.
+   The suite currently contains 651 tests. All of them should pass before you start making changes.
 
 5. **Try the CLI** to get a feel for the tool:
 
