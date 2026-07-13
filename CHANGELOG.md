@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.8.3] — 2026-07-13
+
+### Fixed
+- **CI sync-assets failing on release** — `pip install -e .` didn't install dev dependencies, so `pytest` was missing in the runner. Changed to `pip install -e ".[dev]"`.
+
+---
+
 ## [1.8.2] — 2026-07-13
 
 ### Fixed
