@@ -25,7 +25,7 @@ jobs:
 
       - name: Count tests and sync to assets
         run: |
-          pip install -e . --quiet 2>/dev/null
+          pip install -e ".[dev]" --quiet 2>/dev/null
           COUNT=$(python -m pytest tests/ -q --co 2>&1 | tail -1 | grep -oP '^\d+')
           if [ -n "$COUNT" ]; then
             python -c "
