@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.8.2] — 2026-07-13
+
+### Fixed
+- **`IncompleteRead` crash loop on large repos** — `GitHubClient._request()` now catches `http.client.HTTPException` (covers `IncompleteRead`, `RemoteDisconnected`, `BadStatusLine`). Previously only caught `URLError`/`OSError`/`TimeoutError`, causing unhandled exceptions every 15 seconds for repos with large API responses.
+- **Same except gap in `OpenAICompatClient`** — `chat()` and `is_available()` now also catch `HTTPException`.
+- **`json.loads` on truncated body** — `rest_get()` and `graphql()` now handle `JSONDecodeError` from partial/corrupt response bodies.
+- **`resp.read()` failure after successful `urlopen()`** — separated into its own try/except so a truncated body returns `(0, {}, b"")` instead of an unhandled exception.
+- **Log spam on persistent GitHub API errors** — `GitHubHarvester` now uses per-repo error counters with backoff: full traceback on first failure, one-line summary on consecutive identical errors, reset on success.
+
+### Added
+- **Retry with backoff in `_request()`** — up to 2 retries with 1s/2s backoff for transient network errors. HTTP 4xx/5xx are not retried.
+- **Pagination in `list_issues()`** — follows GitHub's `Link` header for up to 10 pages (1000 issues). ETag conditional applies only to page 1 (sort=updated desc: if page 1 unchanged, nothing changed).
+
+---
+
 ## [1.8.1] — 2026-07-06
 
 ### Fixed
