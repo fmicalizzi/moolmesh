@@ -265,6 +265,95 @@ class TestGitHubClient:
         assert issue_data["state"] == "closed"
 
 
+class TestPagination:
+    """P6 — list_issues pagina más allá de los primeros per_page items."""
+
+    @staticmethod
+    def _page(start, count):
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {"ETag": '"etag-1"'}
+        mock_response.read.return_value = json.dumps(
+            [{"number": n} for n in range(start, start + count)]
+        ).encode()
+        return mock_response
+
+    def test_single_page_no_extra_requests(self):
+        """Página incompleta (< per_page) → una sola request."""
+        client = GitHubClient("test-token")
+
+        with patch('urllib.request.urlopen',
+                   return_value=self._page(1, 40)) as mock_urlopen:
+            status, data, etag = client.list_issues("owner", "repo")
+
+        assert status == 200
+        assert len(data) == 40
+        assert mock_urlopen.call_count == 1
+        assert etag == '"etag-1"'
+
+    def test_multiple_pages_accumulated(self):
+        """Páginas llenas → sigue pidiendo hasta la incompleta."""
+        client = GitHubClient("test-token")
+        pages = [self._page(1, 100), self._page(101, 100), self._page(201, 30)]
+
+        with patch('urllib.request.urlopen', side_effect=pages) as mock_urlopen:
+            status, data, etag = client.list_issues("owner", "repo")
+
+        assert status == 200
+        assert len(data) == 230
+        assert data[0]["number"] == 1
+        assert data[-1]["number"] == 230
+        assert mock_urlopen.call_count == 3
+        # El ETag retornado es el de la primera página
+        assert etag == '"etag-1"'
+        # Página 2 en adelante llevan el param page y no llevan If-None-Match
+        second_req = mock_urlopen.call_args_list[1][0][0]
+        assert "page=2" in second_req.full_url
+        assert second_req.get_header("If-none-match") is None
+
+    def test_max_pages_cap(self):
+        """No pide más de max_pages aunque todas vengan llenas."""
+        client = GitHubClient("test-token")
+        pages = [self._page(1 + i * 100, 100) for i in range(3)]
+
+        with patch('urllib.request.urlopen', side_effect=pages) as mock_urlopen:
+            status, data, _ = client.list_issues("owner", "repo", max_pages=3)
+
+        assert status == 200
+        assert len(data) == 300
+        assert mock_urlopen.call_count == 3
+
+    def test_page_error_returns_partial(self):
+        """Error de red en la página 2 → retorna lo acumulado de la página 1."""
+        import http.client
+        client = GitHubClient("test-token")
+
+        with patch('urllib.request.urlopen',
+                   side_effect=[self._page(1, 100)]
+                   + [http.client.RemoteDisconnected("closed")] * 3):
+            status, data, etag = client.list_issues("owner", "repo")
+
+        assert status == 200
+        assert len(data) == 100
+        assert etag == '"etag-1"'
+
+    def test_304_short_circuits(self):
+        """304 en la primera página → no pide más páginas."""
+        client = GitHubClient("test-token")
+        mock_error = MagicMock()
+        mock_error.code = 304
+        mock_error.headers = {}
+
+        with patch('urllib.request.urlopen',
+                   side_effect=HTTPErrorMock(mock_error)) as mock_urlopen:
+            status, data, etag = client.list_issues("owner", "repo", etag='"e"')
+
+        assert status == 304
+        assert data is None
+        assert etag == '"e"'
+        assert mock_urlopen.call_count == 1
+
+
 class TestRetry:
     """P3 — retry con backoff para errores transitorios."""
 

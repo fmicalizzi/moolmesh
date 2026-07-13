@@ -167,16 +167,39 @@ class GitHubClient:
 
     def list_issues(self, owner: str, repo: str, state: str = "all",
                     since: str | None = None, per_page: int = 100,
-                    etag: str | None = None) -> tuple[int, list[dict] | None, str | None]:
-        """GET /repos/{owner}/{repo}/issues con filtros.
+                    etag: str | None = None,
+                    max_pages: int = 10) -> tuple[int, list[dict] | None, str | None]:
+        """GET /repos/{owner}/{repo}/issues con filtros, paginado.
 
         Retorna issues Y pull requests (GitHub API las mezcla).
         El campo 'pull_request' indica si es PR.
+
+        El ETag aplica solo a la primera página (suficiente: los issues
+        vienen ordenados por updated desc, si la página 1 no cambió no
+        cambió nada). Las siguientes se piden hasta max_pages mientras
+        cada página venga llena.
         """
+        path = f"/repos/{owner}/{repo}/issues"
         params = {"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"}
         if since:
             params["since"] = since
-        return self.rest_get(f"/repos/{owner}/{repo}/issues", params, etag)
+
+        status, data, new_etag = self.rest_get(path, params, etag)
+        if status != 200 or not isinstance(data, list):
+            return status, data, new_etag
+
+        all_items = list(data)
+        page = 2
+        while len(data) == per_page and page <= max_pages:
+            page_params = dict(params)
+            page_params["page"] = page
+            page_status, data, _ = self.rest_get(path, page_params)
+            if page_status != 200 or not isinstance(data, list) or not data:
+                break  # Error o fin: se retorna lo acumulado hasta aquí
+            all_items.extend(data)
+            page += 1
+
+        return 200, all_items, new_etag
 
     def list_pulls(self, owner: str, repo: str, state: str = "all",
                    per_page: int = 100) -> tuple[int, list[dict] | None, str | None]:
