@@ -1,6 +1,7 @@
 """Cliente GitHub API — REST + GraphQL, zero dependencies."""
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -60,7 +61,8 @@ class GitHubClient:
             status = e.code
             resp_headers = dict(e.headers)
             resp_body = e.read()
-        except (urllib.error.URLError, OSError, TimeoutError) as e:
+        except (urllib.error.URLError, http.client.HTTPException,
+                OSError, TimeoutError) as e:
             _log.debug("GitHub API network error: %s %s — %s", method, url, e)
             return 0, {}, b""  # Network error
 

@@ -56,6 +56,45 @@ class TestGitHubClient:
         assert data is None
         assert etag is None
 
+    def test_rest_get_incomplete_read(self):
+        """IncompleteRead (respuesta truncada) returns (0, None, None) sin propagar."""
+        import http.client
+        client = GitHubClient("test-token")
+
+        with patch('urllib.request.urlopen',
+                   side_effect=http.client.IncompleteRead(b"x" * 100, 50)):
+            status, data, etag = client.rest_get("/repos/test/repo")
+
+        assert status == 0
+        assert data is None
+        assert etag is None
+
+    def test_rest_get_remote_disconnected(self):
+        """RemoteDisconnected returns (0, None, None) sin propagar."""
+        import http.client
+        client = GitHubClient("test-token")
+
+        with patch('urllib.request.urlopen',
+                   side_effect=http.client.RemoteDisconnected("closed")):
+            status, data, etag = client.rest_get("/repos/test/repo")
+
+        assert status == 0
+        assert data is None
+        assert etag is None
+
+    def test_rest_get_bad_status_line(self):
+        """BadStatusLine returns (0, None, None) sin propagar."""
+        import http.client
+        client = GitHubClient("test-token")
+
+        with patch('urllib.request.urlopen',
+                   side_effect=http.client.BadStatusLine("garbage")):
+            status, data, etag = client.rest_get("/repos/test/repo")
+
+        assert status == 0
+        assert data is None
+        assert etag is None
+
     def test_graphql_success(self):
         """POST body correct, response parsed."""
         client = GitHubClient("test-token")

@@ -1,6 +1,7 @@
 """Cliente OpenAI-compatible — sirve para OpenRouter, Together, Groq, OpenAI."""
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -53,6 +54,7 @@ class OpenAICompatClient:
                 if choices:
                     return choices[0].get("message", {}).get("content")
         except (urllib.error.URLError, urllib.error.HTTPError,
+                http.client.HTTPException,
                 OSError, TimeoutError, json.JSONDecodeError,
                 KeyError, TypeError, IndexError) as e:
             _log.debug("OpenAICompat chat falló: %s", e)
@@ -76,6 +78,7 @@ class OpenAICompatClient:
             resp = urllib.request.urlopen(req, timeout=5)
             return resp.status == 200
         except (urllib.error.URLError, urllib.error.HTTPError,
+                http.client.HTTPException,
                 OSError, TimeoutError) as e:
             _log.debug("OpenAICompat no disponible: %s", e)
             return False

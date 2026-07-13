@@ -47,6 +47,34 @@ class TestOpenAICompatClient:
 
         assert result is None
 
+    def test_chat_incomplete_read(self):
+        import http.client
+        client = OpenAICompatClient(api_key="test-key")
+
+        with patch('urllib.request.urlopen',
+                   side_effect=http.client.IncompleteRead(b"partial", 100)):
+            result = client.chat([{"role": "user", "content": "test"}])
+
+        assert result is None
+
+    def test_chat_remote_disconnected(self):
+        import http.client
+        client = OpenAICompatClient(api_key="test-key")
+
+        with patch('urllib.request.urlopen',
+                   side_effect=http.client.RemoteDisconnected("closed")):
+            result = client.chat([{"role": "user", "content": "test"}])
+
+        assert result is None
+
+    def test_is_available_incomplete_read(self):
+        import http.client
+        client = OpenAICompatClient(api_key="test-key")
+
+        with patch('urllib.request.urlopen',
+                   side_effect=http.client.IncompleteRead(b"", 10)):
+            assert client.is_available() is False
+
     def test_is_available_success(self):
         client = OpenAICompatClient(api_key="test-key")
         mock_response = MagicMock()
