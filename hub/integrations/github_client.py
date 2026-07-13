@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,6 +26,11 @@ class GitHubClient:
 
     BASE_URL = "https://api.github.com"
     GRAPHQL_URL = "https://api.github.com/graphql"
+
+    # Reintentos para errores de red transitorios (IncompleteRead, reset,
+    # timeout). Los errores HTTP 4xx/5xx no se reintentan.
+    MAX_RETRIES = 2
+    RETRY_BACKOFF = 1.0  # segundos; escala linealmente por intento
 
     def __init__(self, token: str | None = None):
         self._token = token
@@ -52,31 +58,40 @@ class GitHubClient:
             hdrs.update(headers)
 
         req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
-        try:
-            resp = urllib.request.urlopen(req, timeout=timeout)
-        except urllib.error.HTTPError as e:
-            status = e.code
-            resp_headers = dict(e.headers)
+        for attempt in range(self.MAX_RETRIES + 1):
             try:
-                resp_body = e.read()
-            except (http.client.HTTPException, OSError, TimeoutError):
-                resp_body = b""
-        except (urllib.error.URLError, http.client.HTTPException,
-                OSError, TimeoutError) as e:
-            _log.debug("GitHub API network error: %s %s — %s", method, url, e)
-            return 0, {}, b""  # Network error
-        else:
+                resp = urllib.request.urlopen(req, timeout=timeout)
+            except urllib.error.HTTPError as e:
+                # Respuesta HTTP válida (4xx/5xx): no se reintenta
+                status = e.code
+                resp_headers = dict(e.headers)
+                try:
+                    resp_body = e.read()
+                except (http.client.HTTPException, OSError, TimeoutError):
+                    resp_body = b""
+                break
+            except (urllib.error.URLError, http.client.HTTPException,
+                    OSError, TimeoutError) as e:
+                if attempt < self.MAX_RETRIES:
+                    time.sleep(self.RETRY_BACKOFF * (attempt + 1))
+                    continue
+                _log.debug("GitHub API network error: %s %s — %s", method, url, e)
+                return 0, {}, b""  # Network error
             status = resp.status
             resp_headers = dict(resp.headers)
             try:
                 resp_body = resp.read()
             except (http.client.HTTPException, OSError, TimeoutError) as e:
+                if attempt < self.MAX_RETRIES:
+                    time.sleep(self.RETRY_BACKOFF * (attempt + 1))
+                    continue
                 # Body truncado tras un urlopen exitoso. Se reporta como error
                 # de red (0) y no como 200 vacío: devolver el ETag nuevo con
                 # body vacío haría que el caller lo guarde y los siguientes
                 # polls reciban 304 sin haber sincronizado nunca los datos.
                 _log.debug("GitHub API truncated body: %s %s — %s", method, url, e)
                 return 0, {}, b""
+            break
 
         # Track rate limit
         if "X-RateLimit-Remaining" in resp_headers:

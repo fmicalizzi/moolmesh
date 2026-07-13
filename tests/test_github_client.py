@@ -11,6 +11,13 @@ from hub.integrations.github_client import GitHubClient
 from hub import USER_AGENT, __version__
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_sleep():
+    """Anula el backoff real del retry para que los tests no duerman."""
+    with patch('hub.integrations.github_client.time.sleep'):
+        yield
+
+
 class TestGitHubClient:
     """Test suite para GitHubClient."""
 
@@ -256,6 +263,83 @@ class TestGitHubClient:
         """PR closed state detection."""
         issue_data = {"state": "closed", "pull_request": {}}
         assert issue_data["state"] == "closed"
+
+
+class TestRetry:
+    """P3 — retry con backoff para errores transitorios."""
+
+    def _mock_200(self, body=b"{}"):
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {}
+        mock_response.read.return_value = body
+        return mock_response
+
+    def test_transient_error_then_success(self):
+        """IncompleteRead en el primer intento, éxito en el segundo."""
+        import http.client
+        client = GitHubClient("test-token")
+        ok = self._mock_200(json.dumps({"id": 1}).encode())
+
+        with patch('hub.integrations.github_client.time.sleep') as mock_sleep, \
+             patch('urllib.request.urlopen',
+                   side_effect=[http.client.IncompleteRead(b"x", 10), ok]) as mock_urlopen:
+            status, data, _ = client.rest_get("/repos/test/repo")
+
+        assert status == 200
+        assert data == {"id": 1}
+        assert mock_urlopen.call_count == 2
+        assert mock_sleep.call_count == 1
+
+    def test_all_attempts_fail(self):
+        """Error persistente agota los reintentos y retorna (0, None, None)."""
+        import http.client
+        client = GitHubClient("test-token")
+
+        with patch('hub.integrations.github_client.time.sleep') as mock_sleep, \
+             patch('urllib.request.urlopen',
+                   side_effect=http.client.RemoteDisconnected("closed")) as mock_urlopen:
+            status, data, etag = client.rest_get("/repos/test/repo")
+
+        assert status == 0
+        assert data is None
+        assert mock_urlopen.call_count == GitHubClient.MAX_RETRIES + 1
+        assert mock_sleep.call_count == GitHubClient.MAX_RETRIES
+
+    def test_http_error_not_retried(self):
+        """HTTPError (4xx/5xx) es una respuesta válida — no se reintenta."""
+        from urllib.error import HTTPError
+        client = GitHubClient("test-token")
+
+        def raise_404(*args, **kwargs):
+            raise HTTPError(url="", code=404, msg="Not Found", hdrs={}, fp=BytesIO(b""))
+
+        with patch('hub.integrations.github_client.time.sleep') as mock_sleep, \
+             patch('urllib.request.urlopen', side_effect=raise_404) as mock_urlopen:
+            status, data, _ = client.rest_get("/repos/test/repo")
+
+        assert status == 404
+        assert mock_urlopen.call_count == 1
+        assert mock_sleep.call_count == 0
+
+    def test_read_failure_retried(self):
+        """resp.read() truncado en el primer intento, éxito en el segundo."""
+        import http.client
+        client = GitHubClient("test-token")
+        bad = MagicMock()
+        bad.status = 200
+        bad.headers = {"ETag": '"a"'}
+        bad.read.side_effect = http.client.IncompleteRead(b"x", 10)
+        ok = self._mock_200(b'[{"number": 1}]')
+        ok.headers = {"ETag": '"b"'}
+
+        with patch('hub.integrations.github_client.time.sleep'), \
+             patch('urllib.request.urlopen', side_effect=[bad, ok]):
+            status, data, etag = client.rest_get("/repos/test/repo")
+
+        assert status == 200
+        assert data == [{"number": 1}]
+        assert etag == '"b"'
 
 
 class HTTPErrorMock:
