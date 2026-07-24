@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.8.4] — 2026-07-24
+
+### Added
+- **MCP pagination: `offset` parameter** — `get_session_events`, `get_recent_events`, and `search_events` now accept `offset` for cursor-based pagination. Previously, agents hitting sessions with 100+ events had no way to reach events beyond the first page.
+- **MCP event ordering: `order` parameter** — `get_session_events` now accepts `order="desc"` to return newest events first. Agents reviewing long sessions can get the latest activity in a single call instead of paginating from the start.
+
+---
+
 ## [1.8.3] — 2026-07-13
 
 ### Fixed

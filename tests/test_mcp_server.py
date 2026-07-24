@@ -153,6 +153,19 @@ class TestGetRecentEvents:
         assert ids == sorted(ids)
 
 
+    def test_offset_skips_events(self, test_db):
+        from hub.mcp_server import _get_recent_events
+        all_events = _get_recent_events(test_db, limit=50)
+        offset_events = _get_recent_events(test_db, limit=10, offset=10)
+        assert len(offset_events) == 10
+        assert offset_events[0]["id"] == all_events[-20]["id"]
+
+    def test_offset_beyond_total_returns_empty(self, test_db):
+        from hub.mcp_server import _get_recent_events
+        events = _get_recent_events(test_db, limit=10, offset=9999)
+        assert events == []
+
+
 class TestGetActiveSessions:
     """Test _get_active_sessions contra DB real."""
 
@@ -240,6 +253,16 @@ class TestSearchEvents:
         from hub.mcp_server import _search_events
         results = _search_events(test_db, query="", limit=9999)
         assert len(results) <= 200
+
+    def test_offset_paginates(self, test_db):
+        from hub.mcp_server import _search_events
+        page1 = _search_events(test_db, query="", limit=10, offset=0)
+        page2 = _search_events(test_db, query="", limit=10, offset=10)
+        assert len(page1) == 10
+        assert len(page2) == 10
+        ids1 = {r["id"] for r in page1}
+        ids2 = {r["id"] for r in page2}
+        assert ids1.isdisjoint(ids2)
 
 
 class TestGetProjectActivity:

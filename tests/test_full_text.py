@@ -471,3 +471,45 @@ class TestMCPGetSessionEvents:
         ft = results[-1].get("full_text", "")
         assert len(ft) <= 520
         assert ft.endswith("[truncated]")
+
+    def test_mcp_get_session_events_offset(self, store):
+        from hub.mcp_server import _get_session_events
+
+        for i in range(5):
+            events = [
+                _make_event(
+                    full_text=f"offset event {i}",
+                    timestamp=f"2026-06-26T11:0{i}:00",
+                ),
+            ]
+            store.store_with_offset(events, f"fp_off_{i}", "claude", "/tmp/f.jsonl", 2000 + i * 100)
+
+        all_results = _get_session_events(
+            str(store.db_path), "sess-001", text_mode="none", limit=100
+        )
+        offset_results = _get_session_events(
+            str(store.db_path), "sess-001", text_mode="none", limit=2, offset=len(all_results) - 3
+        )
+        assert len(offset_results) <= 3
+
+    def test_mcp_get_session_events_desc_order(self, store):
+        from hub.mcp_server import _get_session_events
+
+        for i in range(3):
+            events = [
+                _make_event(
+                    full_text=f"order event {i}",
+                    timestamp=f"2026-06-26T12:0{i}:00",
+                ),
+            ]
+            store.store_with_offset(events, f"fp_ord_{i}", "claude", "/tmp/f.jsonl", 3000 + i * 100)
+
+        asc_results = _get_session_events(
+            str(store.db_path), "sess-001", text_mode="none", limit=100, order="asc"
+        )
+        desc_results = _get_session_events(
+            str(store.db_path), "sess-001", text_mode="none", limit=100, order="desc"
+        )
+        asc_timestamps = [r["timestamp"] for r in asc_results]
+        desc_timestamps = [r["timestamp"] for r in desc_results]
+        assert asc_timestamps == list(reversed(desc_timestamps))

@@ -78,12 +78,13 @@ def _get_projects_resource(db_path: str) -> str:
     return "\n".join(lines)
 
 
-def _get_recent_events(db_path: str, limit: int = 50) -> list[dict[str, Any]]:
+def _get_recent_events(db_path: str, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
     """Obtiene los eventos más recientes."""
     limit = min(limit, 500)
+    offset = max(offset, 0)
     conn = _connect(db_path)
     rows = conn.execute(
-        "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
+        "SELECT * FROM events ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)
     ).fetchall()
     conn.close()
     return _rows_to_dicts(reversed(rows))
@@ -181,9 +182,11 @@ def _search_events(
     project: Optional[str] = None,
     event_type: Optional[str] = None,
     limit: int = 50,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     """Busca eventos por texto en el summary."""
     limit = min(limit, 200)
+    offset = max(offset, 0)
     where = "summary LIKE ?"
     params: list = [f"%{query}%"]
     if provider:
@@ -201,8 +204,8 @@ def _search_events(
         SELECT id, provider, project, event_type, timestamp, summary,
                session_id, tool_name, file_path, model
         FROM events WHERE {where}
-        ORDER BY id DESC LIMIT ?
-    """, (*params, limit)).fetchall()
+        ORDER BY id DESC LIMIT ? OFFSET ?
+    """, (*params, limit, offset)).fetchall()
     conn.close()
     return _rows_to_dicts(rows)
 
@@ -330,30 +333,35 @@ def _get_session_detail(db_path: str, session_id: str) -> dict[str, Any] | None:
 
 
 def _get_session_events(
-    db_path: str, session_id: str, text_mode: str = "none", limit: int = 100
+    db_path: str, session_id: str, text_mode: str = "none",
+    limit: int = 100, offset: int = 0, order: str = "asc",
 ) -> list[dict[str, Any]]:
-    """text_mode: 'none' (summary only), 'snippet' (500 chars), 'full' (complete text)."""
+    """text_mode: 'none' (summary only), 'snippet' (500 chars), 'full' (complete text).
+    order: 'asc' (oldest first) or 'desc' (newest first).
+    offset: skip N events for pagination."""
     limit = min(limit, 500)
+    offset = max(offset, 0)
+    direction = "DESC" if order.lower() == "desc" else "ASC"
     conn = _connect(db_path)
     if text_mode in ("snippet", "full"):
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
                    e.summary, e.session_id, e.tokens_json, e.tool_name,
                    e.file_path, e.model, e.cwd, ec.full_text
             FROM events e
             LEFT JOIN event_content ec ON e.id = ec.event_id
             WHERE e.session_id = ?
-            ORDER BY e.timestamp ASC LIMIT ?
-        """, (session_id, limit)).fetchall()
+            ORDER BY e.timestamp {direction} LIMIT ? OFFSET ?
+        """, (session_id, limit, offset)).fetchall()
     else:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
                    e.summary, e.session_id, e.tokens_json, e.tool_name,
                    e.file_path, e.model, e.cwd, NULL as full_text
             FROM events e
             WHERE e.session_id = ?
-            ORDER BY e.timestamp ASC LIMIT ?
-        """, (session_id, limit)).fetchall()
+            ORDER BY e.timestamp {direction} LIMIT ? OFFSET ?
+        """, (session_id, limit, offset)).fetchall()
     conn.close()
     results = []
     for r in rows:
@@ -479,14 +487,15 @@ if _mcp is not None:
         return _get_projects_resource(EVENTS_DB)
 
     @_mcp.tool()
-    def get_recent_events(limit: int = 50) -> list[dict[str, Any]]:
+    def get_recent_events(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """Obtiene los eventos más recientes del MoolMesh.
         Útil para ver en qué está trabajando el usuario actualmente.
 
         Args:
             limit: Máximo de eventos a devolver (max 500, default 50)
+            offset: Saltar N eventos para paginación (default 0). Los eventos se devuelven del más reciente al más antiguo.
         """
-        return _get_recent_events(EVENTS_DB, limit)
+        return _get_recent_events(EVENTS_DB, limit, offset)
 
     @_mcp.tool()
     def get_active_sessions(hours: int = 4, limit: int = 50) -> list[dict[str, Any]]:
@@ -535,6 +544,7 @@ if _mcp is not None:
         project: Optional[str] = None,
         event_type: Optional[str] = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Busca eventos por texto en el summary (mensajes, herramientas, etc.).
 
@@ -544,8 +554,9 @@ if _mcp is not None:
             project: Filtrar por proyecto (substring). None = todos.
             event_type: Filtrar por tipo (user, assistant, tool_use, etc.). None = todos.
             limit: Máximo de resultados (max 200, default 50).
+            offset: Saltar N resultados para paginación (default 0).
         """
-        return _search_events(EVENTS_DB, query, provider, project, event_type, limit)
+        return _search_events(EVENTS_DB, query, provider, project, event_type, limit, offset)
 
     @_mcp.tool()
     def get_project_activity(
@@ -595,6 +606,8 @@ if _mcp is not None:
         session_id: str,
         text_mode: str = "none",
         limit: int = 100,
+        offset: int = 0,
+        order: str = "asc",
     ) -> list[dict[str, Any]]:
         """Obtiene los eventos de una sesión con control de volumen de texto.
 
@@ -602,8 +615,10 @@ if _mcp is not None:
             session_id: ID de la sesión.
             text_mode: Control de texto devuelto. 'none' = solo summary (~120 chars). 'snippet' = texto completo truncado a 500 chars. 'full' = texto completo sin truncar (alto consumo de tokens).
             limit: Máximo de eventos a devolver (max 500, default 100).
+            offset: Saltar N eventos para paginación (default 0). Ejemplo: offset=100 con limit=50 devuelve eventos 101-150.
+            order: Orden de eventos. 'asc' = más antiguos primero (default). 'desc' = más recientes primero (útil para ver la actividad reciente de una sesión larga).
         """
-        return _get_session_events(EVENTS_DB, session_id, text_mode, limit)
+        return _get_session_events(EVENTS_DB, session_id, text_mode, limit, offset, order)
 
     @_mcp.tool()
     def search_session_content(
