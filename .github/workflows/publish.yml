@@ -5,7 +5,44 @@ on:
     types: [published]
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install with dev deps
+        run: pip install -e ".[dev]" --quiet
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      - name: Validate test count extraction
+        run: |
+          COUNT=$(python -m pytest tests/ -q --co 2>&1 | tail -1 | grep -oP '^\d+')
+          if [ -z "$COUNT" ] || [ "$COUNT" -lt 1 ]; then
+            echo "::error::Failed to extract test count (got: '$COUNT')"
+            exit 1
+          fi
+          echo "Test count: $COUNT"
+
+      - name: Validate version in pyproject.toml
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          TOML_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$VERSION" != "$TOML_VERSION" ]; then
+            echo "::error::Tag version ($VERSION) != pyproject.toml version ($TOML_VERSION)"
+            exit 1
+          fi
+          echo "Version match: $VERSION"
+
   sync-assets:
+    needs: preflight
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -51,6 +88,7 @@ jobs:
           git diff --quiet || (git add docs/cli-banner.svg docs/index.html README.md README.es.md CONTRIBUTING.md && git commit -m "chore: sync version, test count to ${GITHUB_REF_NAME} [skip ci]" && git push origin main)
 
   build:
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
