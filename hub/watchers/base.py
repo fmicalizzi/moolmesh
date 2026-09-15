@@ -7,6 +7,7 @@ No queue, no dispatcher, no backfill. The first cycle IS the backfill.
 from __future__ import annotations
 
 import collections
+import logging
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -124,6 +125,11 @@ class BaseHarvester(ABC):
         try:
             events, new_offset = self._parse_and_adapt(path, offset)
         except OSError:
+            return
+        except Exception:
+            logging.getLogger("moolmesh.watcher").warning(
+                "harvest error in %s: %s", path, __import__("traceback").format_exc()
+            )
             return
 
         if new_offset == offset and not events:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from typing import Any
 
 from hub.adapters.base import BaseAdapter
 from hub.models.base import (
@@ -209,27 +210,27 @@ class CodexAdapter(BaseAdapter):
         ]
 
     def _extract_full_text(self, entry: CodexEntry) -> str | None:
+        result: Any = None
         match entry.event_type:
             case "event_msg":
                 text = entry.event_msg_text.strip() if entry.event_msg_text else ""
-                return text if text else None
+                result = text if text else None
             case "response_item":
                 match entry.payload_type:
                     case "message":
                         text = entry.text.strip() if entry.text else ""
-                        return text if text else None
+                        result = text if text else None
                     case "function_call_output":
                         if entry.function_output and entry.function_output.output:
-                            return entry.function_output.output
-                        return None
+                            result = entry.function_output.output
                     case "reasoning":
                         if entry.reasoning_text:
-                            return entry.reasoning_text.strip()
-                        return None
-                    case _:
-                        return None
-            case _:
-                return None
+                            result = entry.reasoning_text.strip()
+        if result is None:
+            return None
+        if not isinstance(result, str):
+            result = str(result)
+        return result if result else None
 
     def _summarize(self, entry: CodexEntry) -> str:
         match entry.event_type:
@@ -238,7 +239,7 @@ class CodexAdapter(BaseAdapter):
             case "token_count":
                 return f"[tokens] in={entry.token_input:,} out={entry.token_output:,} cached={entry.token_cached_input:,} reasoning={entry.token_reasoning:,}"
             case "event_msg":
-                text = entry.event_msg_text.strip().replace("\n", " ")
+                text = (entry.event_msg_text or "").strip().replace("\n", " ")
                 match entry.event_subtype:
                     case "agent_message":
                         return text[:120] if text else "[agent message]"
@@ -253,7 +254,7 @@ class CodexAdapter(BaseAdapter):
             case "response_item":
                 match entry.payload_type:
                     case "message":
-                        text = entry.text.strip().replace("\n", " ")
+                        text = (entry.text or "").strip().replace("\n", " ")
                         return text[:120] if text else "[message]"
                     case "function_call":
                         if entry.function_call:
@@ -266,7 +267,7 @@ class CodexAdapter(BaseAdapter):
                             return f"[output] {entry.function_output.output[:100]}"
                         return "[function output]"
                     case "reasoning":
-                        return f"[reasoning] {entry.reasoning_text[:100]}"
+                        return f"[reasoning] {(entry.reasoning_text or '')[:100]}"
                     case _:
                         return f"[{entry.payload_type}]"
             case _:

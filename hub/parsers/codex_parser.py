@@ -144,7 +144,8 @@ class CodexParser(BaseParser):
                     )
 
                 if subtype in ("thread_rolled_back", "thread_name_updated",
-                               "context_compacted", "turn_aborted"):
+                               "context_compacted", "turn_aborted",
+                               "item_completed", "thread_settings_applied"):
                     return None
 
                 if subtype == "agent_message":
@@ -206,11 +207,16 @@ class CodexParser(BaseParser):
                     text = " ".join(
                         c.get("text", "") for c in text if isinstance(c, dict)
                     )
+                if not isinstance(text, str):
+                    text = str(text) if text else ""
+                text = text.strip()
+                if not text:
+                    return None
                 return CodexEntry(
                     event_type=event_type,
                     timestamp=timestamp,
                     event_subtype=subtype or "user_message",
-                    event_msg_text=text if isinstance(text, str) else "",
+                    event_msg_text=text,
                     role="user",
                     raw=raw,
                 )
@@ -255,10 +261,13 @@ class CodexParser(BaseParser):
                 )
 
             case "function_call":
+                raw_args = payload.get("arguments", "")
+                if not isinstance(raw_args, str):
+                    raw_args = json.dumps(raw_args, ensure_ascii=False)
                 fc = CodexFunctionCall(
                     call_id=payload.get("call_id", ""),
                     name=payload.get("name", ""),
-                    arguments=payload.get("arguments", ""),
+                    arguments=raw_args,
                 )
                 return CodexEntry(
                     event_type="response_item",
@@ -269,9 +278,17 @@ class CodexParser(BaseParser):
                 )
 
             case "function_call_output":
+                raw_output = payload.get("output", "")
+                if isinstance(raw_output, list):
+                    raw_output = "\n".join(
+                        o.get("text", str(o)) if isinstance(o, dict) else str(o)
+                        for o in raw_output
+                    )
+                elif not isinstance(raw_output, str):
+                    raw_output = str(raw_output)
                 fo = CodexFunctionOutput(
                     call_id=payload.get("call_id", ""),
-                    output=payload.get("output", ""),
+                    output=raw_output,
                 )
                 return CodexEntry(
                     event_type="response_item",

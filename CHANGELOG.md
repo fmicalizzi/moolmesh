@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.8.5] — 2026-09-14
+
+### Fixed
+- **Codex watcher crash on None fields** — `event_msg_text`, `text`, and `reasoning_text` could be `None` in certain Codex events, causing `AttributeError` on `.strip()` that killed the watcher thread permanently.
+- **Codex `function_call_output` with list payload** — Codex can emit `output` as a list of content blocks instead of a string. The parser now normalizes it to string, fixing `sqlite3.ProgrammingError: type 'list' is not supported`.
+- **Ghost `[user input]` events from Codex** — internal protocol signals (`item_completed`, `thread_settings_applied`) and empty user messages were being stored as `[user input]` with no useful content. Now filtered out.
+- **Watcher thread resilience** — `_harvest_file` only caught `OSError`; any other exception (e.g., `AttributeError`, `ProgrammingError`) killed the watcher thread for the rest of the session. Now catches all exceptions, logs them, and continues.
+
+---
+
 ## [1.8.4] — 2026-07-24
 
 ### Added
