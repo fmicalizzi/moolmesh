@@ -37,6 +37,11 @@ class TestReadPidEncoding:
 
 class TestDaemonizeWindows:
     def test_launches_background_process(self, monkeypatch, tmp_path):
+        # Neutralize supervisor autodetection: a CI runner (e.g. GitHub Actions,
+        # which sets INVOCATION_ID via systemd) would make daemonize() take the
+        # _run_foreground() → _run_server() path and boot a REAL blocking
+        # dashboard in-process, hanging the test. Force the Windows branch under test.
+        monkeypatch.setattr(daemon, "_is_supervised", lambda: False)
         monkeypatch.setattr(daemon, "_IS_WINDOWS", True)
         monkeypatch.setattr(daemon, "CONFIG_DIR", tmp_path)
         monkeypatch.setattr(daemon, "PID_FILE", tmp_path / "moolmesh.pid")
@@ -56,6 +61,9 @@ class TestDaemonizeWindows:
         assert call_args[1]["env"]["PYTHONIOENCODING"] == "utf-8"
 
     def test_passes_project_and_providers(self, monkeypatch, tmp_path):
+        # See test_launches_background_process: force the Windows branch so a
+        # supervised CI runner can't divert into the in-process foreground server.
+        monkeypatch.setattr(daemon, "_is_supervised", lambda: False)
         monkeypatch.setattr(daemon, "_IS_WINDOWS", True)
         monkeypatch.setattr(daemon, "CONFIG_DIR", tmp_path)
         monkeypatch.setattr(daemon, "PID_FILE", tmp_path / "moolmesh.pid")
