@@ -371,7 +371,10 @@ class EventStore:
                            s.cost, s.is_sidechain, s.first_event_at, s.last_event_at,
                            (SELECT COUNT(*) FROM events e
                             WHERE e.session_id = s.id AND e.provider = s.provider) AS event_count,
-                           s.is_active, s.initial_prompt, s.metadata_json
+                           s.is_active, s.initial_prompt, s.metadata_json,
+                           (SELECT strftime('%Y-%m-%dT%H:%M:%SZ', MAX(e.created_at), 'unixepoch')
+                            FROM events e
+                            WHERE e.session_id = s.id AND e.provider = s.provider) AS last_activity_at
                     FROM sessions s WHERE s.id = ?
                 """, (session_id,)).fetchone()
             except sqlite3.OperationalError:
@@ -394,6 +397,11 @@ class EventStore:
                 d["metadata"] = json.loads(row[16])
             except (json.JSONDecodeError, TypeError):
                 pass
+        # Ingest-based last activity (MAX(events.created_at)); monotonic and
+        # reliable, unlike last_event_at which carries the original (possibly
+        # days-old) message timestamp in resumed sessions. Always populated for
+        # any session that has at least one event.
+        d["last_activity_at"] = row[17] or ""
         return d
 
     def get_session_events(
@@ -405,7 +413,7 @@ class EventStore:
                 rows = conn.execute("""
                     SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
                            e.summary, e.session_id, e.tokens_json, e.tool_name,
-                           e.file_path, e.model, e.cwd, ec.full_text
+                           e.file_path, e.model, e.cwd, ec.full_text, e.created_at
                     FROM events e
                     LEFT JOIN event_content ec ON e.id = ec.event_id
                     WHERE e.session_id = ?
@@ -416,7 +424,7 @@ class EventStore:
                 rows = conn.execute("""
                     SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
                            e.summary, e.session_id, e.tokens_json, e.tool_name,
-                           e.file_path, e.model, e.cwd, NULL as full_text
+                           e.file_path, e.model, e.cwd, NULL as full_text, e.created_at
                     FROM events e
                     WHERE e.session_id = ?
                     ORDER BY e.timestamp ASC
@@ -429,6 +437,10 @@ class EventStore:
                 "event_type": r[3], "timestamp": r[4], "summary": r[5],
                 "session_id": r[6], "tool_name": r[8],
                 "file_path": r[9], "model": r[10], "cwd": r[11],
+                # Ingest epoch (events.created_at, REAL NOT NULL): reliable and
+                # monotonic, exposed alongside the original message timestamp so
+                # age-based logic can distinguish resumed sessions.
+                "created_at": r[13],
             }
             if r[7]:
                 try:

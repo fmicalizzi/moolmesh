@@ -6,6 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Ingest-based `last_activity_at` on session export** — `get_session_detail` now
+  returns `last_activity_at`, the ISO-8601 UTC time of the most recent ingest for
+  the session (`MAX(events.created_at)`). Unlike `last_event_at` — which carries the
+  original message timestamp and can be days old in a *resumed* session
+  (`claude --resume`) — this field is monotonic and reliably populated, so age-based
+  tooling (e.g. stall monitors) no longer misclassifies a freshly-resumed session as
+  abandoned. `last_event_at` is unchanged; the new field sits beside it.
+- **Per-event ingest epoch on session export** — `get_session_events` now includes
+  `created_at` (the raw ingest epoch, `events.created_at`) on each event, letting
+  consumers reason about ingest recency independent of the original message timestamp.
+
+  Note the deliberate type asymmetry: the session-level `last_activity_at` is a
+  formatted ISO-8601 string (consistent with the other session timestamps), while the
+  per-event `created_at` is the raw epoch float. For large sessions, the export's event
+  list is capped (default 500), so `last_activity_at` may be more recent than the max
+  `created_at` among the exported events — this is correct: it reflects the whole
+  session's latest ingest.
+
+---
+
 ## [1.8.5] — 2026-09-14
 
 ### Fixed
