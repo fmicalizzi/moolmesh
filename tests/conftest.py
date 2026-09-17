@@ -1,6 +1,7 @@
 """Shared fixtures for tests."""
 
 import logging
+import signal
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,41 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 # Silenciar logging durante tests para no contaminar pytest output
 logging.getLogger("hub").addHandler(logging.NullHandler())
 logging.getLogger("hub").setLevel(logging.CRITICAL)
+
+
+# ── Per-test wall-clock guardrail (stdlib-only, zero-dep) ──
+#
+# A test that leaks a subprocess/pipe or blocks on a socket can hang the whole
+# suite — in CI that means the "Run tests" step runs to the 6h job timeout and
+# silently blocks the release (see the v1.8.5/v1.9.0 preflight hangs). Rather
+# than add `pytest-timeout` (would break the zero-dep invariant), we arm a
+# SIGALRM around each test's full protocol (setup + call + teardown) and turn a
+# hang into a *named* failure instead of an indefinite block.
+#
+# SIGALRM is Unix-only: guard on it so this is a transparent no-op on Windows
+# (and any platform without it), and only interrupts the main thread.
+_TEST_TIMEOUT_SECONDS = 60
+
+if hasattr(signal, "SIGALRM"):
+
+    class TestTimeout(Exception):
+        """Raised by the SIGALRM guardrail when a test exceeds its time budget."""
+
+    def _on_test_timeout(signum, frame):
+        raise TestTimeout(
+            f"Test exceeded the {_TEST_TIMEOUT_SECONDS}s wall-clock guardrail "
+            "(likely a hung subprocess, unclosed pipe, or blocking socket)."
+        )
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_protocol(item, nextitem):
+        previous = signal.signal(signal.SIGALRM, _on_test_timeout)
+        signal.alarm(_TEST_TIMEOUT_SECONDS)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
 
 
 @pytest.fixture
