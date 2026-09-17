@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Portfolio — MoolMesh</title>
+<style>
+  :root {
+    --bg: #0C0C0E; --bg2: #14141A; --bg3: #1E1E24; --border: #2A2A30;
+    --text: #D4D4D8; --muted: #8B8B94; --accent: #C8B88A;
+    --green: #7A9E7E; --orange: #D4A054; --red: #D4645C;
+    --purple: #A88EC8; --yellow: #D4B85C; --cyan: #5CA8A0;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:'SF Mono','Cascadia Code','Fira Code',monospace; font-size:13px; line-height:1.5; overflow-x:hidden; }
+  nav { background:var(--bg2); border-bottom:1px solid var(--border); padding:8px 20px; display:flex; gap:16px; font-size:13px; }
+  nav a { color:var(--muted); text-decoration:none; }
+  nav a.active { color:var(--accent); font-weight:600; }
+  nav a:hover { color:var(--text); }
+  header { background:var(--bg2); border-bottom:1px solid var(--border); padding:16px 24px; display:flex; align-items:center; justify-content:space-between; }
+  .logo { font-size:15px; font-weight:600; color:var(--accent); }
+  .ver { font-size:11px; color:var(--muted); }
+  .section { padding:16px 24px; }
+  .section-title { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; margin-bottom:12px; }
+  .hint { font-size:11px; color:var(--muted); margin-bottom:12px; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; padding:8px 10px; border-bottom:1px solid var(--border); }
+  td { padding:8px 10px; border-bottom:1px solid var(--bg3); font-size:12px; vertical-align:top; }
+  tr:hover td { background:var(--bg2); }
+  .ws { color:var(--text); word-break:break-all; }
+  .badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:10px; margin-right:4px; border:1px solid var(--border); }
+  .b-session { color:var(--cyan); } .b-filesystem { color:var(--yellow); } .b-git { color:var(--purple); }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .muted { color:var(--muted); }
+  .conf { font-weight:600; }
+  .sig-session_close { color:var(--cyan); } .sig-git_commit { color:var(--purple); } .sig-root_artifact { color:var(--yellow); }
+  .empty { color:var(--muted); padding:24px 10px; text-align:center; }
+  .disclaimer { background:var(--bg2); border:1px solid var(--border); border-left:3px solid var(--orange); border-radius:6px; padding:10px 14px; font-size:11px; color:var(--muted); margin-bottom:12px; }
+</style>
+</head>
+<body>
+<nav>
+  <a href="/">Sesiones AI</a>
+  <a href="/analytics">Analytics</a>
+  <a href="/projects">Project Pulse</a>
+  <a href="/timeline">Code Timeline</a>
+  <a href="/portfolio" class="active">Portfolio</a>
+</nav>
+<header>
+  <div class="logo">Portfolio — el trabajo, no sólo las sesiones</div>
+  <div class="ver">v{{VERSION}}</div>
+</header>
+
+<div class="section">
+  <div class="section-title">Workspaces calientes (signal-agnostic)</div>
+  <div class="hint">Un nodo se enciende venga la actividad de una <b>sesión</b>, del <b>filesystem</b> o de <b>git</b>. Conteos por señal, nunca sumados. Ordenado por última actividad.</div>
+  <table id="pf">
+    <thead><tr>
+      <th>Workspace</th><th>Señales</th>
+      <th class="num">sesión</th><th class="num">fs</th><th class="num">git</th>
+      <th class="num">días</th><th>Última actividad</th>
+    </tr></thead>
+    <tbody id="pf-body"><tr><td colspan="7" class="empty">Cargando…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-title">Candidatos de entrega</div>
+  <div class="disclaimer">
+    Candidato <b>con confianza</b>, nunca un hecho. La quiescencia sola no alcanza (es indistinguible de una pausa):
+    cada fila requiere una <b>segunda señal</b> que cerró el burst — cierre de sesión, commit de git, o un artefacto nuevo en la raíz — <b>registrada y auditable</b>.
+  </div>
+  <table id="dc">
+    <thead><tr>
+      <th>Workspace</th><th class="num">confianza</th><th>señal</th><th>detalle</th><th>quiescente desde</th>
+    </tr></thead>
+    <tbody id="dc-body"><tr><td colspan="5" class="empty">Cargando…</td></tr></tbody>
+  </table>
+</div>
+
+<script>
+function esc(s){ return String(s==null?'':s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function label(r){ return r.label || r.remote_url || r.root_path || r.dir_path || r.workspace_key || '—'; }
+
+async function loadPortfolio(){
+  const body = document.getElementById('pf-body');
+  try {
+    const rows = await (await fetch('/api/workspace/portfolio')).json();
+    if (!rows.length){ body.innerHTML = '<tr><td colspan="7" class="empty">Sin datos. Corré: <code>mool workspace rollup</code></td></tr>'; return; }
+    body.innerHTML = rows.map(r => {
+      const badges = (r.sources||[]).map(s => `<span class="badge b-${esc(s)}">${esc(s)}</span>`).join('') || '<span class="muted">—</span>';
+      return `<tr>
+        <td class="ws">${esc(label(r))}</td>
+        <td>${badges}</td>
+        <td class="num">${r.session_touches||0}</td>
+        <td class="num">${r.fs_touches||0}</td>
+        <td class="num">${r.git_touches||0}</td>
+        <td class="num">${r.active_days||0}</td>
+        <td class="muted">${esc((r.last_activity||'').replace('T',' ').slice(0,19))}</td>
+      </tr>`;
+    }).join('');
+  } catch(e){ body.innerHTML = '<tr><td colspan="7" class="empty">Error al cargar.</td></tr>'; }
+}
+
+async function loadDelivery(){
+  const body = document.getElementById('dc-body');
+  try {
+    const rows = await (await fetch('/api/workspace/delivery')).json();
+    if (!rows.length){ body.innerHTML = '<tr><td colspan="5" class="empty">Sin candidatos de entrega.</td></tr>'; return; }
+    body.innerHTML = rows.map(r => `<tr>
+      <td class="ws">${esc(label(r))}</td>
+      <td class="num conf">${(r.confidence!=null? r.confidence.toFixed(2): '—')}</td>
+      <td class="sig-${esc(r.signal)}">${esc(r.signal)}</td>
+      <td class="muted">${esc(r.signal_detail)}</td>
+      <td class="muted">${esc((r.quiescent_since||'').replace('T',' ').slice(0,19))}</td>
+    </tr>`).join('');
+  } catch(e){ body.innerHTML = '<tr><td colspan="5" class="empty">Error al cargar.</td></tr>'; }
+}
+
+loadPortfolio();
+loadDelivery();
+</script>
+</body>
+</html>

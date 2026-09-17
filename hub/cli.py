@@ -927,6 +927,11 @@ def main() -> None:
     ws_portfolio.add_argument("--since", help="ISO date lower bound (compares by day)")
     ws_portfolio.add_argument("--json", action="store_true", dest="json_output")
 
+    ws_delivery = ws_sub.add_parser(
+        "delivery", help="Show delivery candidates (quiescence + a 2nd signal) (#22)"
+    )
+    ws_delivery.add_argument("--json", action="store_true", dest="json_output")
+
     # workspace root — manage marked filesystem roots (issue #21, opt-in)
     ws_root = ws_sub.add_parser(
         "root", help="Manage marked filesystem roots for the workspace watcher"
@@ -1353,12 +1358,14 @@ def cmd_workspace(args: argparse.Namespace) -> None:
             cmd_workspace_rollup(args)
         case "portfolio":
             cmd_workspace_portfolio(args)
+        case "delivery":
+            cmd_workspace_delivery(args)
         case "root":
             cmd_workspace_root(args)
         case _:
             print(
-                "Usage: mool workspace "
-                "{backfill|list|session|sessions|touches|rollup|portfolio|root}"
+                "Usage: mool workspace {backfill|list|session|sessions|touches|"
+                "rollup|portfolio|delivery|root}"
             )
 
 
@@ -1377,6 +1384,7 @@ def cmd_workspace_backfill(args: argparse.Namespace) -> None:
     # Fold the freshly-attributed edges into the portfolio rollup so the
     # dashboard/MCP portfolio view is populated straight after a backfill.
     rollup = store.build_rollup()
+    store.detect_delivery_candidates()
     store.close()
 
     print(green(
@@ -1401,6 +1409,8 @@ def cmd_workspace_rollup(args: argparse.Namespace) -> None:
     store = WorkspaceStore()
     print(dim(f"Building portfolio rollup: {store.db_path}"))
     r = store.build_rollup()
+    # Delivery detection reads the same real clocks — refresh it in the same pass.
+    d = store.detect_delivery_candidates()
     store.close()
     print(green(
         f"Rollup built: {r['rows']} day-rows across {r['workspaces']} workspaces."
@@ -1409,6 +1419,47 @@ def cmd_workspace_rollup(args: argparse.Namespace) -> None:
         f"  {r['multi_source_nodes']} workspaces lit by ≥2 signals; "
         f"git repos: {r['git_repos_matched']} matched, {r['git_repos_new']} new."
     ))
+    print(dim(
+        f"  Delivery candidates: {d['candidates']} "
+        f"({d['quiescent_workspaces']} quiescent) — {d['by_signal']}."
+    ))
+
+
+def cmd_workspace_delivery(args: argparse.Namespace) -> None:
+    from hub.cache.workspace_store import WorkspaceStore
+
+    store = WorkspaceStore()
+    rows = store.get_delivery_candidates()
+    store.close()
+
+    if getattr(args, "json_output", False):
+        import json as _json
+        print(_json.dumps(rows, default=str))
+        return
+
+    if not rows:
+        print(yellow(
+            "No delivery candidates. Run: mool workspace rollup (runs the detector)."
+        ))
+        return
+
+    from hub.config import load_config, masked_label
+    hide = load_config().hide_project_names
+
+    print(f"\n  {bold('Delivery candidates')} ({len(rows)}):")
+    print(dim("  candidate with confidence — never a fact; a 2nd signal is recorded"))
+    print(f"  {'─' * 70}")
+    for r in rows:
+        label = r["remote_url"] or r["root_path"] or r["dir_path"] or r["workspace_key"]
+        label = masked_label(label, hide)
+        detail = r["signal_detail"] or ""
+        if hide and r["signal"] == "root_artifact":
+            detail = masked_label(detail, True)
+        print(f"  {label}")
+        print(dim(
+            f"    conf {r['confidence']}  signal={r['signal']} ({detail})  "
+            f"quiet since {r['quiescent_since']}"
+        ))
 
 
 def cmd_workspace_portfolio(args: argparse.Namespace) -> None:

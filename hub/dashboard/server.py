@@ -482,6 +482,20 @@ class DashboardServer:
                         self._serve_file(static_dir / "projects.html", "text/html")
                     case "/timeline":
                         self._serve_file(static_dir / "timeline.html", "text/html")
+                    case "/portfolio":
+                        self._serve_file(static_dir / "portfolio.html", "text/html")
+                    # --- API: Workspace portfolio (issue #22, read-on-load) ---
+                    # Reads workspace.db via the MCP helpers (guarded on absence,
+                    # hide_project_names masking applied). No SSE, no events.db.
+                    case "/api/workspace/portfolio":
+                        from hub.mcp_server import WORKSPACE_DB, _get_portfolio
+                        self._serve_json(_get_portfolio(WORKSPACE_DB))
+                    case "/api/workspace/delivery":
+                        from hub.mcp_server import (
+                            WORKSPACE_DB,
+                            _get_delivery_candidates,
+                        )
+                        self._serve_json(_get_delivery_candidates(WORKSPACE_DB))
                     # --- API: Repos ---
                     case "/api/repos":
                         if server_ref.git_store:

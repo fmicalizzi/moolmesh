@@ -379,3 +379,170 @@ class TestPortfolioRollup:
     def test_mcp_portfolio_empty_when_db_absent(self, tmp_path):
         assert _get_portfolio(str(tmp_path / "nope.db")) == []
         assert _get_workspace_activity(str(tmp_path / "nope.db"), "k") == []
+
+
+def _make_sessions_db(path: Path, rows: list[tuple]) -> Path:
+    """rows: (id, provider, last_event_at, ended_at)."""
+    c = sqlite3.connect(path)
+    c.execute("""CREATE TABLE sessions (
+        id TEXT, provider TEXT, last_event_at TEXT, ended_at TEXT)""")
+    for sid, prov, last_ev, ended in rows:
+        c.execute("INSERT INTO sessions (id, provider, last_event_at, ended_at)"
+                  " VALUES (?,?,?,?)", (sid, prov, last_ev, ended))
+    c.commit()
+    c.close()
+    return path
+
+
+def _future(days: int = 30):
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone.utc) + timedelta(days=days)
+
+
+class TestParseTs:
+    def test_three_clock_formats_to_aware_utc(self):
+        from datetime import datetime, timezone
+        from hub.cache.workspace_store import _parse_ts
+        # UTC offset form
+        assert _parse_ts("2026-09-17T08:17:16+00:00").utcoffset().total_seconds() == 0
+        # Z form == offset form for the same instant
+        assert _parse_ts("2026-01-01T00:00:00Z") == datetime(2026, 1, 1, tzinfo=timezone.utc)
+        # naive is interpreted as LOCAL (not UTC) — the git_commits case
+        naive = _parse_ts("2026-01-01T00:00:00")
+        assert naive == datetime(2026, 1, 1).astimezone(timezone.utc)
+        # falsy / garbage drop out
+        assert _parse_ts("") is None and _parse_ts(None) is None
+        assert _parse_ts("not-a-date") is None
+
+
+class TestDeliveryCandidate:
+    def test_schema_table_created(self, store):
+        with store._lock:
+            tables = {r[0] for r in store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "delivery_candidates" in tables
+
+    def test_git_commit_signal_fires(self, tmp_path):
+        repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        key = "git_remote:github.com/acme/r"
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        from hub.correlation.workspace_resolver import resolve_path
+        s.record_attribution("s1", "claude", str(repo / "x.py"),
+                             resolve_path(str(repo / "x.py")))
+        gh = _make_github_db(tmp_path / "github.db", [(1, str(repo))],
+                             [(1, "deadbeef", "2026-01-01T10:00:00")])
+        r = s.detect_delivery_candidates(
+            events_db_path=tmp_path / "absent.db", github_db_path=gh,
+            now=_future())
+        assert r["candidates"] == 1 and r["by_signal"]["git_commit"] == 1
+        cands = s.get_delivery_candidates()
+        assert cands[0]["workspace_key"] == key
+        assert cands[0]["signal"] == "git_commit"
+        assert cands[0]["signal_detail"] == "deadbeef"
+        assert 0 < cands[0]["confidence"] <= 0.9
+        s.close()
+
+    def test_session_close_signal_uses_ended_at(self, tmp_path):
+        repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        from hub.correlation.workspace_resolver import resolve_path
+        s.record_attribution("sess-9", "claude", str(repo / "x.py"),
+                             resolve_path(str(repo / "x.py")))
+        ev = _make_sessions_db(tmp_path / "events.db",
+                               [("sess-9", "claude", "2026-01-01T09:00:00Z",
+                                 "2026-01-01T10:00:00Z")])
+        r = s.detect_delivery_candidates(
+            events_db_path=ev, github_db_path=tmp_path / "absent.db", now=_future())
+        assert r["by_signal"]["session_close"] == 1
+        c = s.get_delivery_candidates()[0]
+        assert c["signal"] == "session_close" and c["signal_detail"] == "sess-9"
+        s.close()
+
+    def test_quiescence_alone_never_emits(self, tmp_path):
+        """An old fs touch that is NOT a root artifact, no git, no session close
+        → quiescent but no admissible second signal → zero candidates."""
+        repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        from hub.correlation.workspace_resolver import resolve_dir
+        # deep file (below root) with a normal extension — no artifact, no signal
+        s.record_touch(str(repo / "src" / "a.py"), 1_700_000_000.0,
+                       resolve_dir(str(repo / "src")))
+        r = s.detect_delivery_candidates(
+            events_db_path=tmp_path / "absent.db",
+            github_db_path=tmp_path / "absent.db", now=_future())
+        assert r["quiescent_workspaces"] >= 1  # it IS quiescent
+        assert r["candidates"] == 0            # but nothing emitted
+        assert s.get_delivery_candidates() == []
+        s.close()
+
+    def test_root_artifact_signal(self, tmp_path):
+        repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        from hub.correlation.workspace_resolver import resolve_dir
+        # working set: .py below the root
+        s.record_touch(str(repo / "src" / "a.py"), 1_700_000_000.0,
+                       resolve_dir(str(repo / "src")))
+        # a new artifact AT the root, extension outside the working set
+        s.record_touch(str(repo / "release.zip"), 1_700_000_100.0,
+                       resolve_dir(str(repo)))
+        r = s.detect_delivery_candidates(
+            events_db_path=tmp_path / "absent.db",
+            github_db_path=tmp_path / "absent.db", now=_future())
+        assert r["by_signal"]["root_artifact"] == 1
+        c = [x for x in s.get_delivery_candidates() if x["signal"] == "root_artifact"][0]
+        assert c["signal_detail"].endswith("release.zip")
+        s.close()
+
+    def test_eviction_when_workspace_active_again(self, tmp_path):
+        repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        from hub.correlation.workspace_resolver import resolve_path, resolve_dir
+        s.record_attribution("s1", "claude", str(repo / "x.py"),
+                             resolve_path(str(repo / "x.py")))
+        gh = _make_github_db(tmp_path / "github.db", [(1, str(repo))],
+                             [(1, "abc", "2026-01-01T10:00:00")])
+        # far-future now → quiescent → candidate exists
+        s.detect_delivery_candidates(events_db_path=tmp_path / "absent.db",
+                                     github_db_path=gh, now=_future())
+        assert s.get_delivery_candidates()
+        # now near the commit → NOT quiescent → candidate evicted
+        from hub.cache.workspace_store import _parse_ts
+        from datetime import timedelta
+        near = _parse_ts("2026-01-01T10:00:00") + timedelta(minutes=1)
+        s.detect_delivery_candidates(events_db_path=tmp_path / "absent.db",
+                                     github_db_path=gh, now=near)
+        assert s.get_delivery_candidates() == []
+        s.close()
+
+    def test_mcp_delivery_masking(self, tmp_path):
+        repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        db = tmp_path / "workspace.db"
+        s = WorkspaceStore(db)
+        from hub.correlation.workspace_resolver import resolve_dir
+        s.record_touch(str(repo / "src" / "a.py"), 1_700_000_000.0,
+                       resolve_dir(str(repo / "src")))
+        s.record_touch(str(repo / "release.zip"), 1_700_000_100.0,
+                       resolve_dir(str(repo)))
+        s.detect_delivery_candidates(events_db_path=tmp_path / "absent.db",
+                                     github_db_path=tmp_path / "absent.db",
+                                     now=_future())
+        s.close()
+
+        import hub.mcp_server as mcp
+        from hub.mcp_server import _get_delivery_candidates
+        rows = _get_delivery_candidates(str(db))
+        art = [r for r in rows if r["signal"] == "root_artifact"][0]
+        assert art["signal_detail"].endswith("release.zip")  # unmasked path
+        orig = mcp._hide_project_names
+        mcp._hide_project_names = lambda: True
+        try:
+            masked = _get_delivery_candidates(str(db))
+        finally:
+            mcp._hide_project_names = orig
+        m_art = [r for r in masked if r["signal"] == "root_artifact"][0]
+        assert "release.zip" not in str(m_art["signal_detail"])  # path masked
+        assert m_art["remote_url"] is None and m_art["workspace_key"]
+
+    def test_mcp_delivery_empty_when_absent(self, tmp_path):
+        from hub.mcp_server import _get_delivery_candidates
+        assert _get_delivery_candidates(str(tmp_path / "nope.db")) == []

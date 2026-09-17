@@ -731,6 +731,45 @@ def _get_workspace_activity(
     return out
 
 
+def _get_delivery_candidates(db_path: str, limit: int = 100) -> list[dict[str, Any]]:
+    """Delivery candidates from the rollup detector (issue #22).
+
+    A candidate WITH CONFIDENCE, never a fact: each row carries the firing second
+    signal (session_close | git_commit | root_artifact) and its detail, plus the
+    real ``quiescent_since``. Returns ``[]`` when workspace.db or the table is
+    absent. Masked when ``hide_project_names`` is set — including
+    ``signal_detail`` for ``root_artifact`` (a filesystem path); session_id and
+    commit sha are not project names and pass through.
+    """
+    limit = min(max(limit, 1), 500)
+    conn = _connect_optional(db_path)
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute("""
+            SELECT w.workspace_key, w.kind, w.remote_url, w.root_path, w.dir_path,
+                   d.signal, d.signal_detail, d.quiescent_since, d.confidence,
+                   d.detected_at
+            FROM delivery_candidates d
+            JOIN workspaces w ON w.id = d.workspace_id
+            ORDER BY d.confidence DESC, d.quiescent_since DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
+    conn.close()
+    hide = _hide_project_names()
+    out = [dict(r) for r in rows]
+    out = _mask_workspace_rows(out, hide)
+    if hide:
+        from hub.config import masked_label
+        for r in out:
+            if r.get("signal") == "root_artifact" and r.get("signal_detail"):
+                r["signal_detail"] = masked_label(r["signal_detail"], True)
+    return out
+
+
 # ── MCP layer (guarded — only loads when mcp SDK is available) ──────
 
 try:
@@ -1018,6 +1057,23 @@ if _mcp is not None:
             since: Fecha ISO 8601 desde (compara por día). None = todo.
         """
         return _get_workspace_activity(WORKSPACE_DB, workspace_key, since)
+
+    @_mcp.tool()
+    def get_delivery_candidates(limit: int = 100) -> list[dict[str, Any]]:
+        """Candidatos de entrega de trabajo, detectados localmente (issue #22).
+
+        Candidato CON CONFIANZA, nunca un hecho: cada fila registra cuál de las
+        tres señales admisibles cerró el burst (`session_close` vía ended_at de
+        #16 / `git_commit` / `root_artifact`) en `signal` + `signal_detail`, más
+        `quiescent_since` (última actividad real). La quiescencia sola NUNCA
+        emite — es precondición. Sin LLM, señal estructural local. Devuelve `[]`
+        si aún no se corrió el detector. Con `hide_project_names`, los nombres y
+        el path de `root_artifact` se enmascaran.
+
+        Args:
+            limit: Máximo de candidatos (max 500, default 100).
+        """
+        return _get_delivery_candidates(WORKSPACE_DB, limit)
 
 
 if __name__ == "__main__":

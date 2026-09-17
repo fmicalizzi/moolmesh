@@ -129,8 +129,9 @@ class WorkspaceWatcher:
             if swept > 0:
                 try:
                     self._store.build_rollup()
+                    self._store.detect_delivery_candidates()
                 except Exception:  # noqa: BLE001
-                    _log.warning("rollup build failed", exc_info=True)
+                    _log.warning("rollup/delivery build failed", exc_info=True)
             time.sleep(self.SCAN_INTERVAL)
 
     # --- one root scan (also the unit-test entry point) ---

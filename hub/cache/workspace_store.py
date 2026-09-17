@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -112,6 +112,30 @@ CREATE TABLE IF NOT EXISTS workspace_rollup (
     PRIMARY KEY (workspace_id, day)
 );
 CREATE INDEX IF NOT EXISTS idx_rollup_day ON workspace_rollup(day);
+
+-- delivery_candidate (issue #22 — Phase C, correlate). A LOCAL, structural
+-- guess that a workspace's work was likely delivered — surfaced as a candidate
+-- WITH CONFIDENCE, never as a bare "done" flag. Two disciplines are baked into
+-- the shape:
+--   * Quiescence alone is indistinguishable from a break, so it is only a
+--     PRECONDITION: a row exists only when a workspace went quiet AND a second,
+--     co-occurring signal closed the burst.
+--   * The firing signal is RECORDED per row (``signal`` + ``signal_detail``) so
+--     the confidence is auditable — one of exactly three admissible signals:
+--     ``session_close`` (sessions.ended_at, #16, read-only), ``git_commit``
+--     (a commit closing the burst), ``root_artifact`` (a new file at the
+--     workspace root whose extension is outside the working set).
+-- Keyed per (workspace, signal); a re-detect that finds the workspace hot again
+-- evicts the row (never a stale candidate over a now-active workspace).
+CREATE TABLE IF NOT EXISTS delivery_candidates (
+    workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    signal TEXT NOT NULL,          -- session_close | git_commit | root_artifact
+    signal_detail TEXT,            -- session_id | sha | artifact path (auditable)
+    quiescent_since TEXT NOT NULL, -- real last activity (UTC ISO) before quiet
+    confidence REAL NOT NULL,      -- [0, 0.9] heuristic — candidate, never fact
+    detected_at TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, signal)
+);
 """
 
 
@@ -142,6 +166,64 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_ts(s: str | None) -> datetime | None:
+    """Parse a timestamp from ANY of the three real clocks into aware UTC.
+
+    The three delivery-signal sources store time in three incompatible formats
+    (verified on real DBs) and string comparison across them is wrong by hours:
+
+      * ``path_touches.last_seen`` — ``2026-09-17T08:17:16.149924+00:00`` (UTC offset)
+      * ``sessions.ended_at``      — ``2026-09-17T15:16:49.014Z`` (UTC, Z form)
+      * ``git_commits.timestamp``  — ``2026-09-16T00:18:20`` (NAIVE local — git_store
+        migration 3 deliberately stores commit time in local, not UTC)
+
+    Lexicographically ``Z`` > ``+`` and naive-vs-UTC is a whole-timezone skew, so
+    quiescence MUST be computed on parsed ``datetime`` objects, never on the raw
+    strings. Empty/None/garbage → ``None`` so it drops out of a ``max`` instead of
+    poisoning it (one real ended session has ``last_event_at = ''``).
+    """
+    if not s or not s.strip():
+        return None
+    text = s.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()  # naive → interpret as system local, then to UTC
+    return dt.astimezone(timezone.utc)
+
+
+def _ext(path: str) -> str:
+    """Lowercased file extension (``''`` for none)."""
+    return os.path.splitext(path)[1].lower()
+
+
+# Per-signal base confidence for a delivery candidate. Heuristic and DELIBERATELY
+# capped below certainty (see ``_delivery_confidence``): a local structural guess
+# is a candidate, never a fact. session_close (a real terminal signal) is the
+# strongest; a root artifact the weakest.
+_DELIVERY_BASE: dict[str, float] = {
+    "session_close": 0.7,
+    "git_commit": 0.6,
+    "root_artifact": 0.5,
+}
+
+
+def _delivery_confidence(signal: str, quiet_hours: float) -> float:
+    """Confidence in ``[0, 0.9]`` — base(signal) plus a bounded quiescence bonus.
+
+    Longer silence after the closing signal raises confidence slightly, but the
+    result is capped at 0.9: this is a candidate surfaced with confidence, never
+    a certainty. The value is heuristic and the firing signal is recorded
+    alongside it so a human/agent can audit *why*, not just *how much*.
+    """
+    base = _DELIVERY_BASE.get(signal, 0.5)
+    return round(min(0.9, base + min(0.2, quiet_hours * 0.02)), 3)
 
 
 def _lit_sources(session_n: int, fs_n: int, git_n: int) -> list[str]:
@@ -511,6 +593,283 @@ class WorkspaceStore:
         finally:
             src.close()
         return out
+
+    # --- delivery_candidate (issue #22 — Phase C, correlate) ---
+
+    # Precondition window: a workspace must have been silent (across REAL clocks)
+    # at least this long before it can be a delivery candidate. Modest on purpose
+    # — quiescence is only the gate; the recorded second signal carries the claim.
+    QUIET_WINDOW_SECONDS: float = 2 * 3600.0
+    # A signal must be the *closing* activity — its timestamp within this slack of
+    # the last real activity — not an old event buried mid-burst.
+    _SIGNAL_SLACK_SECONDS: float = 120.0
+
+    def detect_delivery_candidates(
+        self,
+        events_db_path: str | Path | None = None,
+        github_db_path: str | Path | None = None,
+        quiet_window_seconds: float | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Detect likely-delivered workspaces LOCALLY — candidates, never facts.
+
+        Quiescence (the workspace went silent across the REAL clocks —
+        ``path_touches.last_seen``, git commit times, and session
+        ``COALESCE(ended_at, last_event_at)``; NEVER ``path_attributions.first_seen``,
+        which is a backfill artifact) is a *precondition only*. A row is written
+        only when, on top of quiescence, one of three admissible second signals
+        *closed the burst*: ``session_close`` (real ``ended_at``, #16),
+        ``git_commit`` (a commit was the last activity), or ``root_artifact`` (a
+        file at the workspace root with an extension outside the working set).
+
+        The firing signal + its detail are recorded per row so the confidence is
+        auditable. A workspace that is no longer quiescent (or fires no signal)
+        has its rows EVICTED — never a stale candidate over an active workspace.
+        No LLM, no writes to events.db (opened read-only).
+        """
+        events_db_path = events_db_path or (self.db_path.parent / "events.db")
+        github_db_path = github_db_path or (self.db_path.parent / "github.db")
+        quiet_window = (
+            self.QUIET_WINDOW_SECONDS if quiet_window_seconds is None
+            else quiet_window_seconds
+        )
+        now = now or datetime.now(timezone.utc)
+        slack = timedelta(seconds=self._SIGNAL_SLACK_SECONDS)
+        now_iso = _now()
+
+        # Real session clocks, keyed (session_id, provider): (activity_ts, close_ts).
+        sess_clock = self._read_session_clocks(events_db_path)
+        # Latest git commit per workspace_id: (ts, sha).
+        git_last = self._read_git_latest_by_workspace(github_db_path)
+
+        emitted = 0
+        by_signal: dict[str, int] = {"session_close": 0, "git_commit": 0, "root_artifact": 0}
+        quiescent = 0
+
+        with self._lock:
+            conn = self._conn
+            workspaces = conn.execute(
+                "SELECT id, kind, root_path, dir_path FROM workspaces"
+            ).fetchall()
+
+            # Per-workspace filesystem touches and session/attribution files.
+            touches: dict[int, list[tuple[str, datetime | None]]] = {}
+            for wid, path, last_seen in conn.execute(
+                "SELECT workspace_id, path, last_seen FROM path_touches"
+            ):
+                touches.setdefault(wid, []).append((path, _parse_ts(last_seen)))
+
+            work_exts: dict[int, dict[str, int]] = {}
+            wsessions: dict[int, set[tuple[str, str]]] = {}
+            for wid, sid, prov, fp in conn.execute(
+                "SELECT workspace_id, session_id, provider, file_path FROM path_attributions"
+            ):
+                wsessions.setdefault(wid, set()).add((sid, prov or ""))
+                work_exts.setdefault(wid, {})
+                work_exts[wid][_ext(fp)] = work_exts[wid].get(_ext(fp), 0) + 1
+
+            for wid, kind, root_path, dir_path in workspaces:
+                root = root_path if kind in ("git_remote", "git_root") else dir_path
+                w_touches = touches.get(wid, [])
+
+                # --- Real clocks -------------------------------------------------
+                fs_last = max(
+                    (t for _, t in w_touches if t is not None), default=None
+                )
+                gl = git_last.get(wid)  # (datetime, sha) | None
+                git_ts = gl[0] if gl else None
+
+                sess_activity_last: datetime | None = None
+                close_ts: datetime | None = None
+                close_sid: str | None = None
+                for (sid, prov) in wsessions.get(wid, set()):
+                    act, close = sess_clock.get((sid, prov), (None, None))
+                    if act and (sess_activity_last is None or act > sess_activity_last):
+                        sess_activity_last = act
+                    if close and (close_ts is None or close > close_ts):
+                        close_ts, close_sid = close, sid
+
+                candidates_ts = [t for t in (fs_last, git_ts, sess_activity_last) if t]
+                if not candidates_ts:
+                    conn.execute("DELETE FROM delivery_candidates WHERE workspace_id=?", (wid,))
+                    continue
+                last_real = max(candidates_ts)
+
+                # --- Precondition: quiescence across REAL clocks -----------------
+                if (now - last_real).total_seconds() < quiet_window:
+                    # Still active (or a pause) — evict any stale candidate.
+                    conn.execute("DELETE FROM delivery_candidates WHERE workspace_id=?", (wid,))
+                    continue
+                quiescent += 1
+
+                # --- Second signal: what CLOSED the burst (within slack) ---------
+                fires: list[tuple[str, str | None]] = []
+                if git_ts and git_ts >= last_real - slack:
+                    fires.append(("git_commit", gl[1]))
+                if close_ts and close_ts >= last_real - slack:
+                    fires.append(("session_close", close_sid))
+
+                # root_artifact: a file AT the workspace root whose extension is
+                # outside the working set (the extensions of the normal source
+                # tree). ``root`` may be None (path_hash without a dir) → skip.
+                if root:
+                    ws = self._working_set_exts(wid, work_exts, w_touches, root)
+                    best_art: tuple[datetime, str] | None = None
+                    for path, t in w_touches:
+                        if t is None or os.path.dirname(path) != root:
+                            continue
+                        e = _ext(path)
+                        if not e or e in ws:
+                            continue
+                        if best_art is None or t > best_art[0]:
+                            best_art = (t, path)
+                    if best_art and best_art[0] >= last_real - slack:
+                        fires.append(("root_artifact", best_art[1]))
+
+                # Quiescence ALONE never emits.
+                conn.execute("DELETE FROM delivery_candidates WHERE workspace_id=?", (wid,))
+                if not fires:
+                    continue
+
+                q_since = last_real.isoformat()
+                quiet_hours = (now - last_real).total_seconds() / 3600.0
+                for signal, detail in fires:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO delivery_candidates
+                               (workspace_id, signal, signal_detail,
+                                quiescent_since, confidence, detected_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (wid, signal, detail, q_since,
+                         _delivery_confidence(signal, quiet_hours), now_iso),
+                    )
+                    by_signal[signal] += 1
+                    emitted += 1
+            conn.commit()
+
+        return {"candidates": emitted, "by_signal": by_signal, "quiescent_workspaces": quiescent}
+
+    @staticmethod
+    def _working_set_exts(
+        wid: int,
+        work_exts: dict[int, dict[str, int]],
+        touches: list[tuple[str, datetime | None]],
+        root: str,
+    ) -> set[str]:
+        """Extensions that make up a workspace's *normal* working tree.
+
+        An extension is "in the working set" if it appears in a file BELOW the
+        root (part of the source tree) or occurs ≥2 times overall — so a one-off
+        deliverable dropped at the root (a ``.zip``/``.pdf``/``.pptx`` export)
+        with a singleton, otherwise-unseen extension reads as a new artifact.
+        """
+        counts: dict[str, int] = dict(work_exts.get(wid, {}))
+        below_root: set[str] = set()
+        for path, _ in touches:
+            e = _ext(path)
+            counts[e] = counts.get(e, 0) + 1
+            if os.path.dirname(path) != root:
+                below_root.add(e)
+        return {e for e in below_root if e} | {e for e, n in counts.items() if e and n >= 2}
+
+    @staticmethod
+    def _read_session_clocks(
+        events_db_path: str | Path,
+    ) -> dict[tuple[str, str], tuple[datetime | None, datetime | None]]:
+        """Read real session clocks from events.db (read-only).
+
+        Returns ``{(session_id, provider): (activity_ts, close_ts)}`` where
+        ``activity_ts = COALESCE(NULLIF(ended_at,''), NULLIF(last_event_at,''))``
+        (the real last activity) and ``close_ts`` is ``ended_at`` ONLY (a real
+        terminal signal, #16) — never inferred from event age.
+        """
+        if not os.path.exists(str(events_db_path)):
+            return {}
+        try:
+            src = sqlite3.connect(f"file:{events_db_path}?mode=ro", uri=True, timeout=5)
+        except sqlite3.OperationalError:
+            return {}
+        out: dict[tuple[str, str], tuple[datetime | None, datetime | None]] = {}
+        try:
+            for sid, prov, last_event_at, ended_at in src.execute(
+                "SELECT id, provider, last_event_at, ended_at FROM sessions"
+            ):
+                close = _parse_ts(ended_at)
+                activity = close or _parse_ts(last_event_at)
+                out[(sid, prov or "")] = (activity, close)
+        except sqlite3.OperationalError:
+            return {}
+        finally:
+            src.close()
+        return out
+
+    def _read_git_latest_by_workspace(
+        self, github_db_path: str | Path
+    ) -> dict[int, tuple[datetime, str]]:
+        """Latest git commit per workspace_id: ``{wid: (ts, sha)}`` (read-only).
+
+        Each repo root is resolved to its workspace via the SAME ladder as the
+        rollup, so git lands on the same node as session/fs activity. Timestamps
+        are parsed to aware UTC (git stores naive-local — see ``_parse_ts``).
+        """
+        if not os.path.exists(str(github_db_path)):
+            return {}
+        try:
+            src = sqlite3.connect(f"file:{github_db_path}?mode=ro", uri=True, timeout=5)
+        except sqlite3.OperationalError:
+            return {}
+        out: dict[int, tuple[datetime, str]] = {}
+        try:
+            rows = src.execute(
+                """SELECT r.path, c.sha, c.timestamp
+                   FROM git_commits c JOIN repos r ON r.id = c.repo_id"""
+            ).fetchall()
+        except sqlite3.OperationalError:
+            src.close()
+            return {}
+        src.close()
+        key_cache: dict[str, int | None] = {}
+        with self._lock:
+            for repo_path, sha, ts_raw in rows:
+                if not repo_path:
+                    continue
+                wid = key_cache.get(repo_path, ...)  # type: ignore[arg-type]
+                if wid is ...:
+                    ident = resolve_dir(repo_path)
+                    row = self._conn.execute(
+                        "SELECT id FROM workspaces WHERE workspace_key = ?", (ident.key,)
+                    ).fetchone()
+                    wid = row[0] if row else None
+                    key_cache[repo_path] = wid
+                if wid is None:
+                    continue
+                ts = _parse_ts(ts_raw)
+                if ts is None:
+                    continue
+                cur = out.get(wid)
+                if cur is None or ts > cur[0]:
+                    out[wid] = (ts, sha)
+        return out
+
+    def get_delivery_candidates(self) -> list[dict[str, Any]]:
+        """Current delivery candidates, joined to their workspace identity."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT w.workspace_key, w.kind, w.remote_url, w.root_path,
+                          w.dir_path, d.signal, d.signal_detail, d.quiescent_since,
+                          d.confidence, d.detected_at
+                   FROM delivery_candidates d
+                   JOIN workspaces w ON w.id = d.workspace_id
+                   ORDER BY d.confidence DESC, d.quiescent_since DESC"""
+            ).fetchall()
+        return [
+            {
+                "workspace_key": r[0], "kind": r[1], "remote_url": r[2],
+                "root_path": r[3], "dir_path": r[4], "signal": r[5],
+                "signal_detail": r[6], "quiescent_since": r[7],
+                "confidence": r[8], "detected_at": r[9],
+            }
+            for r in rows
+        ]
 
     # --- Backfill (populate from already-persisted events, read-only) ---
 
