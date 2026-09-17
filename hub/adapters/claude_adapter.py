@@ -130,6 +130,15 @@ class ClaudeAdapter(BaseAdapter):
     def _map_role(self, entry: ClaudeEntry) -> MessageRole | None:
         match entry.type:
             case "user":
+                # On-disk, tool results ride inside role="user" entries as
+                # tool_result content blocks. Distinguish them from real human
+                # input, mirroring the assistant branch predicate below.
+                has_tool_result = any(
+                    b.type == "tool_result" for b in entry.content_blocks
+                )
+                has_text = bool(entry.content_text.strip())
+                if has_tool_result and not has_text:
+                    return MessageRole.TOOL_RESULT
                 return MessageRole.USER
             case "assistant":
                 # Check if this is primarily a tool_use or tool_result message

@@ -16,8 +16,8 @@ class TestClaudeParserFullFile:
 
     def test_parse_file_returns_entries(self):
         entries = self.parser.parse_file(self.sample)
-        # 9 lines total, 1 is file-history-snapshot (skipped) = 8
-        assert len(entries) == 8
+        # 10 lines total, 1 is file-history-snapshot (skipped) = 9
+        assert len(entries) == 9
 
     def test_skips_file_history_snapshot(self):
         entries = self.parser.parse_file(self.sample)
