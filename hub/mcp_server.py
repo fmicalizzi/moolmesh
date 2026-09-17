@@ -309,7 +309,8 @@ def _get_session_detail(db_path: str, session_id: str) -> dict[str, Any] | None:
                    s.cost, s.is_sidechain, s.first_event_at, s.last_event_at,
                    (SELECT COUNT(*) FROM events e
                     WHERE e.session_id = s.id AND e.provider = s.provider) AS event_count,
-                   s.is_active, s.initial_prompt, s.metadata_json
+                   s.is_active, s.initial_prompt, s.metadata_json,
+                   s.ended_at, s.ended_reason
             FROM sessions s WHERE s.id = ?
         """, (session_id,)).fetchone()
     except Exception:
@@ -594,6 +595,12 @@ if _mcp is not None:
     def get_session_detail(session_id: str) -> dict[str, Any]:
         """Detalle completo de una sesión específica por ID.
         Incluye metadata, prompt inicial, branch, modelo, eventos.
+
+        Semántica de `is_active`: `false` significa que se observó el fin de la
+        sesión (una señal terminal en el archivo, hoy solo el `/exit` de Claude),
+        con `ended_at`/`ended_reason` registrando cuándo y por qué. `true`
+        significa únicamente que aún no se observó un fin — NO que la sesión esté
+        viva. Nunca se infiere de la recencia de eventos.
 
         Args:
             session_id: ID de la sesión.

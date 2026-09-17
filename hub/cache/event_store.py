@@ -39,6 +39,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_events_fingerprint
 """
 
 
+def _mig_1_session_lifecycle(conn: sqlite3.Connection) -> None:
+    """Add additive session-lifecycle columns to pre-existing DBs.
+
+    Fresh DBs already get these from ``_ensure_sessions_table``; the guard on
+    ``PRAGMA table_info`` makes this a no-op there, avoiding a duplicate-column
+    error while still backfilling databases created before this column existed.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    if "ended_at" not in columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
+    if "ended_reason" not in columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN ended_reason TEXT")
+
+
+# Versioned, additive migrations for events.db — each runs exactly once.
+_EVENT_STORE_MIGRATIONS = [
+    (1, "session_lifecycle", _mig_1_session_lifecycle),
+]
+
+
 def file_fingerprint(path: Path) -> str:
     """Generate a content-based fingerprint from the first 1KB of a file.
 
@@ -98,6 +118,7 @@ class EventStore:
         self._ensure_sessions_table()
         self._ensure_event_content_table()
         self._ensure_session_links_table()
+        self._apply_migrations()
 
     def _needs_migration(self) -> bool:
         """Check if the existing table needs the fingerprint column migration."""
@@ -194,6 +215,8 @@ class EventStore:
                 initial_prompt TEXT DEFAULT '',
                 metadata_json TEXT,
                 created_at REAL NOT NULL,
+                ended_at TEXT,
+                ended_reason TEXT,
                 PRIMARY KEY (id, provider)
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_provider ON sessions(provider);
@@ -248,6 +271,36 @@ class EventStore:
         """)
         self._conn.commit()
 
+    def _apply_migrations(self) -> None:
+        """Apply additive, versioned schema migrations exactly once.
+
+        Mirrors ``git_store._apply_migrations``: a ``schema_migrations`` control
+        table records which migrations have run, so each runs once and never on
+        every startup. Migrations are additive only (see AGENTS.md §4).
+        """
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at REAL NOT NULL
+            )
+        """)
+        self._conn.commit()
+
+        applied = {
+            r[0] for r in self._conn.execute("SELECT version FROM schema_migrations")
+        }
+        for version, name, fn in _EVENT_STORE_MIGRATIONS:
+            if version in applied:
+                continue
+            fn(self._conn)
+            import time
+            self._conn.execute(
+                "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+                (version, name, time.time()),
+            )
+            self._conn.commit()
+
     def upsert_session(self, meta: dict[str, Any], timestamp: str) -> None:
         """Insert or update session metadata.
 
@@ -259,6 +312,10 @@ class EventStore:
         sid = meta.get("id", "")
         if not sid:
             return
+        # Never persist an empty string as a timestamp: an empty first entry
+        # (common on Claude summary/meta lines) must not freeze first_event_at
+        # at "" forever — store NULL so a later valid timestamp can fill it.
+        ts = timestamp or None
         with self._lock:
             conn = self._get_conn()
             conn.execute("""
@@ -278,10 +335,17 @@ class EventStore:
                     source = COALESCE(NULLIF(excluded.source, ''), sessions.source),
                     cost = CASE WHEN excluded.cost > sessions.cost THEN excluded.cost ELSE sessions.cost END,
                     is_sidechain = excluded.is_sidechain,
-                    last_event_at = excluded.last_event_at,
+                    first_event_at = CASE
+                        WHEN NULLIF(sessions.first_event_at, '') IS NULL
+                            THEN NULLIF(excluded.first_event_at, '')
+                        WHEN NULLIF(excluded.first_event_at, '') IS NULL
+                            THEN sessions.first_event_at
+                        ELSE MIN(sessions.first_event_at, excluded.first_event_at)
+                    END,
+                    last_event_at = COALESCE(NULLIF(excluded.last_event_at, ''), sessions.last_event_at),
                     event_count = (SELECT COUNT(*) FROM events
                                    WHERE session_id = excluded.id AND provider = excluded.provider),
-                    is_active = 1,
+                    is_active = CASE WHEN sessions.ended_at IS NOT NULL THEN 0 ELSE 1 END,
                     initial_prompt = COALESCE(NULLIF(excluded.initial_prompt, ''), sessions.initial_prompt),
                     metadata_json = COALESCE(excluded.metadata_json, sessions.metadata_json)
             """, (
@@ -296,12 +360,34 @@ class EventStore:
                 meta.get("source", ""),
                 meta.get("cost", 0.0),
                 1 if meta.get("is_sidechain") else 0,
-                timestamp,
-                timestamp,
+                ts,
+                ts,
                 meta.get("initial_prompt", ""),
                 json.dumps(meta.get("metadata")) if meta.get("metadata") else None,
                 now,
             ))
+            conn.commit()
+
+    def mark_session_ended(
+        self, session_id: str, provider: str, ended_at: str, reason: str
+    ) -> None:
+        """Record an observed terminal signal for a session (Bug A, issue #16).
+
+        Sets ``is_active = 0`` only from a signal observed in the session file
+        (e.g. a Claude ``/exit`` local-command) — never inferred from recency
+        (prohibited by #22↔#16). The first terminal signal wins: the guard on
+        ``ended_at IS NULL`` makes repeat polls idempotent no-ops, and the
+        ``ended_at`` column makes the ended state sticky against later upserts.
+        """
+        if not session_id or not provider:
+            return
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute("""
+                UPDATE sessions
+                SET is_active = 0, ended_at = ?, ended_reason = ?
+                WHERE id = ? AND provider = ? AND ended_at IS NULL
+            """, (ended_at or None, reason, session_id, provider))
             conn.commit()
 
     def get_sessions(
@@ -371,7 +457,8 @@ class EventStore:
                            s.cost, s.is_sidechain, s.first_event_at, s.last_event_at,
                            (SELECT COUNT(*) FROM events e
                             WHERE e.session_id = s.id AND e.provider = s.provider) AS event_count,
-                           s.is_active, s.initial_prompt, s.metadata_json
+                           s.is_active, s.initial_prompt, s.metadata_json,
+                           s.ended_at, s.ended_reason
                     FROM sessions s WHERE s.id = ?
                 """, (session_id,)).fetchone()
             except sqlite3.OperationalError:
@@ -386,6 +473,7 @@ class EventStore:
             "cost": row[9] or 0.0, "is_sidechain": bool(row[10]),
             "first_event_at": row[11] or "", "last_event_at": row[12] or "",
             "event_count": row[13] or 0, "is_active": bool(row[14]),
+            "ended_at": row[17] or "", "ended_reason": row[18] or "",
         }
         if row[15]:
             d["initial_prompt"] = row[15]

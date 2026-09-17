@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **`session.first_event_at` frozen empty (#16)** — when a session's first observed entry carried an empty timestamp (common on Claude summary/meta lines), `first_event_at` stayed `""` forever because `ON CONFLICT` only refreshed `last_event_at`. Empty timestamps are no longer persisted, and `first_event_at` now backfills to (and keeps) the earliest valid timestamp once one arrives.
+
+### Changed
+- **`session.is_active` now means "no end observed", not "alive" (#16)** — the field flips to `false` only on a terminal signal *observed in the session file*, never inferred from event recency (per #16 ↔ #22). Today the sole terminal signal is a Claude `/exit` local-command. Consumers building a stall-monitor should read `is_active: false` as "session end was observed"; a `true` value means only that no end has been seen yet. The four other providers (Codex, Qwen, OpenCode, Cursor) are unchanged and continue to report `is_active: true`. Two additive columns record *why/when* a session ended — `ended_at` and `ended_reason` (e.g. `"exit_command"`) — both exposed via `mool export --format json` and MCP `get_session_detail`.
+
+---
+
 ## [1.8.5] — 2026-09-14
 
 ### Fixed

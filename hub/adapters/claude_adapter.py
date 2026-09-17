@@ -51,6 +51,22 @@ class ClaudeAdapter(BaseAdapter):
             raw=entry.raw,
         )
 
+    # Anchored marker Claude Code writes when the user ends a session with /exit.
+    # Matched whole (not a bare "/exit" substring) so a message merely mentioning
+    # "/exit" cannot be mistaken for a terminal signal.
+    _EXIT_MARKER = "<command-name>/exit</command-name>"
+
+    @classmethod
+    def terminal_reason(cls, entry: ClaudeEntry) -> str | None:
+        """Return a terminal-signal reason if this entry ends the session, else None.
+
+        Claude-only: detects the ``/exit`` local-command observed in the session
+        file. Never inferred from recency (issue #16 ↔ #22).
+        """
+        if entry.type == "user" and cls._EXIT_MARKER in (entry.content_text or ""):
+            return "exit_command"
+        return None
+
     def to_event(self, entry: ClaudeEntry, project: str) -> UnifiedEvent | None:
         if entry.type in _SKIP_TYPES:
             return None
