@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.10.0
+Last updated: September 2026 — v1.11.0
 
 ---
 
@@ -62,6 +62,12 @@ First step of the Workspace axis (VISION §6): recover project-first, multi-proj
 
 - **#20** — `path → workspace` resolver: maps each absolute `events.file_path` to the project that owns the file (M:N), via an identity ladder `git-remote → git-root → path-hash` that survives rename/move/clone and exists even without git (`.git/config` parsed by hand — no `git` subprocess). Attribution lives in a **separate `workspace.db`**; `backfill_from_events` reads `events.db` read-only and skips non-absolute rows (Bash command strings). New `mool workspace {backfill,list,session,sessions}` CLI and 3 read-only MCP tools (`get_session_workspaces` / `get_workspace_sessions` / `list_workspaces`, `[]` when the DB is absent). Additive: the existing `project` field, the MCP contract, `events.project`, and `linker.py` are untouched. This is the *recovery half* — correct attribution of agent work — not the full portfolio (that lands with the Phase B watcher).
 
+### v1.11 — Workspace axis Phase B
+
+Second step of the Workspace axis (VISION §6): observe the **work**, not just the sessions — a folder becomes visible even with zero agent/git activity.
+
+- **#21** — filesystem watcher: a pure-stdlib, standalone watcher (never touches `EventStore` / the SSE hot path) that observes **opt-in marked roots** — bounded recursive scan + a **per-root mtime cursor** (no watch-per-file, so no FD ceiling; cursor anchored to `scan_start − 1s` so mid-scan writes are never dropped). **Containment = correctness:** built-in default excludes (VCS internals, dependency dirs, build outputs, OS/cloud sync + caches) pruned in-place, plus per-root excludes and a `max_depth` bound; symlinks not followed. Emits `path-touch` rows resolved to workspaces via the Phase A resolver (#20), into additive `path_touches` / `fs_cursors` tables in the **separate `workspace.db`** (`CREATE TABLE IF NOT EXISTS` — no migration; **zero new writes to `events.db`**). New `mool workspace root {add,list,remove}` + `mool workspace touches` CLI, MCP `get_workspace_touches` (and a filesystem-`touches` count on `list_workspaces` / `get_session_workspaces`), and a `hide_project_names` privacy flag. Additive: the existing `project` field, the MCP contract, `linker.py`, and the #20 resolver are untouched (Phase B *consumes* the resolver).
+
 ---
 
 ## Planned
@@ -73,11 +79,11 @@ First step of the Workspace axis (VISION §6): recover project-first, multi-proj
 Recover the project-first model of MoolMesh's root and add **direct folder observation**, so work is legible beyond agent sessions — materials-gathering folders, non-CLI agents, non-software projects. A multi-release arc:
 
 - **Phase A — `path → workspace` resolver** over already-persisted `file_path` / `cwd`: correct multi-project attribution of agent work (M:N). Additive; does not touch `linker.py`. **Delivered in `v1.10.0`; see Delivered above.**
-- **Phase B — filesystem watcher** with marked roots + bounded scan + excludes; its own `workspace.db` (protects the `events.db` hot path / SSE).
+- **Phase B — filesystem watcher** with marked roots + bounded scan + excludes; its own `workspace.db` (protects the `events.db` hot path / SSE). **Delivered in `v1.11.0`; see Delivered above.**
 - **Phase C — portfolio rollup** + `delivery_candidate` (surfaced as candidate-with-confidence, never as fact).
 - **Phase D — cross-machine aggregation** (opt-in, Wakapi-style split; deferred).
 
-Indicative release mapping (features = minor bumps; each phase independently shippable per its issue's Definition of Done): Phase A → `v1.10.0` ([#20](https://github.com/fmicalizzi/moolmesh/issues/20), **delivered**; see Delivered above), Phase B → `v1.11.0` ([#21](https://github.com/fmicalizzi/moolmesh/issues/21)), Phase C → `v1.12.0` ([#22](https://github.com/fmicalizzi/moolmesh/issues/22)), Phase D → `v2.x`. Preceded by the Observe-hygiene line (delivered in `v1.9.0`; see Delivered above). Standard flow: AGENTS.md §7 + CI `preflight`. Epic: [#19](https://github.com/fmicalizzi/moolmesh/issues/19).
+Indicative release mapping (features = minor bumps; each phase independently shippable per its issue's Definition of Done): Phase A → `v1.10.0` ([#20](https://github.com/fmicalizzi/moolmesh/issues/20), **delivered**; see Delivered above), Phase B → `v1.11.0` ([#21](https://github.com/fmicalizzi/moolmesh/issues/21), **delivered**; see Delivered above), Phase C → `v1.12.0` ([#22](https://github.com/fmicalizzi/moolmesh/issues/22)), Phase D → `v2.x`. Preceded by the Observe-hygiene line (delivered in `v1.9.0`; see Delivered above). Standard flow: AGENTS.md §7 + CI `preflight`. Epic: [#19](https://github.com/fmicalizzi/moolmesh/issues/19).
 
 ### Provider pipeline (Breadth — VISION §5)
 

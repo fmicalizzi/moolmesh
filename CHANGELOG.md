@@ -6,6 +6,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.11.0] — 2026-09-17
+
+### Added
+- **Workspace axis — Phase B: filesystem watcher (#21)** — makes a project visible even
+  when **no agent and no git** ever touched it: a materials-gathering folder, a non-CLI
+  tool whose output is only observable by path (e.g. Pencil `.pen` files), or
+  non-software work. This is the *portfolio half* of the Workspace axis (VISION §6) — it
+  observes the **work**, not just the sessions — completing what Phase A began.
+
+  - **Filesystem watcher** (`hub/watchers/workspace_watcher.py`) — a pure-stdlib,
+    standalone watcher (it never imports `EventStore` or the SSE hot path) that mirrors
+    the session-watcher `discover → cursor → emit → sleep` loop. **Bounded recursive
+    scan + per-root mtime cursor** — no watch-per-file, so there is **no
+    file-descriptor ceiling**. The cursor is anchored to `scan_start − 1s` (not
+    `max(mtime)`), so a file written mid-scan is re-seen next cycle instead of being
+    dropped. First cycle reads everything under the root — that *is* the backfill.
+  - **Opt-in marked roots (privacy by design)** — with no roots configured the watcher
+    observes **nothing**. Root `/` is valid (autonomous-agent server) but never a
+    default. **Containment = correctness:** built-in default excludes (VCS internals,
+    dependency dirs, build outputs, OS/cloud sync + cache folders) are pruned in-place
+    during the walk, plus per-root extra excludes and a `max_depth` bound. Symlinked
+    directories are not followed (loop-safe).
+  - **`path_touches` + `fs_cursors` in the separate `workspace.db`** — additive tables
+    (created via `CREATE TABLE IF NOT EXISTS`, so they land on existing v1.10.0
+    databases with no migration). Each touch is resolved to its owning workspace via the
+    Phase A resolver (#20) and upserted on `path` (self-healing: if a directory later
+    gains a `.git`, the same path re-attributes to the git workspace). **Zero new writes
+    to `events.db`** — the events hot path / SSE stay untouched by construction.
+  - **CLI** — `mool workspace root {add,list,remove}` (manage marked roots) and
+    `mool workspace touches <workspace_key>` (filesystem touches per workspace).
+  - **MCP** — new read-only tool `get_workspace_touches`; `list_workspaces` and
+    `get_session_workspaces` gain a filesystem-`touches` count. All honor the new
+    `hide_project_names` privacy flag (masks the visible label while keeping the
+    `workspace_key` join handle stable).
+
+  **No change to what shipped:** the existing `project` field, the existing MCP contract,
+  `events.project`, `linker.py`, and the Phase A resolver (#20) are all **unchanged** —
+  Phase B *consumes* the resolver, it does not modify it.
+
 ## [1.10.0] — 2026-09-17
 
 ### Added

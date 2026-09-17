@@ -21,7 +21,7 @@ Unified observability, telemetry, and inter-agent coordination — running entir
 
 Modern software development isn't human-to-keyboard anymore. It's an ecosystem of AI agents working in parallel — each with its own logs, token counters, and reasoning traces, all locked in separate silos.
 
-When Claude Code gets stuck in a loop, your other agents don't know. When you spend tokens across four providers, you can't see which git commit justified it. When your team uses different AI tools on the same repo, nobody has the full picture.
+When Claude Code gets stuck in a loop, your other agents don't know. When you spend tokens across five providers, you can't see which git commit justified it. When your team uses different AI tools on the same repo, nobody has the full picture.
 
 **MoolMesh congregates what is scattered.** It auto-discovers sessions from every major AI coding agent, normalizes them into a single queryable database, and exposes that state to both humans (via a dashboard) and machines (via MCP).
 
@@ -219,6 +219,34 @@ token = "ghp_xxxxxxxxxxxxxxxxxxxx"
 ```
 
 Without a valid token, `mool repo add` still works — it ingests local git history, but Project Pulse (issues, PRs, milestones) won't have GitHub data.
+
+---
+
+## Workspace (observe the work, not just the sessions)
+
+A session's directory name is not the project it worked on. The **Workspace axis** attributes every file-touch to the project that *owns the file* — recovering the real multi-project (M:N) picture, and making a folder visible even before or without any agent (VISION §6).
+
+**Attribute agent work you've already captured** — a read-only pass over `events.db` that maps each absolute `file_path` to its owning workspace (identity ladder `git-remote → git-root → path-hash`, so it survives rename/move/clone and works even without git):
+
+```bash
+mool workspace backfill                  # populate workspace.db (reads events.db read-only)
+mool workspace list                      # workspaces with session / file / fs-touch counts
+mool workspace session <session_id>      # which workspaces a session touched
+mool workspace sessions <workspace_key>  # which sessions touched a workspace
+```
+
+**Observe folders directly** — mark a root and MoolMesh watches it for file changes, so a materials-gathering folder, a non-CLI tool (e.g. a design app whose output is only observable by path), or non-software work lights up with **zero agent or git activity**. Strictly **opt-in**: with no roots marked, nothing is observed.
+
+```bash
+mool workspace root add ~/Projects/campaign --max-depth 4 --exclude drafts
+mool workspace root list                 # marked roots
+mool workspace root remove ~/Projects/campaign
+mool workspace touches <workspace_key>   # filesystem touches attributed to a workspace
+```
+
+The watcher is pure-stdlib: a bounded recursive scan with an mtime cursor (no watch-per-file), sensible default excludes (VCS internals, dependency dirs, build outputs, sync/cache folders), and a `max_depth` bound. All path-touches land in a **separate `workspace.db`** — the `events.db` hot path and SSE stream are never touched. Set `hide_project_names = true` under `[workspace]` in `~/.moolmesh/config.toml` to mask folder names in the visible surface.
+
+Agents can read all of this over MCP via the read-only workspace tools (`list_workspaces`, `get_session_workspaces`, `get_workspace_sessions`, `get_workspace_touches`).
 
 ---
 
@@ -477,7 +505,7 @@ MoolMesh started with coding-agent sessions, but the vision is to **observe the 
 | **Shipped** | v1.8 | Windows daemon, GitHub client hardening (retry/backoff, pagination), MCP pagination & ordering |
 | **Shipped** | v1.9 | Observe-base hygiene: honest session lifecycle, `tool_result` classification, timestamp honesty (#16/#17/#18) |
 | **Shipped** | v1.10 | **Workspace axis — Phase A:** `path → workspace` resolver, M:N attribution over a separate `workspace.db` (#20) |
-| **Planned** | v1.11 | **Workspace Phase B:** filesystem watcher — observe folders directly, no agent required (#21) |
+| **Shipped** | v1.11 | **Workspace axis — Phase B:** filesystem watcher — observe marked folders directly, no agent/git required; opt-in roots + mtime cursor into `workspace.db` (#21) |
 | **Planned** | v1.12 | **Workspace Phase C:** portfolio rollup + `delivery_candidate` (#22) |
 | **Future** | v2.x | Workspace Phase D (cross-machine, opt-in); autonomous agents; org-scale observability |
 
