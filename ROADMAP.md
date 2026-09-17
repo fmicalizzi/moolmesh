@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: June 2026
+Last updated: September 2026 — v1.8.5
 
 ---
 
@@ -35,30 +35,45 @@ Last updated: June 2026
 - `get_session_detail` enriched with `linked_sessions` automatically
 - Phase 3 (semantic similarity via LLM) remains planned for a future version
 
+### v1.7 — Cursor, Windows & universal MCP setup
+
+- **Cursor provider (5th)** — auto-discovers and ingests Cursor agent/composer conversations from `state.vscdb` (`cursorDiskKV`) by `rowid`, attributed to projects via workspace mapping. `Provider.CURSOR` + full quartet.
+- **`mool mcp setup <client>`** — universal MCP client configuration (Cursor, Codex, Qwen, OpenCode) in each client's native format.
+- Windows path handling, daemon graceful degradation, PID/encoding fixes.
+
+### v1.8 — Windows daemon, GitHub hardening & MCP pagination
+
+- **Windows daemon support** — `mool daemon start` on all platforms; `uv tool install moolmesh` as recommended Windows installer.
+- **GitHub client resilience** — retry/backoff, `Link`-header pagination for issues, robust handling of truncated / `IncompleteRead` responses.
+- **MCP pagination & ordering** — `offset` and `order` on `get_session_events` / `get_recent_events` / `search_events`.
+- Codex watcher crash-resilience (None fields, list payloads, ghost `[user input]` events).
+
 ---
 
 ## Planned
 
-### v1.7 — New Providers (first wave)
+> Strategy lives in [`VISION_ROADMAP.md`](VISION_ROADMAP.md) (español: [`VISION_ROADMAP.es.md`](VISION_ROADMAP.es.md)); this is the tactical log. Version numbers below are indicative, not committed.
 
-Expand beyond the original four. Priority based on local session file availability and community demand.
+### Observe-base hygiene (highest priority — VISION §4)
 
-| Provider | Session format | Effort | Notes |
-|----------|---------------|--------|-------|
-| **Aider** | `~/.aider/history/` text + SQLite metadata | Low | Well-documented format, easiest first provider to add |
-| **GitHub Copilot CLI** | Local logs | Medium | Format needs investigation |
-| **Pi** | TBD | Medium | Depends on whether sessions are stored locally |
+Harden session-lifecycle fidelity before climbing further:
 
-Each provider follows the established pattern: model → parser → adapter → watcher (~300-500 LOC total). Adding a provider does not require changes to the core pipeline, dashboard, or MCP server.
+- **#16** — honest session lifecycle (`starting → active → idle → closed`); today `is_active` is set once and never returns to `0`.
+- **#17** — dedicated `tool_result` event type, distinct from a user message. Also a prerequisite for the Workspace resolver below.
+- **#18** — timestamp honesty on resumed sessions (ingest / last-activity distinct from original event time).
 
-**Goal**: validate that the provider pattern scales cleanly, document it for community contributions.
+### Workspace axis (new direction — VISION §6)
 
-### v1.8 — Provider Template & Contributor Guide
+Recover the project-first model of MoolMesh's root and add **direct folder observation**, so work is legible beyond agent sessions — materials-gathering folders, non-CLI agents, non-software projects. A multi-release arc:
 
-- `hub/providers/template/` — skeleton model, parser, adapter, watcher with inline docs
-- Automated provider test scaffolding
-- `CONTRIBUTING.md` section: "Adding a New Provider"
-- Provider auto-detection: scan filesystem for known session formats
+- **Phase A — `path → workspace` resolver** over already-persisted `file_path` / `cwd`: correct multi-project attribution of agent work (M:N). Additive; does not touch `linker.py`.
+- **Phase B — filesystem watcher** with marked roots + bounded scan + excludes; its own `workspace.db` (protects the `events.db` hot path / SSE).
+- **Phase C — portfolio rollup** + `delivery_candidate` (surfaced as candidate-with-confidence, never as fact).
+- **Phase D — cross-machine aggregation** (opt-in, Wakapi-style split; deferred).
+
+### Provider pipeline (Breadth — VISION §5)
+
+Low-effort first: **Aider**, **Pi**, **Goose**; autonomous agents (Hermes, Odysseus) after schema confirmation; Copilot CLI once its format is confirmed. Enabler first: a provider template + auto-detection so a provider is only its quartet. The Workspace filesystem floor (Phase B) gives never-seen agents baseline output visibility for free — lowering the cost of every future provider.
 
 ---
 
@@ -86,6 +101,8 @@ Interactive coding agents (Claude, Codex) have clear session boundaries: a conve
 | **Goose** | TBD | Medium |
 
 ### v2.x — Organization-Scale Observability
+
+> Converges with **Workspace Phase D** (VISION §6): the cross-machine, multi-user horizon. Local capture stays untouched; aggregation is an opt-in, self-hosted tier keyed by `git-remote` identity.
 
 - Cross-repo model usage analytics
 - Team-level dashboards: who is using what AI, where, and at what cost
