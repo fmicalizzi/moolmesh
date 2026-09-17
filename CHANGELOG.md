@@ -6,6 +6,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **Tool results no longer classified as user messages (Claude)** — on disk, tool
+  outputs ride inside `role="user"` entries as `tool_result` content blocks. The
+  Claude adapter's `_map_role` only detected `tool_result` under the `assistant`
+  branch, so these entries were ingested as `event_type="user"`, conflating "a human
+  typed something" with "a tool returned output". The `user` branch now mirrors the
+  assistant predicate: a `user` entry whose content is a `tool_result` block with no
+  text maps to `tool_result`; a `user` entry with real text still maps to `user`.
+  This makes the user-message analyzer, the CLI digest, and MCP `search_events`
+  with `event_type="user"` return a smaller, honest set. Tool-result events carry
+  `tool_name=None`, so they remain excluded from tool stats (`tool_name IS NOT NULL`).
+  **Not retroactive:** the fix applies to new ingestion only; already-stored events
+  are not reclassified (no backfill). Claude-only; other providers unchanged.
+
+---
+
 ## [1.8.5] — 2026-09-14
 
 ### Fixed

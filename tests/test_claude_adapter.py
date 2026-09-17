@@ -68,6 +68,37 @@ class TestClaudeAdapterToUnified:
         msg = self.adapter.to_unified(entry, "proj")
         assert msg.role == MessageRole.TOOL_USE
 
+    def test_user_tool_result_maps_to_tool_result_role(self):
+        # On disk, tool outputs ride inside role="user" entries as
+        # tool_result blocks with no text — must not be counted as human input.
+        blocks = [
+            ClaudeContentBlock(
+                type="tool_result", tool_use_id="tu1",
+                tool_content="42 passed in 3.21s",
+            ),
+        ]
+        entry = ClaudeEntry(
+            type="user", uuid="u4", session_id="s1",
+            timestamp="2026-01-01T00:00:00Z", cwd="/tmp",
+            content_blocks=blocks, content_text="", role="user",
+        )
+        msg = self.adapter.to_unified(entry, "proj")
+        assert msg.role == MessageRole.TOOL_RESULT
+
+    def test_user_with_real_text_stays_user(self):
+        # A genuine human message still maps to USER even if content is a list.
+        blocks = [
+            ClaudeContentBlock(type="text", text="run the tests please"),
+        ]
+        entry = ClaudeEntry(
+            type="user", uuid="u5", session_id="s1",
+            timestamp="2026-01-01T00:00:00Z", cwd="/tmp",
+            content_blocks=blocks, content_text="run the tests please",
+            role="user",
+        )
+        msg = self.adapter.to_unified(entry, "proj")
+        assert msg.role == MessageRole.USER
+
     def test_skips_file_history_snapshot(self):
         entry = ClaudeEntry(type="file-history-snapshot", uuid="fhs1")
         msg = self.adapter.to_unified(entry, "proj")
@@ -87,9 +118,11 @@ class TestClaudeAdapterToUnified:
         entries = self.parser.parse_file(FIXTURES_DIR / "claude_sample.jsonl")
         messages = [self.adapter.to_unified(e, "test") for e in entries]
         messages = [m for m in messages if m is not None]
-        assert len(messages) == 8
+        assert len(messages) == 9
         assert messages[0].role == MessageRole.USER
         assert messages[1].role == MessageRole.ASSISTANT
+        # Last fixture line is a role="user" entry carrying a tool_result block.
+        assert messages[-1].role == MessageRole.TOOL_RESULT
 
 
 class TestClaudeAdapterToEvent:
