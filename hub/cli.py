@@ -887,6 +887,29 @@ def main() -> None:
     p_detect.add_argument("--auto", action="store_true", help="Automatically store detected links")
     p_detect.add_argument("--json", action="store_true", dest="json_output")
 
+    # workspace (path→workspace attribution, issue #20)
+    ws_parser = subparsers.add_parser(
+        "workspace", help="Path→workspace attribution (recovers session↔project M:N)"
+    )
+    ws_sub = ws_parser.add_subparsers(dest="workspace_command")
+
+    ws_sub.add_parser(
+        "backfill",
+        help="Populate workspace.db from existing events (read-only pass over events.db)",
+    )
+
+    ws_list = ws_sub.add_parser("list", help="List known workspaces")
+    ws_list.add_argument("--json", action="store_true", dest="json_output")
+
+    ws_session = ws_sub.add_parser("session", help="Workspaces a session touched")
+    ws_session.add_argument("session_id", help="Session ID to look up")
+    ws_session.add_argument("--provider", help="Filter by provider")
+    ws_session.add_argument("--json", action="store_true", dest="json_output")
+
+    ws_sessions = ws_sub.add_parser("sessions", help="Sessions that touched a workspace")
+    ws_sessions.add_argument("workspace_key", help="Workspace key (see 'workspace list')")
+    ws_sessions.add_argument("--json", action="store_true", dest="json_output")
+
     # mcp
     mcp_parser = subparsers.add_parser("mcp", help="MCP server management")
     mcp_sub = mcp_parser.add_subparsers(dest="mcp_command")
@@ -934,6 +957,8 @@ def main() -> None:
             cmd_repo(args)
         case "query":
             cmd_query(args)
+        case "workspace":
+            cmd_workspace(args)
         case "sessions":
             cmd_sessions(args)
         case "link":
@@ -1271,6 +1296,120 @@ def cmd_query(args: argparse.Namespace) -> None:
             return
 
     print(_json.dumps(data, default=str))
+
+
+def cmd_workspace(args: argparse.Namespace) -> None:
+    match getattr(args, "workspace_command", None):
+        case "backfill":
+            cmd_workspace_backfill(args)
+        case "list":
+            cmd_workspace_list(args)
+        case "session":
+            cmd_workspace_session(args)
+        case "sessions":
+            cmd_workspace_sessions(args)
+        case _:
+            print("Usage: mool workspace {backfill|list|session|sessions}")
+
+
+def cmd_workspace_backfill(args: argparse.Namespace) -> None:
+    from hub.cache.event_store import DEFAULT_DB_PATH as EVENTS_DB_PATH
+    from hub.cache.workspace_store import WorkspaceStore
+
+    if not EVENTS_DB_PATH.exists():
+        print(yellow(f"No events.db found at {EVENTS_DB_PATH} — nothing to attribute."))
+        return
+
+    store = WorkspaceStore()
+    print(dim(f"Reading events (read-only): {EVENTS_DB_PATH}"))
+    print(dim(f"Writing attributions:      {store.db_path}"))
+    result = store.backfill_from_events(EVENTS_DB_PATH)
+    store.close()
+
+    print(green(
+        f"Attributed {result['attributed']} path-touches "
+        f"across {result['workspaces']} workspaces "
+        f"({result['directories']} directories resolved)."
+    ))
+    if result["skipped_non_absolute"]:
+        print(dim(
+            f"  Skipped {result['skipped_non_absolute']} non-absolute file_path "
+            f"rows (Bash command strings, not paths)."
+        ))
+
+
+def cmd_workspace_list(args: argparse.Namespace) -> None:
+    from hub.cache.workspace_store import WorkspaceStore
+
+    store = WorkspaceStore()
+    rows = store.list_workspaces()
+    store.close()
+
+    if getattr(args, "json_output", False):
+        import json as _json
+        print(_json.dumps(rows, default=str))
+        return
+
+    if not rows:
+        print(yellow("No workspaces yet. Run: mool workspace backfill"))
+        return
+
+    print(f"\n  {bold('Workspaces')} ({len(rows)}):")
+    print(f"  {'─' * 70}")
+    for r in rows:
+        label = r["remote_url"] or r["root_path"] or r["dir_path"] or r["workspace_key"]
+        meta = f"{r['sessions']} sessions, {r['attributions']} files  ·  {r['workspace_key']}"
+        print(f"    [{r['kind']:<10}] {label}")
+        print(f"      {dim(meta)}")
+    print()
+
+
+def cmd_workspace_session(args: argparse.Namespace) -> None:
+    from hub.cache.workspace_store import WorkspaceStore
+
+    store = WorkspaceStore()
+    rows = store.get_session_workspaces(args.session_id, getattr(args, "provider", None))
+    store.close()
+
+    if getattr(args, "json_output", False):
+        import json as _json
+        print(_json.dumps(rows, default=str))
+        return
+
+    if not rows:
+        print(yellow(f"No workspaces attributed to session {args.session_id[:20]}..."))
+        print(dim("  (run 'mool workspace backfill' first)"))
+        return
+
+    print(f"\n  Workspaces touched by {args.session_id[:30]}...")
+    print(f"  {'─' * 60}")
+    for r in rows:
+        label = r["remote_url"] or r["root_path"] or r["dir_path"] or r["workspace_key"]
+        print(f"    [{r['kind']:<10}] {label}  {dim(str(r['files']) + ' files')}")
+    print()
+
+
+def cmd_workspace_sessions(args: argparse.Namespace) -> None:
+    from hub.cache.workspace_store import WorkspaceStore
+
+    store = WorkspaceStore()
+    rows = store.get_workspace_sessions(args.workspace_key)
+    store.close()
+
+    if getattr(args, "json_output", False):
+        import json as _json
+        print(_json.dumps(rows, default=str))
+        return
+
+    if not rows:
+        print(yellow(f"No sessions attributed to workspace {args.workspace_key}"))
+        return
+
+    print(f"\n  Sessions that touched {args.workspace_key}")
+    print(f"  {'─' * 60}")
+    for r in rows:
+        print(f"    [{r['provider']:<8}] {r['session_id'][:40]}  {dim(str(r['files']) + ' files')}")
+    print()
 
 
 def cmd_repo(args: argparse.Namespace) -> None:

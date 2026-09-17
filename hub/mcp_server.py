@@ -17,6 +17,7 @@ from typing import Any, Optional
 # ── Database paths ──────────────────────────────────────────────────
 EVENTS_DB = os.path.expanduser("~/.moolmesh/events.db")
 GITHUB_DB = os.path.expanduser("~/.moolmesh/github.db")
+WORKSPACE_DB = os.path.expanduser("~/.moolmesh/workspace.db")
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -26,6 +27,18 @@ def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(uri, uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _connect_optional(db_path: str) -> sqlite3.Connection | None:
+    """Open a read-only connection, or None if the DB does not exist yet.
+
+    ``mode=ro`` raises when the file is absent, so new features whose DB is
+    only created after their first backfill (e.g. workspace.db) must guard on
+    existence rather than let the read tools explode on a fresh install.
+    """
+    if not os.path.exists(db_path):
+        return None
+    return _connect(db_path)
 
 
 def _rows_to_dicts(rows) -> list[dict[str, Any]]:
@@ -467,6 +480,84 @@ def _get_branch_sessions(
     return _get_sessions(db_path, hours=hours, branch=branch, limit=limit)
 
 
+# ── Workspace attribution (issue #20 — workspace.db, read-only) ─────
+
+def _get_session_workspaces(
+    db_path: str, session_id: str, provider: str | None = None
+) -> list[dict[str, Any]]:
+    """Workspaces (owning projects) a session touched, via path attribution.
+
+    Returns ``[]`` when workspace.db does not exist yet (before the first
+    ``mool workspace backfill`` run).
+    """
+    conn = _connect_optional(db_path)
+    if conn is None:
+        return []
+    try:
+        where = "a.session_id = ?"
+        params: list = [session_id]
+        if provider:
+            where += " AND a.provider = ?"
+            params.append(provider)
+        rows = conn.execute(f"""
+            SELECT w.workspace_key, w.kind, w.remote_url, w.root_path, w.dir_path,
+                   a.provider, COUNT(DISTINCT a.file_path) AS files
+            FROM path_attributions a
+            JOIN workspaces w ON w.id = a.workspace_id
+            WHERE {where}
+            GROUP BY w.id, a.provider
+            ORDER BY files DESC
+        """, params).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _get_workspace_sessions(db_path: str, workspace_key: str) -> list[dict[str, Any]]:
+    """Sessions that touched a workspace. ``[]`` when workspace.db is absent."""
+    conn = _connect_optional(db_path)
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute("""
+            SELECT a.session_id, a.provider, COUNT(DISTINCT a.file_path) AS files
+            FROM path_attributions a
+            JOIN workspaces w ON w.id = a.workspace_id
+            WHERE w.workspace_key = ?
+            GROUP BY a.session_id, a.provider
+            ORDER BY files DESC
+        """, (workspace_key,)).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _list_workspaces(db_path: str) -> list[dict[str, Any]]:
+    """All known workspaces with session/attribution counts. ``[]`` if absent."""
+    conn = _connect_optional(db_path)
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute("""
+            SELECT w.workspace_key, w.kind, w.remote_url, w.root_path, w.dir_path,
+                   w.first_seen, COUNT(a.id) AS attributions,
+                   COUNT(DISTINCT a.session_id || '/' || a.provider) AS sessions
+            FROM workspaces w
+            LEFT JOIN path_attributions a ON a.workspace_id = w.id
+            GROUP BY w.id
+            ORDER BY sessions DESC, attributions DESC
+        """).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 # ── MCP layer (guarded — only loads when mcp SDK is available) ──────
 
 try:
@@ -665,6 +756,42 @@ if _mcp is not None:
             session_id: ID de la sesión.
         """
         return _get_session_chain(EVENTS_DB, session_id)
+
+    @_mcp.tool()
+    def get_session_workspaces(
+        session_id: str,
+        provider: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Workspaces (proyectos dueños) que tocó una sesión.
+
+        Atribuye cada archivo que la sesión tocó al proyecto que lo posee — no
+        al nombre del directorio de la sesión — vía la escalera de identidad
+        git-remote → git-root → path-hash. Una sesión puede tocar varios
+        workspaces (relación M:N). Devuelve `[]` si aún no se corrió
+        `mool workspace backfill`.
+
+        Args:
+            session_id: ID de la sesión.
+            provider: Filtrar por provider (claude, codex, ...). None = todos.
+        """
+        return _get_session_workspaces(WORKSPACE_DB, session_id, provider)
+
+    @_mcp.tool()
+    def get_workspace_sessions(workspace_key: str) -> list[dict[str, Any]]:
+        """Sesiones que tocaron un workspace dado (relación M:N inversa).
+
+        Args:
+            workspace_key: Clave del workspace (git_remote:host/owner/repo,
+                git_root:<ruta> o path_hash:<hash>). Ver `list_workspaces`.
+        """
+        return _get_workspace_sessions(WORKSPACE_DB, workspace_key)
+
+    @_mcp.tool()
+    def list_workspaces() -> list[dict[str, Any]]:
+        """Lista todos los workspaces conocidos con conteo de sesiones y archivos.
+        Devuelve `[]` si aún no se corrió `mool workspace backfill`.
+        """
+        return _list_workspaces(WORKSPACE_DB)
 
 
 if __name__ == "__main__":
