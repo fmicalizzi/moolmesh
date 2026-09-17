@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.8.5
+Last updated: September 2026 — v1.9.0
 
 ---
 
@@ -48,19 +48,19 @@ Last updated: September 2026 — v1.8.5
 - **MCP pagination & ordering** — `offset` and `order` on `get_session_events` / `get_recent_events` / `search_events`.
 - Codex watcher crash-resilience (None fields, list payloads, ghost `[user input]` events).
 
+### v1.9 — Observe-base hygiene
+
+Hardened session-lifecycle fidelity before climbing further (VISION §4):
+
+- **#16** — honest session lifecycle: `is_active` now means "no end observed", flipped to `0` only on a terminal signal observed in the session file (Claude `/exit`), never inferred from recency; `first_event_at` backfills instead of freezing empty. New additive `ended_at` / `ended_reason` columns record why/when a session ended.
+- **#17** — `tool_result` classified distinctly from a user message: Claude tool outputs riding inside `role="user"` entries no longer count as human input (prerequisite for the Workspace resolver).
+- **#18** — timestamp honesty on resumed sessions: ingest-based `last_activity_at` (`MAX(events.created_at)`) and per-event `created_at`, distinct from the original message time.
+
 ---
 
 ## Planned
 
 > Strategy lives in [`VISION_ROADMAP.md`](VISION_ROADMAP.md) (español: [`VISION_ROADMAP.es.md`](VISION_ROADMAP.es.md)); this is the tactical log. Version numbers below are indicative, not committed.
-
-### Observe-base hygiene (highest priority — VISION §4)
-
-Harden session-lifecycle fidelity before climbing further:
-
-- **#16** — honest session lifecycle (`starting → active → idle → closed`); today `is_active` is set once and never returns to `0`.
-- **#17** — dedicated `tool_result` event type, distinct from a user message. Also a prerequisite for the Workspace resolver below.
-- **#18** — timestamp honesty on resumed sessions (ingest / last-activity distinct from original event time).
 
 ### Workspace axis (new direction — VISION §6)
 
@@ -71,7 +71,7 @@ Recover the project-first model of MoolMesh's root and add **direct folder obser
 - **Phase C — portfolio rollup** + `delivery_candidate` (surfaced as candidate-with-confidence, never as fact).
 - **Phase D — cross-machine aggregation** (opt-in, Wakapi-style split; deferred).
 
-Indicative release mapping (features = minor bumps; each phase independently shippable per its issue's Definition of Done): Phase A → `v1.10.0` ([#20](https://github.com/fmicalizzi/moolmesh/issues/20)), Phase B → `v1.11.0` ([#21](https://github.com/fmicalizzi/moolmesh/issues/21)), Phase C → `v1.12.0` ([#22](https://github.com/fmicalizzi/moolmesh/issues/22)), Phase D → `v2.x`. Preceded by the Observe-hygiene line (`v1.9.x`). Standard flow: AGENTS.md §7 + CI `preflight`. Epic: [#19](https://github.com/fmicalizzi/moolmesh/issues/19).
+Indicative release mapping (features = minor bumps; each phase independently shippable per its issue's Definition of Done): Phase A → `v1.10.0` ([#20](https://github.com/fmicalizzi/moolmesh/issues/20)), Phase B → `v1.11.0` ([#21](https://github.com/fmicalizzi/moolmesh/issues/21)), Phase C → `v1.12.0` ([#22](https://github.com/fmicalizzi/moolmesh/issues/22)), Phase D → `v2.x`. Preceded by the Observe-hygiene line (delivered in `v1.9.0`; see Delivered above). Standard flow: AGENTS.md §7 + CI `preflight`. Epic: [#19](https://github.com/fmicalizzi/moolmesh/issues/19).
 
 ### Provider pipeline (Breadth — VISION §5)
 
