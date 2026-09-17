@@ -405,14 +405,28 @@ class TestParseTs:
         from hub.cache.workspace_store import _parse_ts
         # UTC offset form
         assert _parse_ts("2026-09-17T08:17:16+00:00").utcoffset().total_seconds() == 0
-        # Z form == offset form for the same instant
+        # Z form is UTC
         assert _parse_ts("2026-01-01T00:00:00Z") == datetime(2026, 1, 1, tzinfo=timezone.utc)
-        # naive is interpreted as LOCAL (not UTC) — the git_commits case
-        naive = _parse_ts("2026-01-01T00:00:00")
-        assert naive == datetime(2026, 1, 1).astimezone(timezone.utc)
         # falsy / garbage drop out
         assert _parse_ts("") is None and _parse_ts(None) is None
         assert _parse_ts("not-a-date") is None
+
+    def test_naive_is_interpreted_local_not_utc(self):
+        """The git_commits case: a naive ts must be read as LOCAL, then shifted
+        to UTC. Pin the invariant explicitly (not via astimezone round-trip, and
+        not tautologically on a UTC machine) using the system's gmt offset."""
+        from datetime import datetime, timezone, timedelta
+        import time
+        from hub.cache.workspace_store import _parse_ts
+        naive = _parse_ts("2026-01-01T00:00:00")
+        gmtoff = time.localtime(
+            datetime(2026, 1, 1).timestamp()).tm_gmtoff  # seconds east of UTC
+        expected = datetime(2026, 1, 1, tzinfo=timezone.utc) - timedelta(seconds=gmtoff)
+        assert naive == expected
+        # On a non-UTC machine, naive and the Z form are DIFFERENT instants —
+        # the exact bug (treating naive as UTC) this guards against.
+        if gmtoff != 0:
+            assert _parse_ts("2026-01-01T00:00:00") != _parse_ts("2026-01-01T00:00:00Z")
 
 
 class TestDeliveryCandidate:
@@ -491,6 +505,24 @@ class TestDeliveryCandidate:
         assert r["by_signal"]["root_artifact"] == 1
         c = [x for x in s.get_delivery_candidates() if x["signal"] == "root_artifact"][0]
         assert c["signal_detail"].endswith("release.zip")
+        s.close()
+
+    def test_path_hash_folder_never_fires_root_artifact(self, tmp_path):
+        """A non-git materials folder (path_hash) with two odd singleton
+        extensions must NOT fabricate a root_artifact — every dir is its own
+        workspace so there is no meaningful 'root' with a tree below it."""
+        d = tmp_path / "materials"
+        d.mkdir()
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        from hub.correlation.workspace_resolver import resolve_dir
+        s.record_touch(str(d / "brief.pdf"), 1_700_000_000.0, resolve_dir(str(d)))
+        s.record_touch(str(d / "logo.svg"), 1_700_000_100.0, resolve_dir(str(d)))
+        r = s.detect_delivery_candidates(
+            events_db_path=tmp_path / "absent.db",
+            github_db_path=tmp_path / "absent.db", now=_future())
+        assert r["quiescent_workspaces"] >= 1
+        assert r["by_signal"]["root_artifact"] == 0
+        assert s.get_delivery_candidates() == []
         s.close()
 
     def test_eviction_when_workspace_active_again(self, tmp_path):

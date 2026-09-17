@@ -711,8 +711,14 @@ class WorkspaceStore:
 
                 # root_artifact: a file AT the workspace root whose extension is
                 # outside the working set (the extensions of the normal source
-                # tree). ``root`` may be None (path_hash without a dir) → skip.
-                if root:
+                # tree). Restricted to git workspaces: a "root" is only
+                # meaningful when there is a real tree BELOW it. For a path_hash
+                # node every directory is its own workspace, so root == dir_path
+                # and every touch is "at root" with an empty below-root set —
+                # two single-occurrence extensions (brief.pdf + logo.svg in a
+                # materials folder) would each read as an artifact and fabricate
+                # a delivery. Skip path_hash here (issue #22).
+                if root and kind in ("git_remote", "git_root"):
                     ws = self._working_set_exts(wid, work_exts, w_touches, root)
                     best_art: tuple[datetime, str] | None = None
                     for path, t in w_touches:
