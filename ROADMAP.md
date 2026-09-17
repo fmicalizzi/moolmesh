@@ -71,6 +71,8 @@ Recover the project-first model of MoolMesh's root and add **direct folder obser
 - **Phase C — portfolio rollup** + `delivery_candidate` (surfaced as candidate-with-confidence, never as fact).
 - **Phase D — cross-machine aggregation** (opt-in, Wakapi-style split; deferred).
 
+Indicative release mapping (features = minor bumps; each phase independently shippable per its issue's Definition of Done): Phase A → `v1.10.0` ([#20](https://github.com/fmicalizzi/moolmesh/issues/20)), Phase B → `v1.11.0` ([#21](https://github.com/fmicalizzi/moolmesh/issues/21)), Phase C → `v1.12.0` ([#22](https://github.com/fmicalizzi/moolmesh/issues/22)), Phase D → `v2.x`. Preceded by the Observe-hygiene line (`v1.9.x`). Standard flow: AGENTS.md §7 + CI `preflight`. Epic: [#19](https://github.com/fmicalizzi/moolmesh/issues/19).
+
 ### Provider pipeline (Breadth — VISION §5)
 
 Low-effort first: **Aider**, **Pi**, **Goose**; autonomous agents (Hermes, Odysseus) after schema confirmation; Copilot CLI once its format is confirmed. Enabler first: a provider template + auto-detection so a provider is only its quartet. The Workspace filesystem floor (Phase B) gives never-seen agents baseline output visibility for free — lowering the cost of every future provider.
