@@ -468,15 +468,18 @@ Both databases are created automatically. Schema migrates on startup.
 
 ## Roadmap
 
-MoolMesh started with coding agents but the vision is broader — any autonomous agent that generates observable signals belongs in the mesh.
+MoolMesh started with coding-agent sessions, but the vision is to **observe the work, not just the sessions** — attributing every file-touch to the project that owns it, and eventually seeing a folder directly, before or without an agent (VISION §6).
 
 | Status | Version | Scope |
 |--------|---------|-------|
-| **Shipped** | v1.6 | 4 providers (Claude, Codex, Qwen, OpenCode), session metadata, full text export, full-text search, git branch correlation, cross-session linking |
-| **Planned** | v1.7 | New providers: Aider, GitHub Copilot CLI, Pi |
-| **Planned** | v1.8 | Provider template & contributor guide |
-| **Future** | v2.0 | Autonomous agent support: Hermes, Odyssey, Goose |
-| **Vision** | v2.x | Organization-scale observability, multi-user, cross-repo analytics |
+| **Shipped** | v1.6 | Cross-session linking, session metadata, full text export, full-text search, git branch correlation |
+| **Shipped** | v1.7 | **Cursor provider (5th)** — Claude, Codex, Qwen, OpenCode, Cursor; universal `mool mcp setup <client>` |
+| **Shipped** | v1.8 | Windows daemon, GitHub client hardening (retry/backoff, pagination), MCP pagination & ordering |
+| **Shipped** | v1.9 | Observe-base hygiene: honest session lifecycle, `tool_result` classification, timestamp honesty (#16/#17/#18) |
+| **Shipped** | v1.10 | **Workspace axis — Phase A:** `path → workspace` resolver, M:N attribution over a separate `workspace.db` (#20) |
+| **Planned** | v1.11 | **Workspace Phase B:** filesystem watcher — observe folders directly, no agent required (#21) |
+| **Planned** | v1.12 | **Workspace Phase C:** portfolio rollup + `delivery_candidate` (#22) |
+| **Future** | v2.x | Workspace Phase D (cross-machine, opt-in); autonomous agents; org-scale observability |
 
 See [ROADMAP.md](ROADMAP.md) for detailed plans, open questions, and design principles.
 

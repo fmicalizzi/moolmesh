@@ -6,6 +6,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.10.0] — 2026-09-17
+
+### Added
+- **Workspace axis — Phase A: `path → workspace` resolver (#20)** — recovers correct
+  multi-project (M:N) attribution of agent work by mapping each absolute
+  `events.file_path` to the project that *owns the file*, rather than to the session's
+  directory name. A session in `~/work` editing `~/work/repo-a/x.py` and
+  `~/work/repo-b/y.py` now lights up **two** workspaces — impossible before, when one
+  event carried exactly one `project`. This is the *recovery half* of the Workspace
+  axis (VISION §6): correct attribution of *agent* work over data MoolMesh already
+  persists — **not** the full portfolio, which awaits the Phase B filesystem watcher.
+
+  - **Identity ladder `git-remote → git-root → path-hash`** (`workspace_resolver.py`) —
+    resolves each path to its closest project marker with a stable identity that
+    survives rename, move, or clone, and that still exists when there is no git at all.
+    `.git/config` is parsed by hand (Python's `configparser` mis-reads git's
+    tab-indented keys); **no `git` subprocess is ever spawned**.
+  - **Separate `workspace.db`** (`workspace_store.py`, `~/.moolmesh/workspace.db`) — a
+    distinct store per invariant §2.4, with additive run-once migrations and
+    self-healing upserts. `backfill_from_events` opens `events.db` **read-only**
+    (`mode=ro`) and **never writes to it**; the hot path / SSE stay untouched.
+    **Absolute paths only:** the backfill attributes absolute `file_path` rows and
+    **skips non-absolute ones** (for those, `events.file_path` holds Bash command
+    strings, not paths), reporting the skipped count rather than guessing.
+  - **CLI** — `mool workspace {backfill,list,session,sessions}`.
+  - **MCP (3 new read-only tools)** — `get_session_workspaces`,
+    `get_workspace_sessions`, `list_workspaces`. Each is guarded to return `[]` when
+    `workspace.db` is absent, so the tools are safe to call before any backfill.
+
+  **No change to what shipped:** the existing `project` field (derived from the session
+  directory and consumed by agents over MCP), the existing MCP contract,
+  `events.project`, and `linker.py` are all **unchanged**. The resolver is purely
+  additive and reads `events.db` read-only.
+
 ## [1.9.0] — 2026-09-17
 
 ### Added
