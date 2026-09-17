@@ -246,7 +246,15 @@ mool workspace touches <workspace_key>   # filesystem touches attributed to a wo
 
 The watcher is pure-stdlib: a bounded recursive scan with an mtime cursor (no watch-per-file), sensible default excludes (VCS internals, dependency dirs, build outputs, sync/cache folders), and a `max_depth` bound. All path-touches land in a **separate `workspace.db`** — the `events.db` hot path and SSE stream are never touched. Set `hide_project_names = true` under `[workspace]` in `~/.moolmesh/config.toml` to mask folder names in the visible surface.
 
-Agents can read all of this over MCP via the read-only workspace tools (`list_workspaces`, `get_session_workspaces`, `get_workspace_sessions`, `get_workspace_touches`).
+**See the portfolio** — roll every path-touch into a **machine-wide portfolio** that is *signal-agnostic*: a workspace lights up whether the activity came from a session, the filesystem, or git. On top of it, a local **`delivery_candidate`** flags likely-delivered work — surfaced as a *candidate with confidence, never as a fact* (quiescence plus a recorded second signal: a session close, a git commit, or a new artifact at the root; no cloud entity, no LLM).
+
+```bash
+mool workspace rollup                    # (re)build the portfolio rollup + run the detector
+mool workspace portfolio                 # hot workspaces, by signal
+mool workspace delivery                  # delivery candidates (with confidence + the 2nd signal)
+```
+
+The dashboard adds a read-on-load **`/portfolio`** view over `workspace.db` (the SSE stream is untouched). Agents can read all of this over MCP via the read-only workspace tools (`list_workspaces`, `get_session_workspaces`, `get_workspace_sessions`, `get_workspace_touches`, `get_portfolio`, `get_workspace_activity`, `get_delivery_candidates`).
 
 ---
 
@@ -506,7 +514,7 @@ MoolMesh started with coding-agent sessions, but the vision is to **observe the 
 | **Shipped** | v1.9 | Observe-base hygiene: honest session lifecycle, `tool_result` classification, timestamp honesty (#16/#17/#18) |
 | **Shipped** | v1.10 | **Workspace axis — Phase A:** `path → workspace` resolver, M:N attribution over a separate `workspace.db` (#20) |
 | **Shipped** | v1.11 | **Workspace axis — Phase B:** filesystem watcher — observe marked folders directly, no agent/git required; opt-in roots + mtime cursor into `workspace.db` (#21) |
-| **Planned** | v1.12 | **Workspace Phase C:** portfolio rollup + `delivery_candidate` (#22) |
+| **Shipped** | v1.12 | **Workspace axis — Phase C:** signal-agnostic portfolio rollup (session + filesystem + git) + `delivery_candidate` (candidate with confidence); read-on-load `/portfolio` dashboard view (#22) |
 | **Future** | v2.x | Workspace Phase D (cross-machine, opt-in); autonomous agents; org-scale observability |
 
 See [ROADMAP.md](ROADMAP.md) for detailed plans, open questions, and design principles.

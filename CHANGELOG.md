@@ -6,6 +6,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.12.0] — 2026-09-17
+
+### Added
+- **Workspace axis — Phase C: portfolio rollup + `delivery_candidate` (#22)** — the
+  final phase of the Workspace axis (VISION §6). Turns the attributed path-touches into
+  a **machine-wide portfolio** and adds a **local delivery signal** — completing the
+  axis (A + B + C); only the deferred cross-machine Phase D (v2.x) remains.
+
+  - **Signal-agnostic portfolio rollup** — a materialized projection over the workspace
+    tree (`workspace_rollup` in the separate `workspace.db`, keyed by `(workspace, day)`,
+    additive via `CREATE TABLE IF NOT EXISTS`). A node lights up whether the activity
+    came from a **session** (`path_attributions`), the **filesystem** (`path_touches`),
+    or **git** (`github.db` commits) — a genuine UNION over three differently-shaped
+    sources, folded in at build time so the read surface stays a single-table query.
+    Git is resolved via the same identity ladder as Phase A, so a repo root and a deep
+    session/fs path collide on **one node**. Keyed `INSERT OR REPLACE`, never
+    wipe-and-rebuild (the rollup is the only durable per-day filesystem record).
+    Per-signal counts are reported separately (never summed — incommensurable units);
+    each node reports which `sources` lit it.
+  - **`delivery_candidate` (correlate)** — a **local, structural** guess that a
+    workspace's work was likely delivered, surfaced as a **candidate with confidence,
+    never as a bare "done" flag**. Quiescence is a **precondition only** (indistinguishable
+    from a break), measured against the **real clocks** (`path_touches.last_seen`, git
+    commit times, session `ended_at`/`last_event_at` from #16 — read-only, never the
+    backfill-pinned `path_attributions.first_seen`). A row is written only when a
+    **second co-occurring signal closed the burst**, and the firing signal is **recorded
+    per row** (auditable): `session_close` (real `ended_at`), `git_commit`, or
+    `root_artifact` (a new file at a git workspace's root with an extension outside the
+    working set). **No LLM** — a structural signal, not an inference. Three timestamp
+    formats (git stores naive-local, sessions use `Z`, filesystem uses UTC offset) are
+    normalized to aware UTC before any comparison.
+  - **Dashboard — first frontend surface of the axis** — a **read-on-load** portfolio
+    view (`/portfolio` + `/api/workspace/portfolio` and `/api/workspace/delivery`) that
+    queries `workspace.db` on load. **The SSE schema is untouched** (no API-version bump)
+    and the events hot path is not affected.
+  - **CLI** — `mool workspace rollup` (rebuild rollup + run the detector),
+    `mool workspace portfolio`, `mool workspace delivery`.
+  - **MCP** — new read-only tools `get_portfolio`, `get_workspace_activity`,
+    `get_delivery_candidates`. All new read surfaces pass through
+    `_mask_workspace_rows` (and `root_artifact` paths are additionally masked), so
+    `hide_project_names` keeps working on the new views.
+  - **Untouched by construction:** the `project` field, the MCP session contract,
+    `linker.py`, and `events.db` (opened read-only) — no changes. Zero new dependencies.
+
+### Known limitations
+- **Rollup day-bucketing timezone edge (#23)** — the per-day rollup buckets each source
+  on its raw ISO date string, so git days remain in local time while session/filesystem
+  days are in UTC. This produces a ±1-day edge effect for commits near local midnight.
+  Quiescence detection is unaffected (it normalizes all timestamps to UTC first). Tracked
+  as a post-release follow-up in #23.
+
+---
+
 ## [1.11.0] — 2026-09-17
 
 ### Added

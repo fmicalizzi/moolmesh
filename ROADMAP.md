@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.11.0
+Last updated: September 2026 — v1.12.0
 
 ---
 
@@ -68,6 +68,16 @@ Second step of the Workspace axis (VISION §6): observe the **work**, not just t
 
 - **#21** — filesystem watcher: a pure-stdlib, standalone watcher (never touches `EventStore` / the SSE hot path) that observes **opt-in marked roots** — bounded recursive scan + a **per-root mtime cursor** (no watch-per-file, so no FD ceiling; cursor anchored to `scan_start − 1s` so mid-scan writes are never dropped). **Containment = correctness:** built-in default excludes (VCS internals, dependency dirs, build outputs, OS/cloud sync + caches) pruned in-place, plus per-root excludes and a `max_depth` bound; symlinks not followed. Emits `path-touch` rows resolved to workspaces via the Phase A resolver (#20), into additive `path_touches` / `fs_cursors` tables in the **separate `workspace.db`** (`CREATE TABLE IF NOT EXISTS` — no migration; **zero new writes to `events.db`**). New `mool workspace root {add,list,remove}` + `mool workspace touches` CLI, MCP `get_workspace_touches` (and a filesystem-`touches` count on `list_workspaces` / `get_session_workspaces`), and a `hide_project_names` privacy flag. Additive: the existing `project` field, the MCP contract, `linker.py`, and the #20 resolver are untouched (Phase B *consumes* the resolver).
 
+### v1.12 — Workspace axis Phase C
+
+Final step of the Workspace axis (VISION §6): roll the attributed path-touches into a **machine-wide portfolio** and add a **local delivery signal** — the axis is now complete (A + B + C); only the deferred cross-machine Phase D (v2.x) remains.
+
+- **#22** — portfolio rollup + `delivery_candidate`:
+  - **Signal-agnostic portfolio rollup** — a materialized projection (`workspace_rollup` in the separate `workspace.db`, keyed `(workspace, day)`, additive `CREATE TABLE IF NOT EXISTS`) where a node lights up whether the activity came from a **session**, the **filesystem**, or **git** — a real UNION over three differently-shaped sources (git resolved via the Phase A ladder so a repo root and a deep path collide on one node), folded in at build time so the read stays single-table. Keyed `INSERT OR REPLACE` (never wipe-and-rebuild — the rollup is the only durable per-day filesystem record); per-signal counts kept separate (incommensurable units), each node reports which `sources` lit it.
+  - **`delivery_candidate`** — a **local, structural** guess of likely delivery, surfaced as a **candidate with confidence, never a bare "done"**. Quiescence is a **precondition only**, measured against the **real clocks** (`path_touches.last_seen`, git commit times, session `ended_at`/`last_event_at` from #16 — read-only, never the backfill-pinned `path_attributions.first_seen`); a row is written only when a **second co-occurring signal closed the burst** and that signal is **recorded per row** (auditable): `session_close`, `git_commit`, or `root_artifact`. **No LLM.** Three clock formats normalized to aware UTC before any comparison.
+  - **Dashboard** — the axis's first frontend surface: a **read-on-load** portfolio view (`/portfolio` + `/api/workspace/{portfolio,delivery}`) over `workspace.db`; the **SSE schema is untouched** (no API-version bump), hot path unaffected. New `mool workspace {rollup,portfolio,delivery}` CLI and MCP `get_portfolio` / `get_workspace_activity` / `get_delivery_candidates` (all masked by `hide_project_names`). Additive: the `project` field, the MCP session contract, `linker.py`, and `events.db` are untouched.
+  - **Known limitation** — the rollup's per-day bucketing keeps git days in local time vs. session/filesystem in UTC (±1-day edge near local midnight); quiescence is unaffected. Follow-up in [#23](https://github.com/fmicalizzi/moolmesh/issues/23).
+
 ---
 
 ## Planned
@@ -80,10 +90,10 @@ Recover the project-first model of MoolMesh's root and add **direct folder obser
 
 - **Phase A — `path → workspace` resolver** over already-persisted `file_path` / `cwd`: correct multi-project attribution of agent work (M:N). Additive; does not touch `linker.py`. **Delivered in `v1.10.0`; see Delivered above.**
 - **Phase B — filesystem watcher** with marked roots + bounded scan + excludes; its own `workspace.db` (protects the `events.db` hot path / SSE). **Delivered in `v1.11.0`; see Delivered above.**
-- **Phase C — portfolio rollup** + `delivery_candidate` (surfaced as candidate-with-confidence, never as fact).
+- **Phase C — portfolio rollup** + `delivery_candidate` (surfaced as candidate-with-confidence, never as fact). **Delivered in `v1.12.0`; see Delivered above.**
 - **Phase D — cross-machine aggregation** (opt-in, Wakapi-style split; deferred).
 
-Indicative release mapping (features = minor bumps; each phase independently shippable per its issue's Definition of Done): Phase A → `v1.10.0` ([#20](https://github.com/fmicalizzi/moolmesh/issues/20), **delivered**; see Delivered above), Phase B → `v1.11.0` ([#21](https://github.com/fmicalizzi/moolmesh/issues/21), **delivered**; see Delivered above), Phase C → `v1.12.0` ([#22](https://github.com/fmicalizzi/moolmesh/issues/22)), Phase D → `v2.x`. Preceded by the Observe-hygiene line (delivered in `v1.9.0`; see Delivered above). Standard flow: AGENTS.md §7 + CI `preflight`. Epic: [#19](https://github.com/fmicalizzi/moolmesh/issues/19).
+Indicative release mapping (features = minor bumps; each phase independently shippable per its issue's Definition of Done): Phase A → `v1.10.0` ([#20](https://github.com/fmicalizzi/moolmesh/issues/20), **delivered**; see Delivered above), Phase B → `v1.11.0` ([#21](https://github.com/fmicalizzi/moolmesh/issues/21), **delivered**; see Delivered above), Phase C → `v1.12.0` ([#22](https://github.com/fmicalizzi/moolmesh/issues/22), **delivered**; see Delivered above), Phase D → `v2.x`. Preceded by the Observe-hygiene line (delivered in `v1.9.0`; see Delivered above). Standard flow: AGENTS.md §7 + CI `preflight`. Epic: [#19](https://github.com/fmicalizzi/moolmesh/issues/19).
 
 ### Provider pipeline (Breadth — VISION §5)
 
