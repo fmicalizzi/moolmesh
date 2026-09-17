@@ -321,6 +321,146 @@ class TestExportCommand:
         assert "file content" in content
 
 
+class TestSessionLifecycle:
+    """Issue #16 — is_active honesty + first_event_at backfill."""
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "claude_exit_sample.jsonl"
+
+    def test_bug_b_empty_first_timestamp_backfilled(self, store):
+        """A first upsert with an empty timestamp must not freeze first_event_at."""
+        store.upsert_session(
+            {"id": "sess-b", "provider": "claude", "project": "p"}, ""
+        )
+        first = store.get_session_detail("sess-b")["first_event_at"]
+        assert first == ""  # nothing valid observed yet
+
+        # A later event arrives with a real timestamp.
+        store.upsert_session(
+            {"id": "sess-b", "provider": "claude", "project": "p"},
+            "2026-06-26T10:00:00",
+        )
+        detail = store.get_session_detail("sess-b")
+        assert detail["first_event_at"] == "2026-06-26T10:00:00"
+        assert detail["last_event_at"] == "2026-06-26T10:00:00"
+
+    def test_first_event_at_keeps_earliest(self, store):
+        """Out-of-order upserts keep the earliest timestamp as first_event_at."""
+        store.upsert_session(
+            {"id": "sess-c", "provider": "claude", "project": "p"},
+            "2026-06-26T10:05:00",
+        )
+        store.upsert_session(
+            {"id": "sess-c", "provider": "claude", "project": "p"},
+            "2026-06-26T10:01:00",
+        )
+        detail = store.get_session_detail("sess-c")
+        assert detail["first_event_at"] == "2026-06-26T10:01:00"
+        assert detail["last_event_at"] == "2026-06-26T10:01:00"
+
+    def test_exit_marks_session_inactive_via_pipeline(self, store, capsys):
+        """A session with an observed /exit reads back is_active=false.
+
+        Drives the real fixture through ClaudeParser -> ClaudeAdapter -> watcher,
+        then asserts via get_session_detail, `mool export --format json`, and MCP.
+        """
+        from hub.watchers.claude_watcher import ClaudeWatcher
+
+        watcher = ClaudeWatcher(store)
+        events, offset = watcher._parse_and_adapt(self.FIXTURE, 0)
+        store.store_with_offset(events, "fp-exit", "claude", str(self.FIXTURE), offset)
+
+        # 1. Store-level.
+        detail = store.get_session_detail("exit-sess-9999")
+        assert detail is not None
+        assert detail["is_active"] is False
+        assert detail["ended_reason"] == "exit_command"
+        assert detail["ended_at"] == "2026-09-07T06:04:02.396Z"
+
+        # 2. CLI export --format json.
+        import argparse
+        import hub.cli as cli_mod
+
+        args = argparse.Namespace(
+            session_id="exit-sess-9999", format="json", output=None
+        )
+        original_init = EventStore.__init__
+
+        def patched_init(self_es, db_path=None):
+            original_init(self_es, db_path=store.db_path)
+
+        EventStore.__init__ = patched_init
+        try:
+            cli_mod.cmd_export(args)
+        finally:
+            EventStore.__init__ = original_init
+        data = json.loads(capsys.readouterr().out)
+        assert data["session"]["is_active"] is False
+
+        # 3. MCP get_session_detail.
+        from hub import mcp_server
+
+        mcp_detail = mcp_server._get_session_detail(str(store.db_path), "exit-sess-9999")
+        assert mcp_detail["is_active"] == 0
+        assert mcp_detail["ended_reason"] == "exit_command"
+
+    def test_exit_in_later_batch_still_ends_session(self, store, tmp_path):
+        """/exit arriving in a later tail batch (as first-seen id) still ends it.
+
+        Guards the incremental-tailing case: the terminal signal is not in the
+        same batch as the session's first entry.
+        """
+        from hub.watchers.claude_watcher import ClaudeWatcher
+
+        raw = self.FIXTURE.read_bytes()
+        lines = raw.split(b"\n")
+        head = b"\n".join(lines[:3]) + b"\n"  # up to the caveat, no /exit yet
+        tail_file = tmp_path / "s.jsonl"
+        tail_file.write_bytes(head)
+
+        watcher = ClaudeWatcher(store)
+        _, offset = watcher._parse_and_adapt(tail_file, 0)
+        assert store.get_session_detail("exit-sess-9999")["is_active"] is True
+
+        tail_file.write_bytes(raw)  # /exit + stdout appended
+        watcher._parse_and_adapt(tail_file, offset)
+        detail = store.get_session_detail("exit-sess-9999")
+        assert detail["is_active"] is False
+        assert detail["ended_reason"] == "exit_command"
+
+    def test_ended_is_sticky_against_later_upsert(self, store):
+        """Once ended, a later upsert must not flip is_active back to true."""
+        store.upsert_session(
+            {"id": "sess-d", "provider": "claude", "project": "p"},
+            "2026-06-26T10:00:00",
+        )
+        store.mark_session_ended(
+            "sess-d", "claude", "2026-06-26T10:05:00", "exit_command"
+        )
+        assert store.get_session_detail("sess-d")["is_active"] is False
+        # A stray later event for the same session file.
+        store.upsert_session(
+            {"id": "sess-d", "provider": "claude", "project": "p"},
+            "2026-06-26T10:06:00",
+        )
+        assert store.get_session_detail("sess-d")["is_active"] is False
+
+    def test_exit_mention_in_prose_is_not_terminal(self):
+        """A message merely mentioning /exit is not a terminal signal."""
+        from hub.adapters.claude_adapter import ClaudeAdapter
+        from hub.models.claude import ClaudeEntry
+
+        adapter = ClaudeAdapter()
+        prose = ClaudeEntry(
+            type="user", uuid="x", parent_uuid=None, session_id="s",
+            timestamp="2026-06-26T10:00:00", cwd="", version="",
+            is_sidechain=False, git_branch=None, role="user",
+            content_blocks=[], content_text="how do I use /exit in the CLI?",
+            model=None, message_id=None, usage=None, stop_reason=None,
+            subtype=None, raw={},
+        )
+        assert adapter.terminal_reason(prose) is None
+
+
 class TestAdapterFullText:
     def test_claude_adapter_full_text(self):
         from hub.adapters.claude_adapter import ClaudeAdapter

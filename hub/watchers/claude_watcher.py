@@ -66,4 +66,12 @@ class ClaudeWatcher(BaseHarvester):
                 meta = self._adapter.to_session_meta(entry, project)
                 if meta:
                     self._store.upsert_session(meta.to_dict(), entry.timestamp)
+            # Terminal signal: an observed /exit ends the session (issue #16).
+            # Keyed on the entry's own session_id so a sidechain/subagent file
+            # never ends its parent. Applied after upsert so it wins the batch.
+            reason = self._adapter.terminal_reason(entry)
+            if reason and entry.session_id:
+                self._store.mark_session_ended(
+                    entry.session_id, self.provider_name, entry.timestamp, reason
+                )
         return events, new_offset
