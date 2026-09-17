@@ -9,7 +9,9 @@ import pytest
 from hub.cache.workspace_store import WorkspaceStore
 from hub.correlation.workspace_resolver import WorkspaceIdentity
 from hub.mcp_server import (
+    _get_portfolio,
     _get_session_workspaces,
+    _get_workspace_activity,
     _get_workspace_sessions,
     _list_workspaces,
 )
@@ -215,3 +217,165 @@ class TestMcpReadSurface:
         assert ws and ws[0]["workspace_key"] == "git_remote:github.com/acme/a"
         assert _get_workspace_sessions(str(db), "git_remote:github.com/acme/a")
         assert _list_workspaces(str(db))
+
+
+def _make_github_db(path: Path, repos: list[tuple[int, str]],
+                    commits: list[tuple[int, str, str]]) -> Path:
+    """repos: (repo_id, path). commits: (repo_id, sha, timestamp)."""
+    c = sqlite3.connect(path)
+    c.execute("""CREATE TABLE repos (
+        id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, remote_url TEXT)""")
+    c.execute("""CREATE TABLE git_commits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, repo_id INTEGER NOT NULL,
+        sha TEXT NOT NULL, timestamp TEXT NOT NULL)""")
+    for rid, rpath in repos:
+        c.execute("INSERT INTO repos (id, path) VALUES (?, ?)", (rid, rpath))
+    for rid, sha, ts in commits:
+        c.execute("INSERT INTO git_commits (repo_id, sha, timestamp) VALUES (?,?,?)",
+                  (rid, sha, ts))
+    c.commit()
+    c.close()
+    return path
+
+
+class TestPortfolioRollup:
+    def test_schema_table_created(self, store):
+        with store._lock:
+            tables = {r[0] for r in store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "workspace_rollup" in tables
+
+    def test_signal_agnostic_union(self, tmp_path):
+        """One workspace lights up from session + filesystem + git — a single
+        node, three signals — because all three resolve on the same ladder key."""
+        repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        key = "git_remote:github.com/acme/r"
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        # session edge on a deep file inside the repo
+        from hub.correlation.workspace_resolver import resolve_path
+        s.record_attribution("sess1", "claude", str(repo / "src" / "x.py"),
+                             resolve_path(str(repo / "src" / "x.py")))
+        # filesystem touch on another deep file
+        from hub.correlation.workspace_resolver import resolve_dir
+        s.record_touch(str(repo / "y.py"), 1_700_000_000.0,
+                       resolve_dir(str(repo)))
+        gh = _make_github_db(tmp_path / "github.db", [(1, str(repo))],
+                             [(1, "abc", "2026-02-01T10:00:00")])
+        r = s.build_rollup(gh)
+        assert r["multi_source_nodes"] == 1
+        assert r["git_repos_matched"] == 1 and r["git_repos_new"] == 0
+
+        pf = s.get_portfolio()
+        node = [p for p in pf if p["workspace_key"] == key]
+        assert len(node) == 1
+        assert set(node[0]["sources"]) == {"session", "filesystem", "git"}
+        assert node[0]["session_touches"] == 1
+        assert node[0]["fs_touches"] == 1
+        assert node[0]["git_touches"] == 1
+        s.close()
+
+    def test_iso_epoch_trap_fs_grouped_by_iso_day(self, tmp_path):
+        """path_touches.mtime is REAL epoch but last_seen is ISO — the rollup
+        must group on the ISO day and never yield an empty date string."""
+        d = tmp_path / "plain"
+        d.mkdir()
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        from hub.correlation.workspace_resolver import resolve_dir
+        s.record_touch(str(d / "a.bin"), 1_700_000_000.0, resolve_dir(str(d)))
+        s.build_rollup(tmp_path / "absent-github.db")
+        with s._lock:
+            days = [r[0] for r in s._conn.execute(
+                "SELECT day FROM workspace_rollup").fetchall()]
+        assert days and all(len(day) == 10 and day != "" for day in days)
+        # ISO date, not an epoch-derived or blank value
+        assert all(day[4] == "-" and day[7] == "-" for day in days)
+        s.close()
+
+    def test_insert_or_replace_preserves_prior_days(self, tmp_path):
+        """A re-touch re-dates path_touches.last_seen to today, but the rollup
+        keyed INSERT OR REPLACE must keep the earlier day's row — the rollup is
+        the only durable per-day fs record (never wipe-and-rebuild)."""
+        d = tmp_path / "plain"
+        d.mkdir()
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        from hub.correlation.workspace_resolver import resolve_dir
+        ident = resolve_dir(str(d))
+        wid = s.record_touch(str(d / "a.bin"), 1_700_000_000.0, ident)
+        # Simulate an earlier rollup day already materialized.
+        with s._lock:
+            s._conn.execute(
+                """INSERT INTO workspace_rollup
+                   (workspace_id, day, session_touches, fs_touches, git_touches,
+                    last_activity, built_at)
+                   VALUES (?, '2020-01-01', 0, 3, 0, '2020-01-01T00:00:00', 'x')""",
+                (wid,))
+            s._conn.commit()
+        s.build_rollup(tmp_path / "absent-github.db")
+        with s._lock:
+            old = s._conn.execute(
+                "SELECT fs_touches FROM workspace_rollup WHERE day='2020-01-01'"
+            ).fetchone()
+        assert old is not None and old[0] == 3  # earlier day survived
+        s.close()
+
+    def test_since_filter_string_compare(self, tmp_path):
+        d = tmp_path / "plain"
+        d.mkdir()
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        from hub.correlation.workspace_resolver import resolve_dir
+        wid = s.record_touch(str(d / "a.bin"), 1_700_000_000.0, resolve_dir(str(d)))
+        with s._lock:
+            for day in ("2020-01-01", "2030-12-31"):
+                s._conn.execute(
+                    """INSERT OR REPLACE INTO workspace_rollup
+                       (workspace_id, day, session_touches, fs_touches,
+                        git_touches, last_activity, built_at)
+                       VALUES (?, ?, 0, 1, 0, ?, 'x')""",
+                    (wid, day, day + "T00:00:00"))
+            s._conn.commit()
+        key = s.list_workspaces()[0]["workspace_key"]
+        recent = s.get_workspace_activity(key, since="2025-01-01")
+        assert [r["day"] for r in recent] == ["2030-12-31"]
+        s.close()
+
+    def test_absent_github_db_git_contributes_nothing(self, tmp_path):
+        d = tmp_path / "plain"
+        d.mkdir()
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        from hub.correlation.workspace_resolver import resolve_dir
+        s.record_touch(str(d / "a.bin"), 1_700_000_000.0, resolve_dir(str(d)))
+        r = s.build_rollup(tmp_path / "does-not-exist.db")
+        assert r["git_repos_matched"] == 0 and r["git_repos_new"] == 0
+        assert all(p["git_touches"] == 0 for p in s.get_portfolio())
+        s.close()
+
+    def test_mcp_portfolio_masking(self, tmp_path):
+        repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        db = tmp_path / "workspace.db"
+        s = WorkspaceStore(db)
+        from hub.correlation.workspace_resolver import resolve_path
+        s.record_attribution("sess1", "claude", str(repo / "x.py"),
+                             resolve_path(str(repo / "x.py")))
+        s.build_rollup(tmp_path / "absent.db")
+        s.close()
+
+        import hub.mcp_server as mcp
+        # unmasked
+        rows = _get_portfolio(str(db))
+        assert rows and rows[0]["remote_url"] == "github.com/acme/r"
+        # masked
+        orig = mcp._hide_project_names
+        mcp._hide_project_names = lambda: True
+        try:
+            masked = _get_portfolio(str(db))
+        finally:
+            mcp._hide_project_names = orig
+        assert masked[0]["remote_url"] is None
+        assert masked[0]["label"] and masked[0]["workspace_key"]  # key preserved
+        # per-day view
+        act = _get_workspace_activity(str(db), rows[0]["workspace_key"])
+        assert act and act[0]["sources"] == ["session"]
+
+    def test_mcp_portfolio_empty_when_db_absent(self, tmp_path):
+        assert _get_portfolio(str(tmp_path / "nope.db")) == []
+        assert _get_workspace_activity(str(tmp_path / "nope.db"), "k") == []

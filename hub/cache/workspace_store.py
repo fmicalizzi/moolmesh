@@ -18,6 +18,7 @@ run-once migrations via ``schema_migrations`` (additive only, AGENTS.md §4).
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -85,6 +86,32 @@ CREATE TABLE IF NOT EXISTS fs_cursors (
     last_mtime REAL NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Machine-wide portfolio rollup (issue #22 — Workspace axis, Phase C).
+-- A materialized projection over the workspace tree, keyed (workspace, day),
+-- SIGNAL-AGNOSTIC: a node lights up whether the activity came from a session
+-- (path_attributions), the filesystem (path_touches), or git (github.db
+-- commits). One row folds all three per day so the MCP/dashboard read stays a
+-- single-table, single-DB query (git lives in a separate DB, resolved in only
+-- at build time). Additive via IF NOT EXISTS — lands on existing v1.11.0 DBs.
+--
+-- Keyed INSERT OR REPLACE, NEVER wipe-and-rebuild (the daily_digests molde):
+-- path_touches holds one row per path, latest state only (its UNIQUE(path)
+-- upsert re-dates last_seen on every re-touch), so a day-keyed aggregate is not
+-- reproducible from the base table — a file touched again tomorrow vanishes
+-- from today's count. This rollup is the ONLY durable per-day fs record; a
+-- DELETE + reinsert would erase history it alone holds.
+CREATE TABLE IF NOT EXISTS workspace_rollup (
+    workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    day TEXT NOT NULL,                     -- YYYY-MM-DD (substr of the ISO ts)
+    session_touches INTEGER NOT NULL DEFAULT 0,   -- path_attributions edges
+    fs_touches INTEGER NOT NULL DEFAULT 0,        -- path_touches (filesystem)
+    git_touches INTEGER NOT NULL DEFAULT 0,       -- github.db commits
+    last_activity TEXT,                    -- max ISO ts seen that day
+    built_at TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_day ON workspace_rollup(day);
 """
 
 
@@ -115,6 +142,35 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _lit_sources(session_n: int, fs_n: int, git_n: int) -> list[str]:
+    """Which signals lit a node — honest per-signal presence, not a summed total.
+
+    Session edges, filesystem touches and git commits are incommensurable units;
+    the portfolio answers *whether a node lit up and from which signal*, so we
+    report the set of lit sources rather than fold them into one meaningless int.
+    """
+    lit = []
+    if session_n:
+        lit.append("session")
+    if fs_n:
+        lit.append("filesystem")
+    if git_n:
+        lit.append("git")
+    return lit
+
+
+def _portfolio_row(r: Any) -> dict[str, Any]:
+    """Shape one aggregated portfolio row (shared by the store and MCP reads)."""
+    session_n, fs_n, git_n = r[5] or 0, r[6] or 0, r[7] or 0
+    return {
+        "workspace_key": r[0], "kind": r[1], "remote_url": r[2],
+        "root_path": r[3], "dir_path": r[4],
+        "session_touches": session_n, "fs_touches": fs_n, "git_touches": git_n,
+        "sources": _lit_sources(session_n, fs_n, git_n),
+        "active_days": r[8], "last_activity": r[9],
+    }
 
 
 class WorkspaceStore:
@@ -298,6 +354,164 @@ class WorkspaceStore:
             for r in rows
         ]
 
+    # --- Portfolio rollup (issue #22 — Phase C, signal-agnostic projection) ---
+
+    def build_rollup(self, github_db_path: str | Path | None = None) -> dict[str, int]:
+        """Materialize the machine-wide portfolio rollup, signal-agnostic.
+
+        Folds three independent signals per ``(workspace, day)`` — sessions
+        (``path_attributions``), the filesystem (``path_touches``), and git
+        (``github.db`` commits) — into ``workspace_rollup``. The two workspace.db
+        tables have *different shapes* and different timestamp columns; git lives
+        in a separate DB entirely and is resolved in here (read-only) so the read
+        surface stays a single-table query.
+
+        Day grouping avoids the ISO/epoch trap: ``path_touches.last_seen`` and
+        ``path_attributions.first_seen`` are ISO-8601 TEXT (``substr(col,1,10)``
+        yields the date and lexicographically orders correctly), while
+        ``path_touches.mtime`` is a REAL epoch — never mixed. We group on the ISO
+        columns, NOT ``datetime(col,'unixepoch')`` (which on an ISO string
+        returns empty). ``last_seen`` (not ``first_seen``) is used for fs so a
+        re-touched file re-dates to its latest activity, not its discovery day.
+
+        Keyed ``INSERT OR REPLACE`` per ``(workspace_id, day)`` — NEVER a
+        wipe-and-rebuild: ``path_touches`` keeps only the latest row per path, so
+        this rollup is the only durable per-day fs record and a DELETE would
+        erase history it alone holds (see the ``workspace_rollup`` schema note).
+
+        Returns build stats, including ``multi_source_nodes`` (workspaces lit by
+        ≥2 distinct signals — the signal-agnostic UNION is only meaningful if
+        this is non-zero) and how many git repos matched an existing workspace
+        vs. minted a new one.
+        """
+        github_db_path = github_db_path or (self.db_path.parent / "github.db")
+        now = _now()
+
+        # (workspace_id, day) -> {"session": n, "fs": n, "git": n, "last": iso}
+        agg: dict[tuple[int, str], dict[str, Any]] = {}
+
+        def _bump(wid: int, day: str, source: str, n: int, last: str | None) -> None:
+            if not day:
+                return
+            cell = agg.setdefault(
+                (wid, day),
+                {"session": 0, "fs": 0, "git": 0, "last": ""},
+            )
+            cell[source] += n
+            if last and last > cell["last"]:
+                cell["last"] = last
+
+        git_repos_matched = 0
+        git_repos_new = 0
+
+        with self._lock:
+            conn = self._conn
+
+            # 1. Session signal — one edge per (session, provider, file).
+            for wid, day, n, last in conn.execute(
+                """SELECT workspace_id, substr(first_seen, 1, 10) AS day,
+                          COUNT(*) AS n, MAX(first_seen) AS last
+                   FROM path_attributions GROUP BY workspace_id, day"""
+            ).fetchall():
+                _bump(wid, day, "session", n, last)
+
+            # 2. Filesystem signal — group on the ISO last_seen (not mtime epoch).
+            for wid, day, n, last in conn.execute(
+                """SELECT workspace_id, substr(last_seen, 1, 10) AS day,
+                          COUNT(*) AS n, MAX(last_seen) AS last
+                   FROM path_touches GROUP BY workspace_id, day"""
+            ).fetchall():
+                _bump(wid, day, "fs", n, last)
+
+            # 3. Git signal — resolve each repo root to a workspace via the SAME
+            #    ladder (resolve_dir walks up to the repo's .git, so a repo root
+            #    and a deep session/fs path on that repo collide on one key →
+            #    one node, three signals). github.db is opened read-only; absent
+            #    or unreadable → git simply contributes nothing.
+            for repo_path, day, n, last in self._read_git_commits(github_db_path):
+                ident = resolve_dir(repo_path)
+                existed = conn.execute(
+                    "SELECT 1 FROM workspaces WHERE workspace_key = ?", (ident.key,)
+                ).fetchone()
+                wid = self._upsert_workspace_locked(ident, now)
+                if day is None:  # repo-seen marker only (no commits) — count match
+                    if existed:
+                        git_repos_matched += 1
+                    else:
+                        git_repos_new += 1
+                    continue
+                _bump(wid, day, "git", n, last)
+
+            for (wid, day), cell in agg.items():
+                conn.execute(
+                    """INSERT OR REPLACE INTO workspace_rollup
+                           (workspace_id, day, session_touches, fs_touches,
+                            git_touches, last_activity, built_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (wid, day, cell["session"], cell["fs"], cell["git"],
+                     cell["last"] or None, now),
+                )
+            conn.commit()
+
+            multi_source_nodes = conn.execute(
+                """SELECT COUNT(*) FROM (
+                       SELECT workspace_id FROM workspace_rollup
+                       GROUP BY workspace_id
+                       HAVING (SUM(session_touches) > 0)
+                            + (SUM(fs_touches) > 0)
+                            + (SUM(git_touches) > 0) >= 2
+                   )"""
+            ).fetchone()[0]
+            rows = conn.execute("SELECT COUNT(*) FROM workspace_rollup").fetchone()[0]
+            nodes = conn.execute(
+                "SELECT COUNT(DISTINCT workspace_id) FROM workspace_rollup"
+            ).fetchone()[0]
+
+        return {
+            "rows": rows,
+            "workspaces": nodes,
+            "multi_source_nodes": multi_source_nodes,
+            "git_repos_matched": git_repos_matched,
+            "git_repos_new": git_repos_new,
+        }
+
+    @staticmethod
+    def _read_git_commits(
+        github_db_path: str | Path,
+    ) -> list[tuple[str, str | None, int, str | None]]:
+        """Read git commit day-counts per repo from ``github.db`` (read-only).
+
+        Yields ``(repo_path, day, count, last_ts)`` rows plus, for every repo, a
+        sentinel ``(repo_path, None, 0, None)`` so the caller can tell repos it
+        matched to a workspace apart from ones it minted (build stats). Returns
+        ``[]`` if github.db is absent or has no git tables — git is optional.
+        """
+        if not os.path.exists(str(github_db_path)):
+            return []
+        out: list[tuple[str, str | None, int, str | None]] = []
+        try:
+            src = sqlite3.connect(f"file:{github_db_path}?mode=ro", uri=True, timeout=5)
+        except sqlite3.OperationalError:
+            return []
+        try:
+            repos = src.execute("SELECT id, path FROM repos").fetchall()
+            for repo_id, repo_path in repos:
+                if not repo_path:
+                    continue
+                out.append((repo_path, None, 0, None))  # repo-seen sentinel
+                for day, n, last in src.execute(
+                    """SELECT substr(timestamp, 1, 10) AS day, COUNT(*) AS n,
+                              MAX(timestamp) AS last
+                       FROM git_commits WHERE repo_id = ? GROUP BY day""",
+                    (repo_id,),
+                ).fetchall():
+                    out.append((repo_path, day, n, last))
+        except sqlite3.OperationalError:
+            return []
+        finally:
+            src.close()
+        return out
+
     # --- Backfill (populate from already-persisted events, read-only) ---
 
     def backfill_from_events(self, events_db_path: str | Path) -> dict[str, int]:
@@ -422,5 +636,63 @@ class WorkspaceStore:
             ).fetchall()
         return [
             {"session_id": r[0], "provider": r[1], "files": r[2]}
+            for r in rows
+        ]
+
+    def get_portfolio(self, since: str | None = None) -> list[dict[str, Any]]:
+        """The machine-wide portfolio: hot workspaces from the rollup.
+
+        One row per workspace, aggregating every day it lit up, from any signal.
+        ``since`` is compared as a plain string against the ISO ``day`` (NOT via
+        ``date()`` — that would reintroduce the ISO/epoch hazard at read time).
+        """
+        where = ""
+        params: list[Any] = []
+        if since:
+            where = "WHERE r.day >= ?"
+            params.append(since[:10])
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT w.workspace_key, w.kind, w.remote_url, w.root_path,
+                           w.dir_path,
+                           SUM(r.session_touches) AS session_touches,
+                           SUM(r.fs_touches) AS fs_touches,
+                           SUM(r.git_touches) AS git_touches,
+                           COUNT(*) AS active_days,
+                           MAX(r.last_activity) AS last_activity
+                    FROM workspace_rollup r
+                    JOIN workspaces w ON w.id = r.workspace_id
+                    {where}
+                    GROUP BY w.id
+                    ORDER BY last_activity DESC""",
+                params,
+            ).fetchall()
+        return [_portfolio_row(r) for r in rows]
+
+    def get_workspace_activity(
+        self, workspace_key: str, since: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Per-day activity for one workspace from the rollup, newest day first."""
+        where = "WHERE w.workspace_key = ?"
+        params: list[Any] = [workspace_key]
+        if since:
+            where += " AND r.day >= ?"
+            params.append(since[:10])
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT r.day, r.session_touches, r.fs_touches, r.git_touches,
+                           r.last_activity
+                    FROM workspace_rollup r
+                    JOIN workspaces w ON w.id = r.workspace_id
+                    {where}
+                    ORDER BY r.day DESC""",
+                params,
+            ).fetchall()
+        return [
+            {
+                "day": r[0], "session_touches": r[1], "fs_touches": r[2],
+                "git_touches": r[3], "sources": _lit_sources(r[1], r[2], r[3]),
+                "last_activity": r[4],
+            }
             for r in rows
         ]

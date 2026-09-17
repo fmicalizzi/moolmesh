@@ -628,6 +628,109 @@ def _get_workspace_touches(db_path: str, workspace_key: str) -> list[dict[str, A
     return result
 
 
+def _lit_sources(session_n: int, fs_n: int, git_n: int) -> list[str]:
+    """Signals that lit a node (session / filesystem / git). Honest presence,
+    not a summed total — the three counts are incommensurable units."""
+    lit = []
+    if session_n:
+        lit.append("session")
+    if fs_n:
+        lit.append("filesystem")
+    if git_n:
+        lit.append("git")
+    return lit
+
+
+def _get_portfolio(
+    db_path: str, since: str | None = None, limit: int = 100
+) -> list[dict[str, Any]]:
+    """Machine-wide portfolio: the hot workspaces from the materialized rollup.
+
+    Signal-agnostic — a node aggregates session, filesystem and git activity.
+    Reads only ``workspace_rollup`` (git was folded in at build time), so this
+    stays a single-table query. ``since`` filters by plain string compare on the
+    ISO ``day`` (never ``date()`` — that reintroduces the ISO/epoch hazard).
+    Returns ``[]`` when workspace.db or the rollup is absent (never built).
+    Masked when ``hide_project_names`` is set.
+    """
+    limit = min(max(limit, 1), 500)
+    conn = _connect_optional(db_path)
+    if conn is None:
+        return []
+    where = ""
+    params: list = []
+    if since:
+        where = "WHERE r.day >= ?"
+        params.append(since[:10])
+    try:
+        rows = conn.execute(f"""
+            SELECT w.workspace_key, w.kind, w.remote_url, w.root_path, w.dir_path,
+                   SUM(r.session_touches) AS session_touches,
+                   SUM(r.fs_touches) AS fs_touches,
+                   SUM(r.git_touches) AS git_touches,
+                   COUNT(*) AS active_days,
+                   MAX(r.last_activity) AS last_activity
+            FROM workspace_rollup r
+            JOIN workspaces w ON w.id = r.workspace_id
+            {where}
+            GROUP BY w.id
+            ORDER BY last_activity DESC
+            LIMIT ?
+        """, params + [limit]).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["sources"] = _lit_sources(
+            d["session_touches"] or 0, d["fs_touches"] or 0, d["git_touches"] or 0
+        )
+        out.append(d)
+    return _mask_workspace_rows(out, _hide_project_names())
+
+
+def _get_workspace_activity(
+    db_path: str, workspace_key: str, since: str | None = None
+) -> list[dict[str, Any]]:
+    """Per-day activity for one workspace from the rollup, newest day first.
+
+    Signal-agnostic per-day breakdown (session / filesystem / git). Returns
+    ``[]`` when workspace.db or the rollup is absent. The ``workspace_key`` is
+    the (unmasked) join handle; the per-day rows carry no name fields to mask.
+    """
+    conn = _connect_optional(db_path)
+    if conn is None:
+        return []
+    where = "WHERE w.workspace_key = ?"
+    params: list = [workspace_key]
+    if since:
+        where += " AND r.day >= ?"
+        params.append(since[:10])
+    try:
+        rows = conn.execute(f"""
+            SELECT r.day, r.session_touches, r.fs_touches, r.git_touches,
+                   r.last_activity
+            FROM workspace_rollup r
+            JOIN workspaces w ON w.id = r.workspace_id
+            {where}
+            ORDER BY r.day DESC
+        """, params).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["sources"] = _lit_sources(
+            d["session_touches"] or 0, d["fs_touches"] or 0, d["git_touches"] or 0
+        )
+        out.append(d)
+    return out
+
+
 # ── MCP layer (guarded — only loads when mcp SDK is available) ──────
 
 try:
@@ -878,6 +981,43 @@ if _mcp is not None:
             workspace_key: Clave del workspace (ver `list_workspaces`).
         """
         return _get_workspace_touches(WORKSPACE_DB, workspace_key)
+
+    @_mcp.tool()
+    def get_portfolio(
+        since: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Portfolio machine-wide: los workspaces calientes del rollup (issue #22).
+
+        Proyección signal-agnostic sobre el árbol de workspaces: un nodo se
+        enciende venga la actividad de una sesión, del filesystem o de git — cada
+        fila reporta `sources` (qué señales lo encendieron) y los conteos por
+        señal por separado (unidades distintas, nunca sumadas). Ordena por
+        `last_activity` (lo más recientemente tocado primero). Devuelve `[]` si
+        aún no se construyó el rollup (`mool workspace rollup`). Con
+        `hide_project_names` activo, los nombres se enmascaran.
+
+        Args:
+            since: Fecha ISO 8601 desde (compara por día). None = todo.
+            limit: Máximo de workspaces (max 500, default 100).
+        """
+        return _get_portfolio(WORKSPACE_DB, since, limit)
+
+    @_mcp.tool()
+    def get_workspace_activity(
+        workspace_key: str,
+        since: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Actividad por día de un workspace desde el rollup (issue #22).
+
+        Desglose signal-agnostic por día (session / filesystem / git) con
+        `sources` por fila. Devuelve `[]` si el rollup no existe.
+
+        Args:
+            workspace_key: Clave del workspace (ver `list_workspaces`).
+            since: Fecha ISO 8601 desde (compara por día). None = todo.
+        """
+        return _get_workspace_activity(WORKSPACE_DB, workspace_key, since)
 
 
 if __name__ == "__main__":

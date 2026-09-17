@@ -115,13 +115,22 @@ class WorkspaceWatcher:
 
     def _scan_loop(self) -> None:
         while self._running:
+            swept = 0
             for root in self._roots:
                 if not self._running:
                     break
                 try:
-                    self.scan_root(root)
+                    swept += self.scan_root(root)
                 except Exception:  # noqa: BLE001 — one bad root must not kill the loop
                     _log.warning("scan error on root %s", root.path, exc_info=True)
+            # Refresh the portfolio rollup (issue #22) only when the sweep found
+            # new touches — build_rollup re-reads github.db, so we don't fire it
+            # every idle 30s cycle (gate on real change, not the clock).
+            if swept > 0:
+                try:
+                    self._store.build_rollup()
+                except Exception:  # noqa: BLE001
+                    _log.warning("rollup build failed", exc_info=True)
             time.sleep(self.SCAN_INTERVAL)
 
     # --- one root scan (also the unit-test entry point) ---

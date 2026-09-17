@@ -916,6 +916,17 @@ def main() -> None:
     ws_touches.add_argument("workspace_key", help="Workspace key (see 'workspace list')")
     ws_touches.add_argument("--json", action="store_true", dest="json_output")
 
+    ws_sub.add_parser(
+        "rollup",
+        help="Rebuild the machine-wide portfolio rollup (session+filesystem+git) (#22)",
+    )
+
+    ws_portfolio = ws_sub.add_parser(
+        "portfolio", help="Show the hot workspaces from the portfolio rollup (#22)"
+    )
+    ws_portfolio.add_argument("--since", help="ISO date lower bound (compares by day)")
+    ws_portfolio.add_argument("--json", action="store_true", dest="json_output")
+
     # workspace root — manage marked filesystem roots (issue #21, opt-in)
     ws_root = ws_sub.add_parser(
         "root", help="Manage marked filesystem roots for the workspace watcher"
@@ -1338,10 +1349,17 @@ def cmd_workspace(args: argparse.Namespace) -> None:
             cmd_workspace_sessions(args)
         case "touches":
             cmd_workspace_touches(args)
+        case "rollup":
+            cmd_workspace_rollup(args)
+        case "portfolio":
+            cmd_workspace_portfolio(args)
         case "root":
             cmd_workspace_root(args)
         case _:
-            print("Usage: mool workspace {backfill|list|session|sessions|touches|root}")
+            print(
+                "Usage: mool workspace "
+                "{backfill|list|session|sessions|touches|rollup|portfolio|root}"
+            )
 
 
 def cmd_workspace_backfill(args: argparse.Namespace) -> None:
@@ -1356,6 +1374,9 @@ def cmd_workspace_backfill(args: argparse.Namespace) -> None:
     print(dim(f"Reading events (read-only): {EVENTS_DB_PATH}"))
     print(dim(f"Writing attributions:      {store.db_path}"))
     result = store.backfill_from_events(EVENTS_DB_PATH)
+    # Fold the freshly-attributed edges into the portfolio rollup so the
+    # dashboard/MCP portfolio view is populated straight after a backfill.
+    rollup = store.build_rollup()
     store.close()
 
     print(green(
@@ -1368,6 +1389,59 @@ def cmd_workspace_backfill(args: argparse.Namespace) -> None:
             f"  Skipped {result['skipped_non_absolute']} non-absolute file_path "
             f"rows (Bash command strings, not paths)."
         ))
+    print(dim(
+        f"  Rollup: {rollup['rows']} day-rows across {rollup['workspaces']} "
+        f"workspaces ({rollup['multi_source_nodes']} multi-signal)."
+    ))
+
+
+def cmd_workspace_rollup(args: argparse.Namespace) -> None:
+    from hub.cache.workspace_store import WorkspaceStore
+
+    store = WorkspaceStore()
+    print(dim(f"Building portfolio rollup: {store.db_path}"))
+    r = store.build_rollup()
+    store.close()
+    print(green(
+        f"Rollup built: {r['rows']} day-rows across {r['workspaces']} workspaces."
+    ))
+    print(dim(
+        f"  {r['multi_source_nodes']} workspaces lit by ≥2 signals; "
+        f"git repos: {r['git_repos_matched']} matched, {r['git_repos_new']} new."
+    ))
+
+
+def cmd_workspace_portfolio(args: argparse.Namespace) -> None:
+    from hub.cache.workspace_store import WorkspaceStore
+
+    store = WorkspaceStore()
+    rows = store.get_portfolio(getattr(args, "since", None))
+    store.close()
+
+    if getattr(args, "json_output", False):
+        import json as _json
+        print(_json.dumps(rows, default=str))
+        return
+
+    if not rows:
+        print(yellow("Portfolio empty. Run: mool workspace rollup (after backfill)."))
+        return
+
+    from hub.config import load_config, masked_label
+    hide = load_config().hide_project_names
+
+    print(f"\n  {bold('Portfolio')} ({len(rows)} workspaces):")
+    print(f"  {'─' * 70}")
+    for r in rows:
+        label = r["remote_url"] or r["root_path"] or r["dir_path"] or r["workspace_key"]
+        label = masked_label(label, hide)
+        srcs = "+".join(r["sources"]) or "—"
+        meta = (
+            f"[{srcs}] {r['session_touches']}s/{r['fs_touches']}f/"
+            f"{r['git_touches']}g, {r['active_days']}d"
+        )
+        print(f"  {label}")
+        print(dim(f"    {meta}  last: {r['last_activity'] or '—'}"))
 
 
 def cmd_workspace_list(args: argparse.Namespace) -> None:
