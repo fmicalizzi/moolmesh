@@ -202,6 +202,66 @@ class TestRemoveRepo:
         assert found is False
 
 
+class TestWorkspaceRoots:
+    """Workspace filesystem roots + hide_project_names (issue #21)."""
+
+    def test_roots_and_hide_roundtrip(self, temp_config_path):
+        from hub.config import (
+            HubConfig, WorkspaceRoot, load_config, save_config,
+        )
+        config = HubConfig(
+            hide_project_names=True,
+            workspace_roots=[
+                WorkspaceRoot(
+                    path="/data/materials", max_depth=3,
+                    excludes=["scratch", "tmp"], added_at="2026-09-17T00:00:00",
+                ),
+                WorkspaceRoot(path="/", max_depth=2),
+            ],
+            repos=[RepoConfig(
+                path="/r", remote_url="github.com/o/r", owner="o", repo="r",
+                added_at="2026-09-17T00:00:00",
+            )],
+        )
+        save_config(config)
+        loaded = load_config()
+        assert loaded.hide_project_names is True
+        assert len(loaded.workspace_roots) == 2
+        assert loaded.workspace_roots[0].path == "/data/materials"
+        assert loaded.workspace_roots[0].max_depth == 3
+        assert loaded.workspace_roots[0].excludes == ["scratch", "tmp"]
+        assert loaded.workspace_roots[1].path == "/"
+        # Array-of-tables must not have swallowed the scalar flag or the repos.
+        assert loaded.repos[0].path == "/r"
+
+    def test_add_remove_list_roots_idempotent(self, temp_config_path):
+        from hub.config import (
+            add_workspace_root, remove_workspace_root, list_workspace_roots,
+        )
+        add_workspace_root("/data/a", max_depth=4, excludes=["x"])
+        add_workspace_root("/data/a", max_depth=8)  # same path → update, no dup
+        roots = list_workspace_roots()
+        assert len(roots) == 1
+        assert roots[0].max_depth == 8
+        assert remove_workspace_root("/data/a") is True
+        assert list_workspace_roots() == []
+        assert remove_workspace_root("/data/a") is False
+
+    def test_default_empty_opt_in(self, temp_config_path):
+        from hub.config import load_config
+        config = load_config()
+        assert config.workspace_roots == []
+        assert config.hide_project_names is False
+
+    def test_masked_label_stable_and_key_preserved(self):
+        from hub.config import masked_label
+        assert masked_label("github.com/o/r", False) == "github.com/o/r"
+        m1 = masked_label("github.com/o/r", True)
+        m2 = masked_label("github.com/o/r", True)
+        assert m1 == m2 and m1.startswith("hidden:")
+        assert "github.com" not in m1
+
+
 class TestGitHubHandle:
     """Tests for github_handle single source of truth."""
 

@@ -235,6 +235,18 @@ class DashboardServer:
             from hub.digests.engine import DigestEngine
             self.digest_engine = DigestEngine(self.git_store, llm_client)
 
+        # WorkspaceWatcher — filesystem path-touches (issue #21, strictly opt-in).
+        # Writes to workspace.db only; never imports EventStore / the SSE hot path.
+        self.workspace_store: Any | None = None
+        self.workspace_watcher: Any | None = None
+        if config.workspace_roots:
+            from hub.cache.workspace_store import WorkspaceStore
+            from hub.watchers.workspace_watcher import WorkspaceWatcher
+            self.workspace_store = WorkspaceStore()
+            self.workspace_watcher = WorkspaceWatcher(
+                self.workspace_store, config.workspace_roots
+            )
+
         # Load persisted events into tracker for stats
         stored = self.event_store.load_recent(500)
         if stored:
@@ -308,6 +320,10 @@ class DashboardServer:
         if self.github_harvester:
             self.github_harvester.start()
             print("  GitHubHarvester: polling GitHub API (token ✓)")
+        # Start WorkspaceWatcher if roots are marked (opt-in, issue #21)
+        if self.workspace_watcher:
+            self.workspace_watcher.start()
+            print(f"  WorkspaceWatcher: observing {self.workspace_watcher.watched_count} marked root(s)")
 
         # Start SSE broadcaster (reads from sse_buffer, pushes to clients)
         threading.Thread(target=self._broadcast_sse, daemon=True).start()

@@ -56,6 +56,26 @@ class RepoConfig:
     github_enabled: bool = True
 
 
+# Default max recursion depth for a marked workspace root (relative to the root).
+WORKSPACE_ROOT_DEFAULT_MAX_DEPTH = 6
+
+
+@dataclass
+class WorkspaceRoot:
+    """A marked filesystem root the workspace watcher observes (issue #21).
+
+    Opt-in by design: with no roots configured the watcher observes nothing.
+    ``max_depth`` bounds the recursive scan (relative to ``path``); ``excludes``
+    are *extra* directory names to prune, on top of the built-in defaults in
+    the watcher. Root ``/`` is valid (autonomous-agent server) but never a
+    default.
+    """
+    path: str                       # ruta absoluta a la raíz marcada
+    max_depth: int = WORKSPACE_ROOT_DEFAULT_MAX_DEPTH
+    excludes: list[str] = field(default_factory=list)
+    added_at: str = ""              # ISO timestamp
+
+
 @dataclass
 class HubConfig:
     repos: list[RepoConfig] = field(default_factory=list)
@@ -70,6 +90,9 @@ class HubConfig:
     ollama_api_url: str = "https://ollama.com/api"
     ollama_model: str = "qwen3.5:35b-cloud"
     ollama_api_key: str = ""
+    # --- Workspace filesystem watcher (issue #21, opt-in) ---
+    workspace_roots: list[WorkspaceRoot] = field(default_factory=list)
+    hide_project_names: bool = False  # enmascara nombres de carpeta en la superficie visible
 
 
 def _serialize_toml(config: HubConfig) -> str:
@@ -97,6 +120,12 @@ def _serialize_toml(config: HubConfig) -> str:
     lines.append(f'github_handle = "{_toml_escape(config.github_handle)}"')
     lines.append("")
 
+    # Sección [workspace] (privacidad — escalar; DEBE ir antes de cualquier
+    # array-de-tablas o TOML anidaría el flag bajo la última tabla).
+    lines.append("[workspace]")
+    lines.append(f'hide_project_names = {str(config.hide_project_names).lower()}')
+    lines.append("")
+
     # Sección [[repos]] - array de tablas
     for repo in config.repos:
         lines.append("[[repos]]")
@@ -107,7 +136,17 @@ def _serialize_toml(config: HubConfig) -> str:
         lines.append(f'added_at = "{_toml_escape(repo.added_at)}"')
         lines.append(f'github_enabled = {str(repo.github_enabled).lower()}')
         lines.append("")
-    
+
+    # Sección [[workspace_roots]] - array de tablas (issue #21, opt-in)
+    for root in config.workspace_roots:
+        excludes = ", ".join(f'"{_toml_escape(e)}"' for e in root.excludes)
+        lines.append("[[workspace_roots]]")
+        lines.append(f'path = "{_toml_escape(root.path)}"')
+        lines.append(f'max_depth = {int(root.max_depth)}')
+        lines.append(f'excludes = [{excludes}]')
+        lines.append(f'added_at = "{_toml_escape(root.added_at)}"')
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -164,7 +203,24 @@ def load_config() -> HubConfig:
                 github_enabled=repo_data.get("github_enabled", True),
             )
             config.repos.append(repo)
-    
+
+    # Parse [workspace] section (privacidad, issue #21)
+    if "workspace" in data:
+        ws = data["workspace"]
+        config.hide_project_names = bool(ws.get("hide_project_names", False))
+
+    # Parse [[workspace_roots]] array (issue #21, opt-in)
+    if "workspace_roots" in data:
+        for root_data in data["workspace_roots"]:
+            root = WorkspaceRoot(
+                path=root_data.get("path", ""),
+                max_depth=int(root_data.get("max_depth", WORKSPACE_ROOT_DEFAULT_MAX_DEPTH)),
+                excludes=list(root_data.get("excludes", [])),
+                added_at=root_data.get("added_at", ""),
+            )
+            if root.path:
+                config.workspace_roots.append(root)
+
     return config
 
 
@@ -273,3 +329,72 @@ def list_repos() -> list[RepoConfig]:
     """Lista repos registrados."""
     config = load_config()
     return config.repos
+
+
+# --- Workspace roots (issue #21, filesystem watcher opt-in) ---
+
+def add_workspace_root(
+    path: str,
+    max_depth: int = WORKSPACE_ROOT_DEFAULT_MAX_DEPTH,
+    excludes: list[str] | None = None,
+) -> WorkspaceRoot:
+    """Marca una raíz para el filesystem watcher y la persiste en config.
+
+    Idempotente: si el path ya está marcado, actualiza max_depth/excludes en
+    lugar de duplicar. No requiere que sea un repo git (ése es justamente el
+    caso de uso: carpetas sin git ni sesiones). Root ``/`` es válido.
+    """
+    config = load_config()
+    normalized = _normalize_path(path)
+    root = WorkspaceRoot(
+        path=normalized,
+        max_depth=int(max_depth),
+        excludes=list(excludes or []),
+        added_at=datetime.now(timezone.utc).isoformat(),
+    )
+    # Reemplazar si ya existe (idempotente), preservando added_at original.
+    existing_at = None
+    for r in config.workspace_roots:
+        if _normalize_path(r.path) == normalized:
+            existing_at = r.added_at
+    if existing_at:
+        root.added_at = existing_at
+    config.workspace_roots = [
+        r for r in config.workspace_roots if _normalize_path(r.path) != normalized
+    ]
+    config.workspace_roots.append(root)
+    save_config(config)
+    return root
+
+
+def remove_workspace_root(path: str) -> bool:
+    """Desmarca una raíz. Retorna True si existía."""
+    config = load_config()
+    normalized = _normalize_path(path)
+    original = len(config.workspace_roots)
+    config.workspace_roots = [
+        r for r in config.workspace_roots if _normalize_path(r.path) != normalized
+    ]
+    if len(config.workspace_roots) < original:
+        save_config(config)
+        return True
+    return False
+
+
+def list_workspace_roots() -> list[WorkspaceRoot]:
+    """Lista raíces marcadas para el filesystem watcher."""
+    return load_config().workspace_roots
+
+
+def masked_label(label: str, hide: bool) -> str:
+    """Enmascara un label visible cuando ``hide_project_names`` está activo.
+
+    Pura y determinística: hashea el *display label* (remote/root/dir), NUNCA
+    el ``workspace_key`` — la key es el handle de join y debe seguir estable
+    para ``get_workspace_sessions``/``get_workspace_touches``.
+    """
+    if not hide or not label:
+        return label
+    import hashlib
+    digest = hashlib.sha256(label.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    return f"hidden:{digest}"

@@ -59,6 +59,32 @@ CREATE TABLE IF NOT EXISTS path_attributions (
 );
 CREATE INDEX IF NOT EXISTS idx_attr_workspace ON path_attributions(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_attr_session ON path_attributions(session_id, provider);
+
+-- Filesystem path-touches (issue #21 — Workspace axis, Phase B).
+-- A file under a marked root changed on disk, attributed to its owning
+-- workspace via the same resolver. Has NO session — kept separate from
+-- path_attributions (whose session_id is NOT NULL) so neither read query
+-- is polluted by the other's rows. Additive: created via IF NOT EXISTS on
+-- every init, so it lands on existing v1.10.0 databases without a migration.
+CREATE TABLE IF NOT EXISTS path_touches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    path TEXT NOT NULL UNIQUE,             -- one row per path; conflict target
+    mtime REAL NOT NULL,                    -- last observed st_mtime
+    source TEXT NOT NULL,                   -- "filesystem"
+    resolved_via TEXT NOT NULL,             -- ladder rung used at resolution time
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_touch_workspace ON path_touches(workspace_id);
+
+-- Per-root mtime cursor: the high-water mark advanced each scan so already
+-- observed files are not re-emitted (incremental). See WorkspaceStore.set_cursor.
+CREATE TABLE IF NOT EXISTS fs_cursors (
+    root_path TEXT PRIMARY KEY,
+    last_mtime REAL NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -191,6 +217,87 @@ class WorkspaceStore:
             self._conn.commit()
             return wid
 
+    # --- Filesystem touches (issue #21 — Phase B watcher) ---
+
+    def get_cursor(self, root_path: str) -> float:
+        """Return the mtime high-water mark for a root (0.0 if never scanned).
+
+        ``0.0`` makes the first cycle emit every file under the root — the
+        "first cycle IS the backfill" convention from ``watchers/base.py``.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_mtime FROM fs_cursors WHERE root_path = ?", (root_path,)
+            ).fetchone()
+        return float(row[0]) if row else 0.0
+
+    def set_cursor(self, root_path: str, last_mtime: float) -> None:
+        """Persist the mtime cursor for a root.
+
+        The watcher advances this to ``scan_start - 1s`` (NOT ``max(mtime seen)``):
+        a file written mid-scan can have an mtime below the newest file already
+        visited, and a ``max``-based cursor would jump past it and drop the touch
+        forever. Anchoring to the scan start re-emits a few paths on overlap
+        (harmless — the touch upsert is idempotent) rather than losing any.
+        """
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO fs_cursors (root_path, last_mtime, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(root_path) DO UPDATE SET
+                       last_mtime = excluded.last_mtime,
+                       updated_at = excluded.updated_at""",
+                (root_path, float(last_mtime), _now()),
+            )
+            self._conn.commit()
+
+    def record_touch(
+        self,
+        path: str,
+        mtime: float,
+        ident: WorkspaceIdentity,
+        source: str = "filesystem",
+    ) -> int:
+        """Resolve+persist one filesystem path-touch. Returns the workspace id.
+
+        Idempotent and self-healing on ``path``: if a directory later gains a
+        ``.git`` the resolver returns a different workspace and the row's
+        ``workspace_id`` is updated in place (one path → one workspace).
+        """
+        now = _now()
+        with self._lock:
+            wid = self._upsert_workspace_locked(ident, now)
+            self._conn.execute(
+                """INSERT INTO path_touches
+                       (workspace_id, path, mtime, source, resolved_via, first_seen, last_seen)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(path) DO UPDATE SET
+                       workspace_id = excluded.workspace_id,
+                       mtime = excluded.mtime,
+                       resolved_via = excluded.resolved_via,
+                       last_seen = excluded.last_seen""",
+                (wid, path, float(mtime), source, ident.kind, now, now),
+            )
+            self._conn.commit()
+            return wid
+
+    def get_workspace_touches(self, workspace_key: str) -> list[dict[str, Any]]:
+        """Filesystem touches attributed to a workspace, newest mtime first."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT t.path, t.mtime, t.source, t.resolved_via, t.last_seen
+                   FROM path_touches t
+                   JOIN workspaces w ON w.id = t.workspace_id
+                   WHERE w.workspace_key = ?
+                   ORDER BY t.mtime DESC""",
+                (workspace_key,),
+            ).fetchall()
+        return [
+            {"path": r[0], "mtime": r[1], "source": r[2],
+             "resolved_via": r[3], "last_seen": r[4]}
+            for r in rows
+        ]
+
     # --- Backfill (populate from already-persisted events, read-only) ---
 
     def backfill_from_events(self, events_db_path: str | Path) -> dict[str, int]:
@@ -256,17 +363,19 @@ class WorkspaceStore:
             rows = self._conn.execute(
                 """SELECT w.workspace_key, w.kind, w.remote_url, w.root_path, w.dir_path,
                           w.first_seen, COUNT(a.id) AS attributions,
-                          COUNT(DISTINCT a.session_id || '/' || a.provider) AS sessions
+                          COUNT(DISTINCT a.session_id || '/' || a.provider) AS sessions,
+                          (SELECT COUNT(*) FROM path_touches t
+                           WHERE t.workspace_id = w.id) AS touches
                    FROM workspaces w
                    LEFT JOIN path_attributions a ON a.workspace_id = w.id
                    GROUP BY w.id
-                   ORDER BY sessions DESC, attributions DESC"""
+                   ORDER BY sessions DESC, attributions DESC, touches DESC"""
             ).fetchall()
         return [
             {
                 "workspace_key": r[0], "kind": r[1], "remote_url": r[2],
                 "root_path": r[3], "dir_path": r[4], "first_seen": r[5],
-                "attributions": r[6], "sessions": r[7],
+                "attributions": r[6], "sessions": r[7], "touches": r[8],
             }
             for r in rows
         ]

@@ -482,6 +482,42 @@ def _get_branch_sessions(
 
 # ── Workspace attribution (issue #20 — workspace.db, read-only) ─────
 
+def _hide_project_names() -> bool:
+    """Read the ``hide_project_names`` privacy flag (lazy — mcp is config-free).
+
+    ``mcp_server`` is otherwise a thin read-only SQL layer that never imports
+    ``hub.config``; this is the one place privacy requires it. Any failure
+    (missing config, import error) defaults to *not hiding* — the flag is
+    opt-in, and a broken read must not silently expose or hide inconsistently.
+    """
+    try:
+        from hub.config import load_config
+        return load_config().hide_project_names
+    except Exception:
+        return False
+
+
+def _mask_workspace_rows(rows: list[dict[str, Any]], hide: bool) -> list[dict[str, Any]]:
+    """Mask the human display fields of workspace rows when ``hide`` is set.
+
+    Hashes remote_url/root_path/dir_path into a stable ``label`` and blanks the
+    raw names, but NEVER touches ``workspace_key`` — it is the join handle the
+    other tools resolve against.
+    """
+    from hub.config import masked_label
+    out = []
+    for r in rows:
+        label = r.get("remote_url") or r.get("root_path") or r.get("dir_path") or r.get("workspace_key", "")
+        r = dict(r)
+        r["label"] = masked_label(label, hide)
+        if hide:
+            r["remote_url"] = None
+            r["root_path"] = None
+            r["dir_path"] = None
+        out.append(r)
+    return out
+
+
 def _get_session_workspaces(
     db_path: str, session_id: str, provider: str | None = None
 ) -> list[dict[str, Any]]:
@@ -512,7 +548,7 @@ def _get_session_workspaces(
         conn.close()
         return []
     conn.close()
-    return [dict(r) for r in rows]
+    return _mask_workspace_rows([dict(r) for r in rows], _hide_project_names())
 
 
 def _get_workspace_sessions(db_path: str, workspace_key: str) -> list[dict[str, Any]]:
@@ -537,25 +573,59 @@ def _get_workspace_sessions(db_path: str, workspace_key: str) -> list[dict[str, 
 
 
 def _list_workspaces(db_path: str) -> list[dict[str, Any]]:
-    """All known workspaces with session/attribution counts. ``[]`` if absent."""
+    """All known workspaces with session/attribution/touch counts. ``[]`` if absent."""
     conn = _connect_optional(db_path)
     if conn is None:
         return []
     try:
+        # Touch count via correlated subquery, not a second LEFT JOIN, so it
+        # never multiplies rows and inflates COUNT(a.id) (issue #21).
         rows = conn.execute("""
             SELECT w.workspace_key, w.kind, w.remote_url, w.root_path, w.dir_path,
                    w.first_seen, COUNT(a.id) AS attributions,
-                   COUNT(DISTINCT a.session_id || '/' || a.provider) AS sessions
+                   COUNT(DISTINCT a.session_id || '/' || a.provider) AS sessions,
+                   (SELECT COUNT(*) FROM path_touches t
+                    WHERE t.workspace_id = w.id) AS touches
             FROM workspaces w
             LEFT JOIN path_attributions a ON a.workspace_id = w.id
             GROUP BY w.id
-            ORDER BY sessions DESC, attributions DESC
+            ORDER BY sessions DESC, attributions DESC, touches DESC
         """).fetchall()
     except sqlite3.OperationalError:
         conn.close()
         return []
     conn.close()
-    return [dict(r) for r in rows]
+    return _mask_workspace_rows([dict(r) for r in rows], _hide_project_names())
+
+
+def _get_workspace_touches(db_path: str, workspace_key: str) -> list[dict[str, Any]]:
+    """Filesystem path-touches attributed to a workspace (issue #21).
+
+    Returns ``[]`` when workspace.db or the ``path_touches`` table is absent
+    (before the first filesystem-watcher cycle). Paths are masked when
+    ``hide_project_names`` is set.
+    """
+    conn = _connect_optional(db_path)
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute("""
+            SELECT t.path, t.mtime, t.source, t.resolved_via, t.last_seen
+            FROM path_touches t
+            JOIN workspaces w ON w.id = t.workspace_id
+            WHERE w.workspace_key = ?
+            ORDER BY t.mtime DESC
+        """, (workspace_key,)).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
+    conn.close()
+    result = [dict(r) for r in rows]
+    if _hide_project_names():
+        from hub.config import masked_label
+        for r in result:
+            r["path"] = masked_label(r["path"], True)
+    return result
 
 
 # ── MCP layer (guarded — only loads when mcp SDK is available) ──────
@@ -788,10 +858,26 @@ if _mcp is not None:
 
     @_mcp.tool()
     def list_workspaces() -> list[dict[str, Any]]:
-        """Lista todos los workspaces conocidos con conteo de sesiones y archivos.
+        """Lista todos los workspaces conocidos con conteo de sesiones, archivos
+        y touches de filesystem (`touches`).
         Devuelve `[]` si aún no se corrió `mool workspace backfill`.
         """
         return _list_workspaces(WORKSPACE_DB)
+
+    @_mcp.tool()
+    def get_workspace_touches(workspace_key: str) -> list[dict[str, Any]]:
+        """Touches de filesystem atribuidos a un workspace (issue #21, Fase B).
+
+        Hace visible un proyecto aunque ningún agente ni git lo hayan tocado:
+        el filesystem watcher observa raíces marcadas (opt-in) y emite un
+        path-touch por archivo que cambió, resuelto al workspace dueño. Devuelve
+        `[]` si aún no corrió el watcher. Con `hide_project_names` activo, los
+        paths se enmascaran.
+
+        Args:
+            workspace_key: Clave del workspace (ver `list_workspaces`).
+        """
+        return _get_workspace_touches(WORKSPACE_DB, workspace_key)
 
 
 if __name__ == "__main__":

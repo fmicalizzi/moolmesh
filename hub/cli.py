@@ -910,6 +910,34 @@ def main() -> None:
     ws_sessions.add_argument("workspace_key", help="Workspace key (see 'workspace list')")
     ws_sessions.add_argument("--json", action="store_true", dest="json_output")
 
+    ws_touches = ws_sub.add_parser(
+        "touches", help="Filesystem path-touches attributed to a workspace (#21)"
+    )
+    ws_touches.add_argument("workspace_key", help="Workspace key (see 'workspace list')")
+    ws_touches.add_argument("--json", action="store_true", dest="json_output")
+
+    # workspace root — manage marked filesystem roots (issue #21, opt-in)
+    ws_root = ws_sub.add_parser(
+        "root", help="Manage marked filesystem roots for the workspace watcher"
+    )
+    ws_root_sub = ws_root.add_subparsers(dest="root_command")
+
+    ws_root_add = ws_root_sub.add_parser("add", help="Mark a folder as a workspace root")
+    ws_root_add.add_argument("path", help="Absolute path to observe (opt-in; '/' allowed)")
+    ws_root_add.add_argument(
+        "--max-depth", type=int, default=None, dest="max_depth",
+        help="Bound the recursive scan depth (default 6)",
+    )
+    ws_root_add.add_argument(
+        "--exclude", action="append", default=None, dest="excludes",
+        help="Extra directory name to prune (repeatable)",
+    )
+
+    ws_root_rm = ws_root_sub.add_parser("remove", help="Unmark a workspace root")
+    ws_root_rm.add_argument("path", help="Path to stop observing")
+
+    ws_root_sub.add_parser("list", help="List marked workspace roots")
+
     # mcp
     mcp_parser = subparsers.add_parser("mcp", help="MCP server management")
     mcp_sub = mcp_parser.add_subparsers(dest="mcp_command")
@@ -1308,8 +1336,12 @@ def cmd_workspace(args: argparse.Namespace) -> None:
             cmd_workspace_session(args)
         case "sessions":
             cmd_workspace_sessions(args)
+        case "touches":
+            cmd_workspace_touches(args)
+        case "root":
+            cmd_workspace_root(args)
         case _:
-            print("Usage: mool workspace {backfill|list|session|sessions}")
+            print("Usage: mool workspace {backfill|list|session|sessions|touches|root}")
 
 
 def cmd_workspace_backfill(args: argparse.Namespace) -> None:
@@ -1354,11 +1386,18 @@ def cmd_workspace_list(args: argparse.Namespace) -> None:
         print(yellow("No workspaces yet. Run: mool workspace backfill"))
         return
 
+    from hub.config import load_config, masked_label
+    hide = load_config().hide_project_names
+
     print(f"\n  {bold('Workspaces')} ({len(rows)}):")
     print(f"  {'─' * 70}")
     for r in rows:
         label = r["remote_url"] or r["root_path"] or r["dir_path"] or r["workspace_key"]
-        meta = f"{r['sessions']} sessions, {r['attributions']} files  ·  {r['workspace_key']}"
+        label = masked_label(label, hide)
+        meta = (
+            f"{r['sessions']} sessions, {r['attributions']} files, "
+            f"{r.get('touches', 0)} fs-touches  ·  {r['workspace_key']}"
+        )
         print(f"    [{r['kind']:<10}] {label}")
         print(f"      {dim(meta)}")
     print()
@@ -1410,6 +1449,69 @@ def cmd_workspace_sessions(args: argparse.Namespace) -> None:
     for r in rows:
         print(f"    [{r['provider']:<8}] {r['session_id'][:40]}  {dim(str(r['files']) + ' files')}")
     print()
+
+
+def cmd_workspace_touches(args: argparse.Namespace) -> None:
+    from hub.cache.workspace_store import WorkspaceStore
+    from hub.config import load_config, masked_label
+
+    store = WorkspaceStore()
+    rows = store.get_workspace_touches(args.workspace_key)
+    store.close()
+
+    if getattr(args, "json_output", False):
+        import json as _json
+        print(_json.dumps(rows, default=str))
+        return
+
+    if not rows:
+        print(yellow(f"No filesystem touches for workspace {args.workspace_key}"))
+        print(dim("  (mark a root: 'mool workspace root add <path>')"))
+        return
+
+    hide = load_config().hide_project_names
+    print(f"\n  Filesystem touches in {args.workspace_key} ({len(rows)}):")
+    print(f"  {'─' * 60}")
+    for r in rows:
+        path = masked_label(r["path"], hide)
+        print(f"    {path}  {dim('· ' + r['source'])}")
+    print()
+
+
+def cmd_workspace_root(args: argparse.Namespace) -> None:
+    from hub.config import (
+        add_workspace_root,
+        list_workspace_roots,
+        remove_workspace_root,
+        WORKSPACE_ROOT_DEFAULT_MAX_DEPTH,
+    )
+
+    match getattr(args, "root_command", None):
+        case "add":
+            depth = args.max_depth if args.max_depth is not None else WORKSPACE_ROOT_DEFAULT_MAX_DEPTH
+            root = add_workspace_root(args.path, depth, args.excludes)
+            print(green(f"Marked workspace root: {root.path}"))
+            print(dim(f"  max_depth={root.max_depth}, extra excludes={root.excludes or '[]'}"))
+            print(dim("  The watcher observes it on the next daemon start."))
+        case "remove":
+            if remove_workspace_root(args.path):
+                print(green(f"Unmarked workspace root: {args.path}"))
+            else:
+                print(yellow(f"Not a marked root: {args.path}"))
+        case "list":
+            roots = list_workspace_roots()
+            if not roots:
+                print(yellow("No workspace roots marked (opt-in — nothing observed)."))
+                print(dim("  Mark one: 'mool workspace root add <path>'"))
+                return
+            print(f"\n  {bold('Workspace roots')} ({len(roots)}):")
+            print(f"  {'─' * 60}")
+            for r in roots:
+                print(f"    {r.path}")
+                print(dim(f"      max_depth={r.max_depth}, excludes={r.excludes or '[]'}"))
+            print()
+        case _:
+            print("Usage: mool workspace root {add|remove|list}")
 
 
 def cmd_repo(args: argparse.Namespace) -> None:
