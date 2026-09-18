@@ -101,6 +101,17 @@ CREATE TABLE IF NOT EXISTS fs_cursors (
 -- reproducible from the base table — a file touched again tomorrow vanishes
 -- from today's count. This rollup is the ONLY durable per-day fs record; a
 -- DELETE + reinsert would erase history it alone holds.
+--
+-- Consequence — this is a DURABLE STORE, not a cache. build_rollup only ADDS and
+-- OVERWRITES the (workspace, day) keys it recomputes; it NEVER retracts a key it
+-- no longer produces. So if the mapping from a source timestamp to `day` ever
+-- CHANGES (e.g. #23 moved git from local-day to UTC-day, or any future portfolio
+-- reclassification/regrouping), the commits move to their new day and their OLD
+-- day rows are left behind — stale, double-counting on SUM/active_days until
+-- reconciled. Recovery is a SURGICAL reconcile of the shifted signal (zero it,
+-- prune fully-empty rows, re-run the rollup), NOT a blind full rebuild — a blind
+-- DELETE FROM would destroy the fs-per-day history that lives only here. Do not
+-- build a retraction mechanism to "fix" this; the durability is the point.
 CREATE TABLE IF NOT EXISTS workspace_rollup (
     workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     day TEXT NOT NULL,                     -- YYYY-MM-DD (substr of the ISO ts)
