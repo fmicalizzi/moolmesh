@@ -6,6 +6,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [Unreleased] — Portfolio grouping (#24, Stage 1)
+
+### Added
+- **Portfolio Stage 1 — collapse harness noise + hierarchical grouping (#24)** — the
+  `/portfolio` view identified real *projects* instead of listing 376 flat folders. On a
+  real machine ~49% of workspaces are agent-harness folders (scratchpad
+  `/private/tmp/claude-*`, session storage `~/.claude/projects/`) whose names encode a
+  real project. A new **read-layer classifier** (`hub/cache/portfolio_classifier.py`)
+  maps every workspace into the epic's 4-category taxonomy and materializes it into an
+  additive, **fully-rebuildable** `workspace_classification` table (contrast the durable
+  `workspace_rollup`):
+
+  - **A. Harness → collapse** onto the real project. Primary: the scratchpad embeds the
+    session uuid, so the real `cwd` is read from `events.db` (read-only) — no decode.
+    Fallbacks: exact match of the encoded segment against known real dirs
+    (`encode_match`), then a filesystem-validated decode. The naive `replace('-','/')`
+    decode is **lossy** (Claude encodes `/`, `_` and `-` all to `-`), so `coep-services`
+    is never split into `coep/services`.
+  - **B. Deep subdirs** and **C. materials/reports/exports** nest under their nearest real
+    ancestor (the project anchor).
+  - **D. Config dotfolders** de-prioritized (D1 nested config) or orphaned (D2 home-level
+    dotfolders + degenerate/system roots → a collapsed "sin clasificar / herramientas"
+    section).
+
+  On the owner's real DB: **376 flat workspaces → 72 project groups; 181 harness folders
+  collapsed** (125 via session `cwd`, 55 via encode-match, 1 unresolved), 27 unclassified.
+
+  - **Surface:** new `get_portfolio_grouped` MCP tool + store method (harness activity is
+    folded **at read time** — the rollup is never re-keyed), a `collapsed_harness` count
+    per project (nothing is deleted — it is grouped), `hide_project_names` masking recurses
+    into project labels and nested children.
+  - **Dashboard:** `portfolio.html` renders projects with expandable nested children and a
+    collapsible "sin clasificar" section (read-on-load; SSE untouched).
+  - **CLI:** `mool workspace classify`, and `mool workspace portfolio --grouped`;
+    classification is refreshed by `rollup`/`backfill`.
+
+  Invariants honored: zero-dep, `events.db` read-only (verified zero writes), `workspace.db`
+  additive; resolver (#20), watcher (#21), `project`, `delivery_candidate` and SSE untouched.
+  No charts (Stage 2) or client attribution (Stage 3).
+
+---
+
 ## [1.12.1] — 2026-09-18
 
 ### Fixed

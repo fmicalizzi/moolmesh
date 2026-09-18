@@ -36,6 +36,25 @@
   .sig-session_close { color:var(--cyan); } .sig-git_commit { color:var(--purple); } .sig-root_artifact { color:var(--yellow); }
   .empty { color:var(--muted); padding:24px 10px; text-align:center; }
   .disclaimer { background:var(--bg2); border:1px solid var(--border); border-left:3px solid var(--orange); border-radius:6px; padding:10px 14px; font-size:11px; color:var(--muted); margin-bottom:12px; }
+  /* --- Grouped portfolio (#24) --- */
+  .summary { font-size:11px; color:var(--muted); margin-bottom:12px; }
+  .proj { border:1px solid var(--border); border-radius:6px; margin-bottom:8px; background:var(--bg2); }
+  .proj-head { display:flex; align-items:center; gap:10px; padding:10px 14px; cursor:pointer; }
+  .proj-head:hover { background:var(--bg3); }
+  .proj-name { color:var(--accent); font-weight:600; flex:1; word-break:break-all; }
+  .proj-meta { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .chip { display:inline-block; padding:1px 7px; border-radius:10px; font-size:10px; border:1px solid var(--border); color:var(--muted); margin-left:6px; }
+  .caret { color:var(--muted); width:12px; display:inline-block; transition:transform .12s; }
+  .proj.open .caret { transform:rotate(90deg); }
+  .kids { display:none; padding:0 14px 8px 30px; }
+  .proj.open .kids { display:block; }
+  .kid { display:flex; gap:10px; padding:4px 0; border-top:1px solid var(--bg3); font-size:11px; }
+  .kid-cat { color:var(--muted); font-size:10px; min-width:64px; }
+  .kid-name { color:var(--text); flex:1; word-break:break-all; }
+  .kid-meta { color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .unclassified summary { cursor:pointer; color:var(--muted); font-size:11px; padding:8px 0; }
+  .unclassified li { list-style:none; color:var(--muted); font-size:11px; padding:2px 0; word-break:break-all; }
+  .unclassified ul { padding-left:14px; }
 </style>
 </head>
 <body>
@@ -52,16 +71,10 @@
 </header>
 
 <div class="section">
-  <div class="section-title">Workspaces calientes (signal-agnostic)</div>
-  <div class="hint">Un nodo se enciende venga la actividad de una <b>sesión</b>, del <b>filesystem</b> o de <b>git</b>. Conteos por señal, nunca sumados. Ordenado por última actividad.</div>
-  <table id="pf">
-    <thead><tr>
-      <th>Workspace</th><th>Señales</th>
-      <th class="num">sesión</th><th class="num">fs</th><th class="num">git</th>
-      <th class="num">días</th><th>Última actividad</th>
-    </tr></thead>
-    <tbody id="pf-body"><tr><td colspan="7" class="empty">Cargando…</td></tr></tbody>
-  </table>
+  <div class="section-title">Proyectos (harness colapsado, agrupado)</div>
+  <div class="hint">Las carpetas de harness (scratchpad, session-storage) se pliegan sobre su proyecto real; subdirs y materiales anidan bajo su proyecto. Nada se borra: se agrupa. Un nodo se enciende venga la actividad de una <b>sesión</b>, del <b>filesystem</b> o de <b>git</b> — conteos por señal, nunca sumados.</div>
+  <div class="summary" id="pf-summary"></div>
+  <div id="pf-body"><div class="empty">Cargando…</div></div>
 </div>
 
 <div class="section">
@@ -82,24 +95,47 @@
 function esc(s){ return String(s==null?'':s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function label(r){ return r.label || r.remote_url || r.root_path || r.dir_path || r.workspace_key || '—'; }
 
+function badges(sources){ return (sources||[]).map(s => `<span class="badge b-${esc(s)}">${esc(s)}</span>`).join('') || ''; }
+function metaStr(r){ return `${r.session_touches||0}s / ${r.fs_touches||0}f / ${r.git_touches||0}g · ${r.active_days||0}d · ${esc((r.last_activity||'—').replace('T',' ').slice(0,16))}`; }
+
 async function loadPortfolio(){
   const body = document.getElementById('pf-body');
+  const sum = document.getElementById('pf-summary');
   try {
-    const rows = await (await fetch('/api/workspace/portfolio')).json();
-    if (!rows.length){ body.innerHTML = '<tr><td colspan="7" class="empty">Sin datos. Corré: <code>mool workspace rollup</code></td></tr>'; return; }
-    body.innerHTML = rows.map(r => {
-      const badges = (r.sources||[]).map(s => `<span class="badge b-${esc(s)}">${esc(s)}</span>`).join('') || '<span class="muted">—</span>';
-      return `<tr>
-        <td class="ws">${esc(label(r))}</td>
-        <td>${badges}</td>
-        <td class="num">${r.session_touches||0}</td>
-        <td class="num">${r.fs_touches||0}</td>
-        <td class="num">${r.git_touches||0}</td>
-        <td class="num">${r.active_days||0}</td>
-        <td class="muted">${esc((r.last_activity||'').replace('T',' ').slice(0,19))}</td>
-      </tr>`;
+    const data = await (await fetch('/api/workspace/portfolio/grouped')).json();
+    const projects = data.projects||[];
+    if (!projects.length && !(data.unclassified||[]).length){
+      body.innerHTML = '<div class="empty">Sin datos. Corré: <code>mool workspace rollup</code></div>'; return;
+    }
+    const s = data.summary||{};
+    sum.textContent = `${s.projects||0} proyectos · ${s.collapsed_harness||0} carpetas de harness colapsadas · ${s.children||0} anidadas · ${s.unclassified||0} sin clasificar`;
+
+    let html = projects.map(p => {
+      const kids = (p.children||[]).map(c => `
+        <div class="kid">
+          <span class="kid-cat">${esc(c.category)}/${esc(c.subtype)}</span>
+          <span class="kid-name">${esc(label(c))}</span>
+          <span class="kid-meta">${metaStr(c)}</span>
+        </div>`).join('');
+      const harnessChip = p.collapsed_harness ? `<span class="chip">+${p.collapsed_harness} harness</span>` : '';
+      const kidsChip = (p.children||[]).length ? `<span class="chip">${p.children.length} anidadas</span>` : '';
+      return `<div class="proj">
+        <div class="proj-head" onclick="this.parentNode.classList.toggle('open')">
+          <span class="caret">▶</span>
+          <span class="proj-name">${esc(p.project_label || p.project_key)}${harnessChip}${kidsChip}</span>
+          <span class="proj-meta">${badges(p.sources)} ${metaStr(p)}</span>
+        </div>
+        <div class="kids">${kids || '<div class="kid"><span class="muted">Sin subdirectorios anidados.</span></div>'}</div>
+      </div>`;
     }).join('');
-  } catch(e){ body.innerHTML = '<tr><td colspan="7" class="empty">Error al cargar.</td></tr>'; }
+
+    const orphans = data.unclassified||[];
+    if (orphans.length){
+      html += `<details class="unclassified"><summary>Sin clasificar / herramientas (${orphans.length})</summary><ul>` +
+        orphans.map(o => `<li>[${esc(o.subtype)}] ${esc(label(o))}</li>`).join('') + `</ul></details>`;
+    }
+    body.innerHTML = html;
+  } catch(e){ body.innerHTML = '<div class="empty">Error al cargar.</div>'; }
 }
 
 async function loadDelivery(){

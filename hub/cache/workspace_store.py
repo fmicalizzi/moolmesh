@@ -147,6 +147,37 @@ CREATE TABLE IF NOT EXISTS delivery_candidates (
     detected_at TEXT NOT NULL,
     PRIMARY KEY (workspace_id, signal)
 );
+
+-- Portfolio classification (issue #24 — Stage 1). Maps each workspace into the
+-- 4-category taxonomy (collapse harness A → project, nest subdirs/materials
+-- B/C, de-prioritize config D1, orphan degenerate/home-config D2) so the
+-- portfolio read can render real projects instead of 376 flat folders.
+--
+-- Unlike workspace_rollup (a DURABLE store that must never be blindly rebuilt),
+-- this table is DERIVED and fully REBUILDABLE: it is a projection over
+-- workspaces + events.db (session cwds) + the filesystem, holding no history of
+-- its own. classify_workspaces therefore DELETEs and re-inserts every row on
+-- each pass — a workspace that stops being harness (or whose project moves)
+-- MUST lose its stale row, which a keyed upsert could not guarantee. Additive
+-- via IF NOT EXISTS; lands on existing v1.12.x DBs without a migration.
+--
+-- project_key is a JOIN HANDLE (the canonical project a workspace belongs to);
+-- project_label is a display NAME (masked under hide_project_names, like the
+-- workspace name fields). role drives rendering: 'project' (a real root),
+-- 'collapse' (harness folded INTO project_key at read time — never re-keyed in
+-- the rollup), 'nest' (shown nested under project_key), 'orphan' (unclassified).
+CREATE TABLE IF NOT EXISTS workspace_classification (
+    workspace_id INTEGER PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    category TEXT NOT NULL,        -- root | A | B | C | D
+    subtype TEXT NOT NULL,         -- project | harness | subdir | materials | config | home_config | degenerate
+    role TEXT NOT NULL,            -- project | collapse | nest | orphan
+    project_key TEXT,              -- canonical project group (join handle; NULL for orphan)
+    project_label TEXT,            -- project group display name (masked at read)
+    resolved_via TEXT NOT NULL,    -- self | session_cwd | encode_match | fs_decode | subdir | materials | dotchild | home_dot | degenerate | tool | unresolved
+    classified_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_classification_project ON workspace_classification(project_key);
+CREATE INDEX IF NOT EXISTS idx_classification_role ON workspace_classification(role);
 """
 
 
@@ -1090,3 +1121,242 @@ class WorkspaceStore:
             }
             for r in rows
         ]
+
+    # --- Portfolio classification (issue #24 — Stage 1, read-layer) ---
+
+    @staticmethod
+    def _read_session_cwds(events_db_path: str | Path) -> dict[str, str]:
+        """Real per-session ``cwd`` from events.db (read-only).
+
+        ``{session_id: cwd}`` for sessions with a usable absolute cwd. This is
+        the PRIMARY collapse signal — a scratchpad folder embeds the session
+        uuid, so its real project is recovered here with no decode. ``events.db``
+        is opened ``mode=ro``; this never writes to it.
+        """
+        if not os.path.exists(str(events_db_path)):
+            return {}
+        try:
+            src = sqlite3.connect(f"file:{events_db_path}?mode=ro", uri=True, timeout=5)
+        except sqlite3.OperationalError:
+            return {}
+        out: dict[str, str] = {}
+        try:
+            for sid, cwd in src.execute(
+                "SELECT id, cwd FROM sessions "
+                "WHERE cwd IS NOT NULL AND cwd != '' AND cwd LIKE '/%' AND cwd != '/'"
+            ):
+                if sid:
+                    out[sid] = cwd
+        except sqlite3.OperationalError:
+            return {}
+        finally:
+            src.close()
+        return out
+
+    def classify_workspaces(
+        self, events_db_path: str | Path | None = None
+    ) -> dict[str, Any]:
+        """Classify every workspace into the #24 taxonomy (read-layer, additive).
+
+        Collapses harness folders onto their real project, nests subdirs and
+        materials under their anchor, de-prioritizes config dotfolders, and
+        orphans degenerate/home-config roots. Rebuilds the whole
+        ``workspace_classification`` table each pass (it is derived, not durable
+        — see the schema note); ``events.db`` is read strictly read-only.
+        """
+        from collections import Counter
+        from hub.cache.portfolio_classifier import classify, index_real_dir
+
+        events_db_path = events_db_path or (self.db_path.parent / "events.db")
+        home = os.path.expanduser("~")
+        session_cwds = self._read_session_cwds(events_db_path)
+
+        with self._lock:
+            ws_rows = self._conn.execute(
+                "SELECT id, kind, remote_url, root_path, dir_path FROM workspaces"
+            ).fetchall()
+            git_roots = [
+                r[0] for r in self._conn.execute(
+                    "SELECT root_path FROM workspaces "
+                    "WHERE kind IN ('git_remote','git_root') AND root_path IS NOT NULL"
+                ).fetchall()
+            ]
+
+        # Build the encode-match index outside the lock (disk-only, no DB).
+        enc_index: dict[str, Any] = {}
+        for cwd in set(session_cwds.values()):
+            index_real_dir(cwd, enc_index)
+        for rp in git_roots:
+            index_real_dir(rp, enc_index)
+
+        now = _now()
+        cat = Counter()
+        via = Counter()
+        role = Counter()
+        with self._lock:
+            conn = self._conn
+            conn.execute("DELETE FROM workspace_classification")
+            for wid, kind, remote_url, root_path, dir_path in ws_rows:
+                c = classify(
+                    kind, remote_url, root_path, dir_path,
+                    session_cwds=session_cwds, enc_index=enc_index, home=home,
+                )
+                conn.execute(
+                    """INSERT INTO workspace_classification
+                           (workspace_id, category, subtype, role, project_key,
+                            project_label, resolved_via, classified_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (wid, c.category, c.subtype, c.role, c.project_key,
+                     c.project_label, c.resolved_via, now),
+                )
+                cat[c.category] += 1
+                via[c.resolved_via] += 1
+                role[c.role] += 1
+            conn.commit()
+            projects = conn.execute(
+                "SELECT COUNT(DISTINCT project_key) FROM workspace_classification "
+                "WHERE role IN ('project','collapse','nest') AND project_key IS NOT NULL"
+            ).fetchone()[0]
+
+        return {
+            "classified": len(ws_rows),
+            "projects": projects,
+            "by_category": dict(cat),
+            "by_role": dict(role),
+            "by_resolved_via": dict(via),
+            "collapsed_harness": role.get("collapse", 0),
+            "unclassified": role.get("orphan", 0),
+        }
+
+    def get_portfolio_grouped(self, since: str | None = None) -> dict[str, Any]:
+        """Hierarchical portfolio: real projects with nested children + orphans.
+
+        Folds harness (role=collapse) activity INTO its project at READ TIME —
+        the ``workspace_rollup`` is never re-keyed (its schema forbids it). Each
+        project carries its folded totals, a ``collapsed_harness`` count (so the
+        collapsed folders read as grouped, never deleted), and its visible
+        children (subdirs/materials/config, role=nest). Degenerate/home-config
+        roots (role=orphan) go to a separate ``unclassified`` list.
+
+        Returns raw labels; masking is applied by the MCP read wrapper. Empty
+        structure when the classification table is absent (never classified).
+        """
+        day_where = ""
+        params: list[Any] = []
+        if since:
+            day_where = "AND r.day >= ?"
+            params.append(since[:10])
+
+        with self._lock:
+            conn = self._conn
+            try:
+                cls = conn.execute(
+                    """SELECT c.workspace_id, c.role, c.category, c.subtype,
+                              c.project_key, c.project_label, c.resolved_via,
+                              w.workspace_key, w.kind, w.remote_url,
+                              w.root_path, w.dir_path
+                       FROM workspace_classification c
+                       JOIN workspaces w ON w.id = c.workspace_id"""
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return {"projects": [], "unclassified": [], "summary": {}}
+            # Per-workspace day rows (bounded); folded/aggregated in Python so
+            # active_days is DISTINCT across a folded group, not a naive sum.
+            roll = conn.execute(
+                f"""SELECT r.workspace_id, r.day, r.session_touches,
+                           r.fs_touches, r.git_touches, r.last_activity
+                    FROM workspace_rollup r
+                    WHERE 1=1 {day_where}""",
+                params,
+            ).fetchall()
+
+        roll_by_wid: dict[int, list[Any]] = {}
+        for row in roll:
+            roll_by_wid.setdefault(row[0], []).append(row)
+
+        def _agg(wids: list[int]) -> dict[str, Any]:
+            s = f = g = 0
+            days: set[str] = set()
+            last = ""
+            for wid in wids:
+                for _, day, sn, fn, gn, la in roll_by_wid.get(wid, []):
+                    s += sn or 0
+                    f += fn or 0
+                    g += gn or 0
+                    if day:
+                        days.add(day)
+                    if la and la > last:
+                        last = la
+            return {
+                "session_touches": s, "fs_touches": f, "git_touches": g,
+                "active_days": len(days), "last_activity": last or None,
+                "sources": _lit_sources(s, f, g),
+            }
+
+        # Group projects by project_key; children (nest) held per project.
+        groups: dict[str, dict[str, Any]] = {}
+        children: dict[str, list[dict[str, Any]]] = {}
+        orphans: list[dict[str, Any]] = []
+
+        for (wid, role, category, subtype, pkey, plabel, via,
+             wkey, kind, remote_url, root_path, dir_path) in cls:
+            if role == "orphan":
+                o = _agg([wid])
+                o.update({"workspace_key": wkey, "kind": kind,
+                          "remote_url": remote_url, "root_path": root_path,
+                          "dir_path": dir_path, "category": category,
+                          "subtype": subtype})
+                orphans.append(o)
+                continue
+            if pkey is None:
+                continue
+            grp = groups.setdefault(pkey, {
+                "project_key": pkey, "project_label": plabel,
+                "_fold_wids": [], "collapsed_harness": 0,
+            })
+            if not grp.get("project_label"):
+                grp["project_label"] = plabel
+            if role in ("project", "collapse"):
+                grp["_fold_wids"].append(wid)
+                if role == "collapse":
+                    grp["collapsed_harness"] += 1
+            else:  # nest
+                child = _agg([wid])
+                child.update({"workspace_key": wkey, "kind": kind,
+                              "remote_url": remote_url, "root_path": root_path,
+                              "dir_path": dir_path, "category": category,
+                              "subtype": subtype})
+                children.setdefault(pkey, []).append(child)
+
+        projects: list[dict[str, Any]] = []
+        for pkey, grp in groups.items():
+            agg = _agg(grp["_fold_wids"])
+            kids = sorted(
+                children.get(pkey, []),
+                key=lambda c: (c.get("last_activity") or ""), reverse=True,
+            )
+            projects.append({
+                "project_key": pkey,
+                "project_label": grp["project_label"],
+                **agg,
+                "collapsed_harness": grp["collapsed_harness"],
+                "children": kids,
+            })
+
+        projects.sort(
+            key=lambda p: (p.get("last_activity") or "", p["session_touches"]
+                           + p["fs_touches"] + p["git_touches"]),
+            reverse=True,
+        )
+        orphans.sort(key=lambda o: (o.get("last_activity") or ""), reverse=True)
+
+        return {
+            "projects": projects,
+            "unclassified": orphans,
+            "summary": {
+                "projects": len(projects),
+                "collapsed_harness": sum(p["collapsed_harness"] for p in projects),
+                "children": sum(len(p["children"]) for p in projects),
+                "unclassified": len(orphans),
+            },
+        }

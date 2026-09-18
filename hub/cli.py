@@ -921,11 +921,20 @@ def main() -> None:
         help="Rebuild the machine-wide portfolio rollup (session+filesystem+git) (#22)",
     )
 
+    ws_sub.add_parser(
+        "classify",
+        help="Classify workspaces into the #24 taxonomy (collapse harness, group)",
+    )
+
     ws_portfolio = ws_sub.add_parser(
         "portfolio", help="Show the hot workspaces from the portfolio rollup (#22)"
     )
     ws_portfolio.add_argument("--since", help="ISO date lower bound (compares by day)")
     ws_portfolio.add_argument("--json", action="store_true", dest="json_output")
+    ws_portfolio.add_argument(
+        "--grouped", action="store_true",
+        help="Hierarchical view: real projects with harness collapsed (#24)",
+    )
 
     ws_delivery = ws_sub.add_parser(
         "delivery", help="Show delivery candidates (quiescence + a 2nd signal) (#22)"
@@ -1356,6 +1365,8 @@ def cmd_workspace(args: argparse.Namespace) -> None:
             cmd_workspace_touches(args)
         case "rollup":
             cmd_workspace_rollup(args)
+        case "classify":
+            cmd_workspace_classify(args)
         case "portfolio":
             cmd_workspace_portfolio(args)
         case "delivery":
@@ -1365,7 +1376,7 @@ def cmd_workspace(args: argparse.Namespace) -> None:
         case _:
             print(
                 "Usage: mool workspace {backfill|list|session|sessions|touches|"
-                "rollup|portfolio|delivery|root}"
+                "rollup|classify|portfolio|delivery|root}"
             )
 
 
@@ -1385,6 +1396,8 @@ def cmd_workspace_backfill(args: argparse.Namespace) -> None:
     # dashboard/MCP portfolio view is populated straight after a backfill.
     rollup = store.build_rollup()
     store.detect_delivery_candidates()
+    # Classify the (possibly new) workspaces for the grouped portfolio view (#24).
+    cls = store.classify_workspaces(EVENTS_DB_PATH)
     store.close()
 
     print(green(
@@ -1401,9 +1414,15 @@ def cmd_workspace_backfill(args: argparse.Namespace) -> None:
         f"  Rollup: {rollup['rows']} day-rows across {rollup['workspaces']} "
         f"workspaces ({rollup['multi_source_nodes']} multi-signal)."
     ))
+    print(dim(
+        f"  Classified into {cls['projects']} projects; "
+        f"{cls['collapsed_harness']} harness collapsed, "
+        f"{cls['unclassified']} unclassified."
+    ))
 
 
 def cmd_workspace_rollup(args: argparse.Namespace) -> None:
+    from hub.cache.event_store import DEFAULT_DB_PATH as EVENTS_DB_PATH
     from hub.cache.workspace_store import WorkspaceStore
 
     store = WorkspaceStore()
@@ -1411,6 +1430,8 @@ def cmd_workspace_rollup(args: argparse.Namespace) -> None:
     r = store.build_rollup()
     # Delivery detection reads the same real clocks — refresh it in the same pass.
     d = store.detect_delivery_candidates()
+    # Refresh the #24 classification so the grouped portfolio stays in sync.
+    cls = store.classify_workspaces(EVENTS_DB_PATH)
     store.close()
     print(green(
         f"Rollup built: {r['rows']} day-rows across {r['workspaces']} workspaces."
@@ -1423,6 +1444,29 @@ def cmd_workspace_rollup(args: argparse.Namespace) -> None:
         f"  Delivery candidates: {d['candidates']} "
         f"({d['quiescent_workspaces']} quiescent) — {d['by_signal']}."
     ))
+    print(dim(
+        f"  Classified into {cls['projects']} projects; "
+        f"{cls['collapsed_harness']} harness collapsed, "
+        f"{cls['unclassified']} unclassified."
+    ))
+
+
+def cmd_workspace_classify(args: argparse.Namespace) -> None:
+    from hub.cache.event_store import DEFAULT_DB_PATH as EVENTS_DB_PATH
+    from hub.cache.workspace_store import WorkspaceStore
+
+    store = WorkspaceStore()
+    print(dim(f"Classifying workspaces (events.db read-only): {store.db_path}"))
+    c = store.classify_workspaces(EVENTS_DB_PATH)
+    store.close()
+    print(green(
+        f"Classified {c['classified']} workspaces into {c['projects']} projects."
+    ))
+    print(dim(
+        f"  {c['collapsed_harness']} harness folders collapsed; "
+        f"{c['unclassified']} unclassified. Categories: {c['by_category']}."
+    ))
+    print(dim(f"  Resolved via: {c['by_resolved_via']}."))
 
 
 def cmd_workspace_delivery(args: argparse.Namespace) -> None:
@@ -1466,6 +1510,11 @@ def cmd_workspace_portfolio(args: argparse.Namespace) -> None:
     from hub.cache.workspace_store import WorkspaceStore
 
     store = WorkspaceStore()
+    if getattr(args, "grouped", False):
+        grouped = store.get_portfolio_grouped(getattr(args, "since", None))
+        store.close()
+        _print_portfolio_grouped(grouped, getattr(args, "json_output", False))
+        return
     rows = store.get_portfolio(getattr(args, "since", None))
     store.close()
 
@@ -1493,6 +1542,51 @@ def cmd_workspace_portfolio(args: argparse.Namespace) -> None:
         )
         print(f"  {label}")
         print(dim(f"    {meta}  last: {r['last_activity'] or '—'}"))
+
+
+def _print_portfolio_grouped(grouped: dict, json_output: bool) -> None:
+    from hub.config import load_config, masked_label
+    hide = load_config().hide_project_names
+
+    if json_output:
+        import json as _json
+        # Reuse the MCP masker so --json hides EVERY name field (project labels,
+        # child/orphan remote_url/root_path/dir_path) exactly like the dashboard
+        # and MCP surfaces — a hand-rolled pass leaked the raw paths (#24 DoD:
+        # masking en toda salida nueva).
+        from hub.mcp_server import _mask_grouped
+        print(_json.dumps(_mask_grouped(grouped, hide), default=str))
+        return
+
+    projects = grouped.get("projects", [])
+    if not projects and not grouped.get("unclassified"):
+        print(yellow("Portfolio empty. Run: mool workspace classify (after rollup)."))
+        return
+
+    s = grouped.get("summary", {})
+    print(f"\n  {bold('Portfolio')} — {s.get('projects', 0)} proyectos, "
+          f"{s.get('collapsed_harness', 0)} carpetas de harness colapsadas, "
+          f"{s.get('unclassified', 0)} sin clasificar:")
+    print(f"  {'─' * 70}")
+    for p in projects:
+        label = masked_label(p.get("project_label") or p["project_key"], hide)
+        srcs = "+".join(p["sources"]) or "—"
+        extra = f"  (+{p['collapsed_harness']} harness)" if p["collapsed_harness"] else ""
+        print(f"  {bold(label)}{extra}")
+        print(dim(
+            f"    [{srcs}] {p['session_touches']}s/{p['fs_touches']}f/"
+            f"{p['git_touches']}g, {p['active_days']}d  last: {p['last_activity'] or '—'}"
+        ))
+        for c in p["children"]:
+            clabel = masked_label(c.get("dir_path") or c.get("root_path") or "", hide)
+            print(dim(f"      └ [{c['category']}/{c['subtype']}] {clabel}"))
+
+    orphans = grouped.get("unclassified", [])
+    if orphans:
+        print(f"\n  {bold('Sin clasificar / herramientas')} ({len(orphans)}):")
+        for o in orphans:
+            olabel = masked_label(o.get("dir_path") or o.get("root_path") or "", hide)
+            print(dim(f"    · [{o['subtype']}] {olabel}"))
 
 
 def cmd_workspace_list(args: argparse.Namespace) -> None:
