@@ -6,6 +6,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.14.0] — 2026-09-18
+
+### Added
+- **Portfolio Stage 2 — production-over-time view (#24)** — the `/portfolio` view now
+  leads with an honest production chart: one **contribution strip per canonical project**,
+  a cell per day of the window, shaded by the number of sessions that day.
+  - **Effort, not duration.** Each session is a unit of work; duration is never used
+    (resumed sessions carry original timestamps spanning months, and formats are
+    inconsistent across providers). Per project the strip reports **session count + active
+    days**.
+  - **Honest ingestion dating.** Every session is dated by `MAX(events.created_at)` — the
+    ingestion epoch, honest even for resumed sessions (shipped in #18) — bucketed to the
+    **local** day (consistent with the #23 rollup timezone fix). `first_event_at` /
+    `last_event_at` (original, misleading on resumed sessions) are not used.
+  - **Canonical aggregation.** Sessions roll up over the Stage-1 canonical project
+    (`workspace_classification.project_key`), so harness/scratchpad folders fold into their
+    real project instead of surfacing as projects of their own.
+  - **Multi-provider.** A project unites sessions across claude / codex / opencode / …;
+    the strip is **colored by the day's dominant agent** (full per-provider breakdown on
+    hover). Ordered by most-recent activity (hot on top).
+  - **Window toggle** 4 days / week (7d) / month (30d) — read-on-load, re-fetch per range;
+    per-row totals are scoped to the window (a session touching N projects counts in each,
+    so totals are not additive across rows).
+  - **Deliverables** = image/video artifact count (by extension) from `path_touches` (the
+    filesystem watcher). It reads **0 until a root is marked** (`mool workspace root add`)
+    and is surfaced honestly (never a silent zero).
+  - **Surface** — new `get_portfolio_production(days)` MCP tool + read-layer helper, new
+    `/api/workspace/portfolio/production` route. All reads are strictly read-only over
+    `events.db` + `workspace.db`; `hide_project_names` masks chart labels exactly as it
+    does the tables. Charts are hand-rolled **inline SVG** — zero dependencies.
+  - **Additive** — the resolver (#20), watcher (#21), `events.db`, the `project` field,
+    `delivery_candidate`, SSE and the Stage-1 classification are untouched (consumed only).
+    **No client attribution (Stage 3)** — that stays in epic #24. A follow-up for a
+    "cold projects" view (projects with no activity in the window) is tracked as **#25**.
+
+### Fixed
+- **Portfolio caret on leaf projects** — the expand caret (and its click/hover affordance
+  and empty "Sin subdirectorios anidados" placeholder) no longer appear on projects with
+  no nested children. Leaf rows keep an empty caret gutter so names stay column-aligned;
+  only projects with children are expandable.
+
+---
+
 ## [1.13.0] — 2026-09-18
 
 ### Added
