@@ -567,6 +567,16 @@ class WorkspaceStore:
         sentinel ``(repo_path, None, 0, None)`` so the caller can tell repos it
         matched to a workspace apart from ones it minted (build stats). Returns
         ``[]`` if github.db is absent or has no git tables — git is optional.
+
+        The commit ``day`` is bucketed in Python on the ``_parse_ts``-normalized
+        (aware UTC) timestamp, NOT via SQL ``substr(timestamp, 1, 10)``. The
+        session/filesystem signals already bucket on UTC ISO days, but
+        ``git_commits.timestamp`` is NAIVE local (git_store migration 3), so a
+        raw ``substr`` would date a commit by its *local* calendar day and skew
+        the ±1-day boundary against the other two signals (#23). ``_parse_ts``
+        can't run inside SQL, so we pull the (bounded) per-repo commits and fold
+        them here; ``last`` is likewise the normalized UTC ISO so the caller's
+        lexicographic ``max`` compares against the other signals on one clock.
         """
         if not os.path.exists(str(github_db_path)):
             return []
@@ -581,12 +591,20 @@ class WorkspaceStore:
                 if not repo_path:
                     continue
                 out.append((repo_path, None, 0, None))  # repo-seen sentinel
-                for day, n, last in src.execute(
-                    """SELECT substr(timestamp, 1, 10) AS day, COUNT(*) AS n,
-                              MAX(timestamp) AS last
-                       FROM git_commits WHERE repo_id = ? GROUP BY day""",
+                # day -> (count, latest-UTC-iso), folded on _parse_ts, not substr.
+                buckets: dict[str, tuple[int, str]] = {}
+                for (ts,) in src.execute(
+                    "SELECT timestamp FROM git_commits WHERE repo_id = ?",
                     (repo_id,),
                 ).fetchall():
+                    dt = _parse_ts(ts)
+                    if dt is None:  # unparseable → drop, never mis-bucket
+                        continue
+                    day = dt.date().isoformat()
+                    iso = dt.isoformat()
+                    n, last = buckets.get(day, (0, ""))
+                    buckets[day] = (n + 1, iso if iso > last else last)
+                for day, (n, last) in buckets.items():
                     out.append((repo_path, day, n, last))
         except sqlite3.OperationalError:
             return []
