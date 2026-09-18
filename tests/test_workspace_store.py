@@ -349,6 +349,72 @@ class TestPortfolioRollup:
         assert all(p["git_touches"] == 0 for p in s.get_portfolio())
         s.close()
 
+    @pytest.mark.skipif(not hasattr(time, "tzset"),
+                        reason="tzset (POSIX TZ) unavailable on this platform")
+    def test_git_and_fs_same_instant_bucket_same_utc_day(self, tmp_path, monkeypatch):
+        """A near-midnight git commit and a filesystem touch at the SAME instant
+        must land on ONE (workspace, day) UTC row — not ±1 day apart (#23).
+
+        git_commits.timestamp is naive-LOCAL; the old rollup did
+        substr(timestamp,1,10), dating the commit by its local calendar day, so a
+        20:00 commit in a UTC-6 zone (02:00 UTC next day) fell on the *previous*
+        day from the fs touch's UTC day. We pin a FIXED-offset POSIX TZ ("UTC+06"
+        — POSIX sign is inverted, so this is UTC-6, and needs no tzdata) via tzset
+        so _parse_ts's astimezone() reads a non-UTC zone — the test is real even
+        on a UTC CI runner, and FAILS on the raw-substr code.
+        """
+        import os as _os
+        import time as _time
+        from datetime import timezone
+        from hub.cache.workspace_store import _parse_ts
+        from hub.correlation.workspace_resolver import resolve_dir
+
+        prior_tz = _os.environ.get("TZ")
+        monkeypatch.setenv("TZ", "UTC+06")  # POSIX inverted sign → UTC-6
+        _time.tzset()
+        try:
+            git_naive = "2026-01-01T20:00:00"          # naive LOCAL (UTC-6)
+            inst = _parse_ts(git_naive)                # → 2026-01-02T02:00:00+00:00
+            utc_day = inst.date().isoformat()          # 2026-01-02
+            local_day = git_naive[:10]                 # 2026-01-01
+            # Precondition: this instant genuinely straddles the UTC midnight —
+            # otherwise the test would be tautological (e.g. on a UTC machine).
+            assert utc_day != local_day
+
+            repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+            key = "git_remote:github.com/acme/r"
+            s = WorkspaceStore(tmp_path / "workspace.db")
+            # fs touch inside the repo, at the SAME instant (UTC ISO last_seen).
+            wid = s.record_touch(str(repo / "y.py"), 1_700_000_000.0,
+                                 resolve_dir(str(repo)))
+            with s._lock:
+                s._conn.execute(
+                    "UPDATE path_touches SET last_seen = ? WHERE workspace_id = ?",
+                    (inst.astimezone(timezone.utc).isoformat(), wid))
+                s._conn.commit()
+            gh = _make_github_db(tmp_path / "github.db", [(1, str(repo))],
+                                 [(1, "abc", git_naive)])
+            s.build_rollup(gh)
+
+            with s._lock:
+                rows = {r[0]: (r[1], r[2]) for r in s._conn.execute(
+                    """SELECT day, git_touches, fs_touches FROM workspace_rollup
+                       WHERE workspace_id = ?""", (wid,)).fetchall()}
+            # Both signals collapse onto the single UTC day...
+            assert rows.get(utc_day) == (1, 1)
+            # ...and nothing was mis-dated onto the local calendar day.
+            assert local_day not in rows
+            assert set(s.get_portfolio()[0]["sources"]) >= {"filesystem", "git"}
+            s.close()
+        finally:
+            # Restore the EXACT prior TZ and resync libc's cached zone before
+            # monkeypatch's own teardown runs, so no stale zone leaks to siblings.
+            if prior_tz is None:
+                _os.environ.pop("TZ", None)
+            else:
+                _os.environ["TZ"] = prior_tz
+            _time.tzset()
+
     def test_mcp_portfolio_masking(self, tmp_path):
         repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
         db = tmp_path / "workspace.db"
