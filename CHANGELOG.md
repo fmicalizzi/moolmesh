@@ -6,6 +6,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.12.1] — 2026-09-18
+
+### Fixed
+- **Rollup day-bucketing now UTC for git (#23)** — the portfolio rollup folds three
+  signals per `(workspace, day)`, but git commit times are stored **naive-local**
+  (`git_store` migration 3) while session/filesystem days are UTC, so `build_rollup`'s
+  raw `substr(timestamp,1,10)` dated each commit by its **local** calendar day — a commit
+  near local midnight landed ±1 day off the filesystem/session activity in the same
+  workspace. `_read_git_commits` now buckets each commit on its **`_parse_ts`-normalized
+  aware-UTC** timestamp (`dt.date().isoformat()`), so all three signals share one clock.
+  Session/filesystem bucketing, `git_store`, and `delivery_candidate` are untouched
+  (quiescence already normalized via `_parse_ts`).
+- **Note:** git `last_activity` is now emitted in **UTC-aware** form
+  (`…T16:00:00+00:00`) instead of the old naive `…T10:00:00`, unifying all three signals
+  on one clock. A dashboard column that renders it shifts visibly by the UTC offset —
+  this is expected. Existing `workspace.db` rollups carry stale git rows from the
+  local→UTC day remap and need a one-time surgical reconcile (zero `git_touches`, prune
+  empty rows, re-run `mool workspace rollup`); see the `workspace_rollup` schema note.
+
+---
+
 ## [1.12.0] — 2026-09-17
 
 ### Added
@@ -54,8 +75,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 - **Rollup day-bucketing timezone edge (#23)** — the per-day rollup buckets each source
   on its raw ISO date string, so git days remain in local time while session/filesystem
   days are in UTC. This produces a ±1-day edge effect for commits near local midnight.
-  Quiescence detection is unaffected (it normalizes all timestamps to UTC first). Tracked
-  as a post-release follow-up in #23.
+  Quiescence detection is unaffected (it normalizes all timestamps to UTC first).
+  **Resolved in [1.12.1]** — git is now bucketed on UTC via `_parse_ts`.
 
 ---
 
