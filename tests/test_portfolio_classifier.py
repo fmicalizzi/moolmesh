@@ -20,7 +20,12 @@ from hub.cache.portfolio_classifier import (
 )
 from hub.cache.workspace_store import WorkspaceStore
 from hub.correlation.workspace_resolver import resolve_path
-from hub.mcp_server import _get_portfolio_grouped, _mask_grouped
+from hub.mcp_server import (
+    _get_portfolio_grouped,
+    _get_portfolio_production,
+    _mask_grouped,
+    _portfolio_production,
+)
 
 HOME = "/Users/tester"
 CLAUDE = f"{HOME}/Downloads/Claude"
@@ -283,3 +288,164 @@ class TestMasking:
 def _hash(directory):
     import hashlib
     return hashlib.sha256(directory.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _epoch(y, m, d, h=12):
+    """Local-time epoch for a calendar day — matches _local_day bucketing."""
+    import datetime
+    return datetime.datetime(y, m, d, h, 0, 0).timestamp()
+
+
+def _make_events_db(path, sessions, events):
+    """Minimal events.db: a `sessions` table (cwd for classify) + an `events`
+    table (created_at for ingestion dating).
+
+    sessions: (id, provider, cwd). events: (session_id, provider, created_at,
+    timestamp_iso). The original `timestamp` is deliberately separable from the
+    ingestion `created_at` so a test can prove dating uses created_at.
+    """
+    c = sqlite3.connect(str(path))
+    c.execute("CREATE TABLE sessions (id TEXT, provider TEXT, cwd TEXT)")
+    c.executemany(
+        "INSERT INTO sessions (id, provider, cwd) VALUES (?, ?, ?)", sessions
+    )
+    c.execute(
+        """CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, project TEXT,
+            event_type TEXT, timestamp TEXT, summary TEXT, session_id TEXT,
+            created_at REAL NOT NULL)"""
+    )
+    c.executemany(
+        "INSERT INTO events (provider, project, event_type, timestamp, summary,"
+        " session_id, created_at) VALUES (?, 'proj', 'user', ?, '', ?, ?)",
+        [(prov, ts, sid, ca) for (sid, prov, ca, ts) in events],
+    )
+    c.commit()
+    c.close()
+    return path
+
+
+class TestProduction:
+    """Production-over-time metric (issue #24, Stage 2): sessions dated by
+    ingestion (MAX events.created_at), aggregated over the canonical
+    project_key, segmented by provider, deliverables from path_touches."""
+
+    def _project(self, tmp_path, session_rows, event_rows, touches=None):
+        """Build workspace.db (one git project) + events.db from the real
+        store pipeline. session_rows feed attributions+sessions; event_rows feed
+        the events table. Returns (events_db, workspace_db, project_key)."""
+        repo = _mkrepo(tmp_path, "proj", "git@github.com:me/proj.git")
+        store = WorkspaceStore(tmp_path / "workspace.db")
+        sess_meta = []
+        for sid, prov in session_rows:
+            store.record_attribution(
+                sid, prov, str(repo / f"{sid}.py"),
+                resolve_path(str(repo / f"{sid}.py")),
+            )
+            sess_meta.append((sid, prov, str(repo)))
+        for (path, mtime) in (touches or []):
+            store.record_touch(
+                str(repo / path), mtime,
+                resolve_path(str(repo / path)),
+            )
+        store.build_rollup()
+        events_db = _make_events_db(
+            tmp_path / "events.db", sess_meta, event_rows
+        )
+        store.classify_workspaces(events_db)
+        store.close()
+        return (str(events_db), str(tmp_path / "workspace.db"),
+                "git_remote:github.com/me/proj")
+
+    def test_dates_by_ingestion_not_original_timestamp(self, tmp_path):
+        # created_at is recent; the original ISO timestamp is months old (as a
+        # resumed session would be). Dating MUST use created_at → recent day.
+        edb, wdb, pk = self._project(
+            tmp_path, [("sA", "claude")],
+            [("sA", "claude", _epoch(2026, 9, 17), "2026-01-05T10:00:00")],
+        )
+        d = _portfolio_production(edb, wdb, days=7, today="2026-09-18", hide=False)
+        proj = next(p for p in d["projects"] if p["project_key"] == pk)
+        assert "2026-09-17" in proj["days"]
+        assert "2026-01-05" not in proj["days"]      # original ts ignored
+        assert proj["sessions"] == 1
+
+    def test_window_excludes_older_sessions(self, tmp_path):
+        edb, wdb, pk = self._project(
+            tmp_path, [("sA", "claude"), ("sB", "claude")],
+            [("sA", "claude", _epoch(2026, 9, 17), "x"),
+             ("sB", "claude", _epoch(2026, 9, 1), "x")],   # 17 days before today
+        )
+        d = _portfolio_production(edb, wdb, days=7, today="2026-09-18", hide=False)
+        proj = next(p for p in d["projects"] if p["project_key"] == pk)
+        assert proj["sessions"] == 1                 # only sA is in the 7d window
+        assert proj["active_days"] == 1
+
+    def test_aggregates_over_canonical_project_and_segments_by_provider(self, tmp_path):
+        edb, wdb, pk = self._project(
+            tmp_path, [("sA", "claude"), ("sB", "opencode")],
+            [("sA", "claude", _epoch(2026, 9, 17), "x"),
+             ("sB", "opencode", _epoch(2026, 9, 17), "x")],
+        )
+        d = _portfolio_production(edb, wdb, days=7, today="2026-09-18", hide=False)
+        proj = next(p for p in d["projects"] if p["project_key"] == pk)
+        assert proj["sessions"] == 2 and proj["active_days"] == 1
+        assert proj["days"]["2026-09-17"] == {"claude": 1, "opencode": 1}
+        assert d["providers"] == ["claude", "opencode"]
+
+    def test_deliverables_zero_and_unmeasurable_without_touches(self, tmp_path):
+        edb, wdb, pk = self._project(
+            tmp_path, [("sA", "claude")],
+            [("sA", "claude", _epoch(2026, 9, 17), "x")],
+        )
+        d = _portfolio_production(edb, wdb, days=7, today="2026-09-18", hide=False)
+        assert d["deliverables_measurable"] is False
+        proj = next(p for p in d["projects"] if p["project_key"] == pk)
+        assert proj["deliverables"] == 0
+
+    def test_deliverables_count_image_video_when_touches_present(self, tmp_path):
+        edb, wdb, pk = self._project(
+            tmp_path, [("sA", "claude")],
+            [("sA", "claude", _epoch(2026, 9, 17), "x")],
+            touches=[("out/final.png", 1.0), ("clip.mp4", 2.0),
+                     ("notes.txt", 3.0)],           # .txt is not a deliverable
+        )
+        d = _portfolio_production(edb, wdb, days=7, today="2026-09-18", hide=False)
+        assert d["deliverables_measurable"] is True
+        proj = next(p for p in d["projects"] if p["project_key"] == pk)
+        assert proj["deliverables"] == 2            # png + mp4, not txt
+
+    def test_labels_masked_on_and_unmasked_off(self, tmp_path):
+        edb, wdb, pk = self._project(
+            tmp_path, [("sA", "claude")],
+            [("sA", "claude", _epoch(2026, 9, 17), "x")],
+        )
+        on = _portfolio_production(edb, wdb, days=7, today="2026-09-18", hide=True)
+        p_on = next(p for p in on["projects"] if p["project_key"] == pk)
+        assert p_on["project_label"].startswith("hidden:")
+        assert "github.com/me/proj" not in p_on["project_label"]
+
+        off = _portfolio_production(edb, wdb, days=7, today="2026-09-18", hide=False)
+        p_off = next(p for p in off["projects"] if p["project_key"] == pk)
+        assert p_off["project_label"] == "github.com/me/proj"
+
+    def test_get_wrapper_resolves_hide_flag(self, tmp_path, monkeypatch):
+        edb, wdb, pk = self._project(
+            tmp_path, [("sA", "claude")],
+            [("sA", "claude", _epoch(2026, 9, 17), "x")],
+        )
+        import hub.mcp_server as m
+        monkeypatch.setattr(m, "_hide_project_names", lambda: True)
+        # Pin 'today' through the wrapper so the fixture day is inside the window
+        # → positively assert the wrapper resolves hide=True and masks a real row.
+        d = _get_portfolio_production(edb, wdb, days=7, today="2026-09-18")
+        proj = next(p for p in d["projects"] if p["project_key"] == pk)
+        assert proj["project_label"].startswith("hidden:")
+        assert "github.com/me/proj" not in proj["project_label"]
+
+    def test_absent_db_returns_empty(self, tmp_path):
+        empty = {"window_days": 7, "providers": [], "projects": [],
+                 "deliverables_measurable": False}
+        assert _portfolio_production(
+            str(tmp_path / "no.db"), str(tmp_path / "no2.db"),
+            days=7, today="2026-09-18") == empty
