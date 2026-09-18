@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.12.0
+Last updated: September 2026 — v1.13.0
 
 ---
 
@@ -77,6 +77,16 @@ Final step of the Workspace axis (VISION §6): roll the attributed path-touches 
   - **`delivery_candidate`** — a **local, structural** guess of likely delivery, surfaced as a **candidate with confidence, never a bare "done"**. Quiescence is a **precondition only**, measured against the **real clocks** (`path_touches.last_seen`, git commit times, session `ended_at`/`last_event_at` from #16 — read-only, never the backfill-pinned `path_attributions.first_seen`); a row is written only when a **second co-occurring signal closed the burst** and that signal is **recorded per row** (auditable): `session_close`, `git_commit`, or `root_artifact`. **No LLM.** Three clock formats normalized to aware UTC before any comparison.
   - **Dashboard** — the axis's first frontend surface: a **read-on-load** portfolio view (`/portfolio` + `/api/workspace/{portfolio,delivery}`) over `workspace.db`; the **SSE schema is untouched** (no API-version bump), hot path unaffected. New `mool workspace {rollup,portfolio,delivery}` CLI and MCP `get_portfolio` / `get_workspace_activity` / `get_delivery_candidates` (all masked by `hide_project_names`). Additive: the `project` field, the MCP session contract, `linker.py`, and `events.db` are untouched.
   - **Known limitation** — the rollup's per-day bucketing keeps git days in local time vs. session/filesystem in UTC (±1-day edge near local midnight); quiescence is unaffected. Follow-up in [#23](https://github.com/fmicalizzi/moolmesh/issues/23).
+
+### v1.13 — Portfolio intelligence (Stage 1: grouping)
+
+First stage of the portfolio-intelligence epic ([#24](https://github.com/fmicalizzi/moolmesh/issues/24)): the `/portfolio` view now identifies real **projects** instead of listing ~376 flat folders (on a real machine ~49% are agent-harness folders).
+
+- **#24 (Stage 1)** — collapse harness noise + hierarchical grouping. A new **read-layer classifier** (`hub/cache/portfolio_classifier.py`) maps every workspace into a 4-category taxonomy, materialized into an additive, **fully-rebuildable** `workspace_classification` table (contrast the durable `workspace_rollup`):
+  - **A. Harness → collapse** onto the real project — primary via the session `cwd` embedded through the scratchpad's session uuid (`events.db`, read-only, no decode); fallbacks are exact encode-match against known real dirs then a filesystem-validated decode (the naive `replace('-','/')` is lossy — Claude encodes `/`, `_` and `-` all to `-` — so `coep-services` is never split into `coep/services`).
+  - **B. deep subdirs** + **C. materials/reports/exports** nest under their nearest real ancestor; **D. config dotfolders** de-prioritized (D1 nested) or orphaned (D2 home-level dotfolders + degenerate/system roots → a collapsed "sin clasificar" section).
+  - **Surface** — new `get_portfolio_grouped` MCP tool + store method (harness activity folded **at read time**; the rollup is never re-keyed), a `collapsed_harness` count per project (nothing deleted — grouped), `hide_project_names` masking recurses into labels + children. Hierarchical **read-on-load** `/portfolio` (SSE untouched). New `mool workspace classify` / `portfolio --grouped`.
+  - **Additive** — resolver (#20), watcher (#21), `events.db`, the `project` field, `delivery_candidate` and SSE are untouched. **No charts (Stage 2) or client attribution (Stage 3)** — those stay in epic #24.
 
 ---
 

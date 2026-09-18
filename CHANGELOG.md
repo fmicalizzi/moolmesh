@@ -6,7 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
-## [Unreleased] — Portfolio grouping (#24, Stage 1)
+## [1.13.0] — 2026-09-18
 
 ### Added
 - **Portfolio Stage 1 — collapse harness noise + hierarchical grouping (#24)** — the
