@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.13.0
+Last updated: September 2026 — v1.14.0
 
 ---
 
@@ -88,6 +88,18 @@ First stage of the portfolio-intelligence epic ([#24](https://github.com/fmicali
   - **Surface** — new `get_portfolio_grouped` MCP tool + store method (harness activity folded **at read time**; the rollup is never re-keyed), a `collapsed_harness` count per project (nothing deleted — grouped), `hide_project_names` masking recurses into labels + children. Hierarchical **read-on-load** `/portfolio` (SSE untouched). New `mool workspace classify` / `portfolio --grouped`.
   - **Additive** — resolver (#20), watcher (#21), `events.db`, the `project` field, `delivery_candidate` and SSE are untouched. **No charts (Stage 2) or client attribution (Stage 3)** — those stay in epic #24.
 
+### v1.14 — Portfolio intelligence (Stage 2: production-over-time)
+
+Second stage of the portfolio-intelligence epic ([#24](https://github.com/fmicalizzi/moolmesh/issues/24)): the `/portfolio` view now leads with an **honest production chart** over the Stage-1 grouping.
+
+- **#24 (Stage 2)** — production-over-time. One **contribution strip per canonical project** (a cell per day of the window, shaded by session count that day), built on a deliberately honest metric:
+  - **Effort, not duration** — each session is a unit of work (session count + active days); duration is never used (resumed sessions span months; formats differ across providers).
+  - **Ingestion dating** — sessions dated by `MAX(events.created_at)`, bucketed to the local day (honest on resumed sessions, #18; timezone-consistent with #23). `first/last_event_at` are not used.
+  - **Canonical aggregation** — rolled up over `workspace_classification.project_key` (Stage 1), so harness/scratchpad folds into its real project. **Multi-provider**: colored by the day's dominant agent, ordered by recency. **Window toggle** 4d / week / month (read-on-load).
+  - **Deliverables** = image/video count from `path_touches` (the watcher) — 0 until a root is marked, surfaced honestly, never a silent zero.
+  - **Surface** — new `get_portfolio_production(days)` MCP tool + `/api/workspace/portfolio/production` route; charts are hand-rolled **inline SVG** (zero-dep); `hide_project_names` masks labels. Also **fixes** the Stage-1 leaf-project caret (no expand affordance on projects without children).
+  - **Additive** — resolver (#20), watcher (#21), `events.db`, the `project` field, `delivery_candidate`, SSE and the Stage-1 classification are untouched (consumed only). **No client attribution (Stage 3)** — that stays in epic #24; a "cold projects" view is a known follow-up (**#25**).
+
 ---
 
 ## Planned
@@ -104,6 +116,11 @@ Recover the project-first model of MoolMesh's root and add **direct folder obser
 - **Phase D — cross-machine aggregation** (opt-in, Wakapi-style split; deferred).
 
 Indicative release mapping (features = minor bumps; each phase independently shippable per its issue's Definition of Done): Phase A → `v1.10.0` ([#20](https://github.com/fmicalizzi/moolmesh/issues/20), **delivered**; see Delivered above), Phase B → `v1.11.0` ([#21](https://github.com/fmicalizzi/moolmesh/issues/21), **delivered**; see Delivered above), Phase C → `v1.12.0` ([#22](https://github.com/fmicalizzi/moolmesh/issues/22), **delivered**; see Delivered above), Phase D → `v2.x`. Preceded by the Observe-hygiene line (delivered in `v1.9.0`; see Delivered above). Standard flow: AGENTS.md §7 + CI `preflight`. Epic: [#19](https://github.com/fmicalizzi/moolmesh/issues/19).
+
+### Portfolio intelligence (epic #24)
+
+- **Stage 3 — client attribution** ([#24](https://github.com/fmicalizzi/moolmesh/issues/24)): group/re-axis the portfolio by client (git-remote owner → parent-folder convention → manual override). Stages 1 (grouping, `v1.13.0`) and 2 (production-over-time, `v1.14.0`) are delivered — see Delivered above.
+- **Cold-projects view** ([#25](https://github.com/fmicalizzi/moolmesh/issues/25)): surface projects with no activity in the selected window (the production strip currently shows only projects active in-window). A known follow-up to Stage 2.
 
 ### Provider pipeline (Breadth — VISION §5)
 
