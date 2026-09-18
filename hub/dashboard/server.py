@@ -490,6 +490,12 @@ class DashboardServer:
                     case "/api/workspace/portfolio":
                         from hub.mcp_server import WORKSPACE_DB, _get_portfolio
                         self._serve_json(_get_portfolio(WORKSPACE_DB))
+                    case "/api/workspace/portfolio/grouped":
+                        from hub.mcp_server import (
+                            WORKSPACE_DB,
+                            _get_portfolio_grouped,
+                        )
+                        self._serve_json(_get_portfolio_grouped(WORKSPACE_DB))
                     case "/api/workspace/delivery":
                         from hub.mcp_server import (
                             WORKSPACE_DB,

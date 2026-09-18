@@ -691,6 +691,46 @@ def _get_portfolio(
     return _mask_workspace_rows(out, _hide_project_names())
 
 
+def _mask_grouped(grouped: dict[str, Any], hide: bool) -> dict[str, Any]:
+    """Mask every display name in a grouped-portfolio payload (issue #24).
+
+    Recurses into project groups and their nested children. ``project_label`` and
+    the child/orphan name fields are NAMES → masked; ``project_key`` and
+    ``workspace_key`` are JOIN HANDLES → never touched (same contract as
+    ``_mask_workspace_rows``).
+    """
+    from hub.config import masked_label
+    for p in grouped.get("projects", []):
+        p["project_label"] = masked_label(p.get("project_label") or "", hide)
+        p["children"] = _mask_workspace_rows(p.get("children", []), hide)
+    grouped["unclassified"] = _mask_workspace_rows(grouped.get("unclassified", []), hide)
+    return grouped
+
+
+def _get_portfolio_grouped(
+    db_path: str, since: str | None = None
+) -> dict[str, Any]:
+    """Hierarchical portfolio (issue #24, Stage 1): projects with nested children.
+
+    Collapses harness folders onto their real project and nests subdirs/materials
+    under it — a read-time projection over ``workspace_classification`` +
+    ``workspace_rollup`` (the rollup is never re-keyed). Returns an empty
+    structure when workspace.db or the classification table is absent (never
+    classified). Masked when ``hide_project_names`` is set.
+    """
+    empty = {"projects": [], "unclassified": [], "summary": {}}
+    if not os.path.exists(db_path):
+        return empty
+    from pathlib import Path
+    from hub.cache.workspace_store import WorkspaceStore
+    store = WorkspaceStore(Path(db_path))
+    try:
+        grouped = store.get_portfolio_grouped(since)
+    finally:
+        store.close()
+    return _mask_grouped(grouped, _hide_project_names())
+
+
 def _get_workspace_activity(
     db_path: str, workspace_key: str, since: str | None = None
 ) -> list[dict[str, Any]]:
@@ -1041,6 +1081,27 @@ if _mcp is not None:
             limit: Máximo de workspaces (max 500, default 100).
         """
         return _get_portfolio(WORKSPACE_DB, since, limit)
+
+    @_mcp.tool()
+    def get_portfolio_grouped(
+        since: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Portfolio jerárquico: proyectos reales, no 376 carpetas planas (#24).
+
+        Colapsa las carpetas de harness (scratchpad, session-storage) sobre su
+        proyecto real, anida subdirs y materiales bajo su proyecto, y manda los
+        dotfolders del home y raíces degeneradas a `unclassified`. Devuelve
+        `{projects: [...], unclassified: [...], summary: {...}}`; cada proyecto
+        trae sus totales (con el harness plegado), `collapsed_harness` (cuántas
+        carpetas se plegaron — nada se borra, se agrupa) y sus `children`
+        anidados. Proyección de read-layer sobre `workspace_classification` (no
+        re-keyea el rollup). Vacío si no se corrió `mool workspace classify`
+        (o `rollup`). Con `hide_project_names`, los nombres se enmascaran.
+
+        Args:
+            since: Fecha ISO 8601 desde (compara por día). None = todo.
+        """
+        return _get_portfolio_grouped(WORKSPACE_DB, since)
 
     @_mcp.tool()
     def get_workspace_activity(
