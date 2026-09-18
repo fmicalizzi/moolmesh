@@ -515,6 +515,8 @@ MoolMesh started with coding-agent sessions, but the vision is to **observe the 
 | **Shipped** | v1.10 | **Workspace axis — Phase A:** `path → workspace` resolver, M:N attribution over a separate `workspace.db` (#20) |
 | **Shipped** | v1.11 | **Workspace axis — Phase B:** filesystem watcher — observe marked folders directly, no agent/git required; opt-in roots + mtime cursor into `workspace.db` (#21) |
 | **Shipped** | v1.12 | **Workspace axis — Phase C:** signal-agnostic portfolio rollup (session + filesystem + git) + `delivery_candidate` (candidate with confidence); read-on-load `/portfolio` dashboard view (#22) |
+| **Shipped** | v1.13 | **Portfolio intelligence — Stage 1:** collapse agent-harness folders onto their real project (session-cwd + validated decode) + hierarchical grouping (subdirs/materials nested, config dotfolders de-prioritized); additive `workspace_classification`, grouped `/portfolio` view (#24) |
+| **Planned** | v1.14–v1.15 | **Portfolio intelligence — Stages 2–3:** inline SVG charts (bar per client, signal-mix donut); client attribution + manual override (#24) |
 | **Future** | v2.x | Workspace Phase D (cross-machine, opt-in); autonomous agents; org-scale observability |
 
 See [ROADMAP.md](ROADMAP.md) for detailed plans, open questions, and design principles.
