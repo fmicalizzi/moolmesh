@@ -731,6 +731,199 @@ def _get_portfolio_grouped(
     return _mask_grouped(grouped, _hide_project_names())
 
 
+# Deliverable = a produced image or video artifact, by extension (issue #24
+# Stage 2). Counted from path_touches (the filesystem watcher) — 0 until the
+# owner marks a root, surfaced honestly, never a silent zero.
+_IMAGE_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp",
+    ".tif", ".tiff", ".heic", ".heif", ".avif", ".ico", ".psd", ".ai",
+})
+_VIDEO_EXTS = frozenset({
+    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".flv",
+    ".wmv", ".mpg", ".mpeg",
+})
+_DELIVERABLE_EXTS = _IMAGE_EXTS | _VIDEO_EXTS
+
+
+def _local_day(epoch: float) -> str:
+    """Bucket an ingestion epoch to its LOCAL calendar day (YYYY-MM-DD).
+
+    Local, not UTC — matching the #23 rollup timezone fix so the production
+    strip agrees with the rest of the portfolio on which day work landed.
+    """
+    import datetime
+    return datetime.datetime.fromtimestamp(epoch).strftime("%Y-%m-%d")
+
+
+def _portfolio_production(
+    events_db: str,
+    workspace_db: str,
+    days: int = 30,
+    today: str | None = None,
+    hide: bool | None = None,
+) -> dict[str, Any]:
+    """Per-project production over time — the honest-metric chart (#24 Stage 2).
+
+    EFFORT, not duration: each session is a unit of work dated by
+    ``MAX(events.created_at)`` — the *ingestion* epoch (honest even on resumed
+    sessions, whose original timestamps span months; #18). Sessions are
+    aggregated over the CANONICAL project (``workspace_classification.project_key``
+    from Stage 1), so harness/scratchpad folders fold into their real project
+    instead of masquerading as projects. Per project we return a per-day,
+    per-provider session count (the contribution strip), the total session
+    count, active-day count, and a deliverable (image/video) count.
+
+    A session that touched N distinct projects counts once in EACH — the strip
+    is a per-project statement ("this project saw a session that day"), so a
+    cross-project session is genuine activity in every project it touched;
+    portfolio-wide session counts are therefore NOT additive across rows.
+
+    Window: the last ``days`` local days ending at ``today`` (defaults to the
+    local current day; injectable for tests). Read-only over events.db +
+    workspace.db; empty structure when either DB or its tables are absent.
+    Labels masked when ``hide_project_names`` is set.
+    """
+    import datetime
+    days = min(max(int(days), 1), 90)
+    if hide is None:
+        hide = _hide_project_names()
+    empty = {"window_days": days, "providers": [], "projects": [],
+             "deliverables_measurable": False}
+
+    wconn = _connect_optional(workspace_db)
+    econn = _connect_optional(events_db)
+    if wconn is None or econn is None:
+        if wconn:
+            wconn.close()
+        if econn:
+            econn.close()
+        return empty
+
+    try:
+        # 1. session (id, provider) → set of canonical project_key, + labels.
+        try:
+            crows = wconn.execute("""
+                SELECT a.session_id, a.provider, c.project_key, c.project_label
+                FROM path_attributions a
+                JOIN workspace_classification c
+                  ON c.workspace_id = a.workspace_id
+                WHERE c.project_key IS NOT NULL
+                GROUP BY a.session_id, a.provider, c.project_key
+            """).fetchall()
+        except sqlite3.OperationalError:
+            return empty
+
+        sess_projects: dict[tuple[str, str], set[str]] = {}
+        labels: dict[str, str] = {}
+        for r in crows:
+            key = (r["session_id"], r["provider"])
+            sess_projects.setdefault(key, set()).add(r["project_key"])
+            if r["project_key"] not in labels and r["project_label"]:
+                labels[r["project_key"]] = r["project_label"]
+
+        # 2. deliverable (image/video) count per canonical project, from the
+        #    filesystem watcher. Empty until a root is marked — reported via
+        #    deliverables_measurable so the UI never shows a silent zero.
+        deliverables: dict[str, int] = {}
+        measurable = False
+        try:
+            has_touch = wconn.execute(
+                "SELECT 1 FROM path_touches LIMIT 1"
+            ).fetchone()
+            measurable = has_touch is not None
+            if measurable:
+                trows = wconn.execute("""
+                    SELECT c.project_key AS pk, t.path AS path
+                    FROM path_touches t
+                    JOIN workspace_classification c
+                      ON c.workspace_id = t.workspace_id
+                    WHERE c.project_key IS NOT NULL
+                """).fetchall()
+                for r in trows:
+                    ext = os.path.splitext(r["path"])[1].lower()
+                    if ext in _DELIVERABLE_EXTS:
+                        deliverables[r["pk"]] = deliverables.get(r["pk"], 0) + 1
+        except sqlite3.OperationalError:
+            measurable = False
+
+        # 3. session (id, provider) → ingestion day (MAX created_at, local).
+        erows = econn.execute("""
+            SELECT session_id, provider, MAX(created_at) AS mx
+            FROM events
+            WHERE session_id IS NOT NULL
+            GROUP BY session_id, provider
+        """).fetchall()
+    finally:
+        wconn.close()
+        econn.close()
+
+    # Window bounds (inclusive) in local days.
+    if today is None:
+        today = datetime.date.today().strftime("%Y-%m-%d")
+    start = (datetime.date.fromisoformat(today)
+             - datetime.timedelta(days=days - 1)).strftime("%Y-%m-%d")
+
+    # 4. Fold sessions into their canonical project(s), per day, per provider.
+    proj: dict[str, dict[str, Any]] = {}
+    providers_seen: set[str] = set()
+    for r in erows:
+        key = (r["session_id"], r["provider"])
+        pkeys = sess_projects.get(key)
+        if not pkeys or r["mx"] is None:
+            continue
+        day = _local_day(r["mx"])
+        if day < start or day > today:
+            continue
+        provider = r["provider"]
+        providers_seen.add(provider)
+        for pk in pkeys:
+            g = proj.setdefault(pk, {
+                "project_key": pk,
+                "project_label": labels.get(pk, ""),
+                "_sessions": set(), "_days": set(), "days": {},
+                "last_day": "",
+            })
+            g["_sessions"].add(key)
+            g["_days"].add(day)
+            g["days"].setdefault(day, {})
+            g["days"][day][provider] = g["days"][day].get(provider, 0) + 1
+            if day > g["last_day"]:
+                g["last_day"] = day
+
+    from hub.config import masked_label
+    projects = []
+    for pk, g in proj.items():
+        projects.append({
+            "project_key": pk,
+            "project_label": masked_label(g["project_label"], hide),
+            "sessions": len(g["_sessions"]),
+            "active_days": len(g["_days"]),
+            "deliverables": deliverables.get(pk, 0),
+            "last_day": g["last_day"],
+            "days": g["days"],
+        })
+    # Hottest (most-recent activity) on top; ties broken by session volume.
+    projects.sort(key=lambda p: (p["last_day"], p["sessions"]), reverse=True)
+
+    return {
+        "window_days": days,
+        "providers": sorted(providers_seen),
+        "deliverables_measurable": measurable,
+        "projects": projects,
+    }
+
+
+def _get_portfolio_production(
+    events_db: str, workspace_db: str, days: int = 30, today: str | None = None
+) -> dict[str, Any]:
+    """MCP/dashboard entry for the production chart (issue #24 Stage 2).
+
+    Thin wrapper resolving ``hide_project_names`` at call time; the work lives
+    in ``_portfolio_production`` (pure over its DB paths + injectable ``today``).
+    """
+    return _portfolio_production(events_db, workspace_db, days, today=today)
+
+
 def _get_workspace_activity(
     db_path: str, workspace_key: str, since: str | None = None
 ) -> list[dict[str, Any]]:
@@ -1102,6 +1295,28 @@ if _mcp is not None:
             since: Fecha ISO 8601 desde (compara por día). None = todo.
         """
         return _get_portfolio_grouped(WORKSPACE_DB, since)
+
+    @_mcp.tool()
+    def get_portfolio_production(days: int = 30) -> dict[str, Any]:
+        """Producción por proyecto en el tiempo — esfuerzo, no duración (#24).
+
+        Métrica honesta: cada sesión es una unidad de trabajo fechada por
+        `MAX(events.created_at)` (epoch de INGESTA — honesto incluso en sesiones
+        resumidas, cuyos timestamps originales abarcan meses), agregada sobre el
+        proyecto CANÓNICO (`workspace_classification.project_key` de la Etapa 1),
+        así el harness/scratchpad se pliega en su proyecto real. Por proyecto
+        devuelve la serie diaria por provider (la tira de contribución),
+        `sessions`, `active_days` y `deliverables` (conteo de imagen/video desde
+        el watcher de filesystem — 0 hasta que se marca un root, con
+        `deliverables_measurable` para no mostrar un cero silencioso). Una sesión
+        que tocó N proyectos cuenta en CADA uno (los totales NO son aditivos
+        entre filas). Ordenado por actividad más reciente. Con
+        `hide_project_names`, los labels se enmascaran.
+
+        Args:
+            days: Ventana en días (1–90, default 30).
+        """
+        return _get_portfolio_production(EVENTS_DB, WORKSPACE_DB, days)
 
     @_mcp.tool()
     def get_workspace_activity(

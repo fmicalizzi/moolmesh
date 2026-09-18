@@ -46,6 +46,11 @@
   .chip { display:inline-block; padding:1px 7px; border-radius:10px; font-size:10px; border:1px solid var(--border); color:var(--muted); margin-left:6px; }
   .caret { color:var(--muted); width:12px; display:inline-block; transition:transform .12s; }
   .proj.open .caret { transform:rotate(90deg); }
+  /* Leaf projects (no nested children) are not expandable — no caret glyph, no
+     pointer affordance, no hover highlight. The empty 12px gutter keeps names
+     column-aligned with the expandable rows (#24 caret fix). */
+  .proj.leaf .proj-head { cursor:default; }
+  .proj.leaf .proj-head:hover { background:transparent; }
   .kids { display:none; padding:0 14px 8px 30px; }
   .proj.open .kids { display:block; }
   .kid { display:flex; gap:10px; padding:4px 0; border-top:1px solid var(--bg3); font-size:11px; }
@@ -55,6 +60,30 @@
   .unclassified summary { cursor:pointer; color:var(--muted); font-size:11px; padding:8px 0; }
   .unclassified li { list-style:none; color:var(--muted); font-size:11px; padding:2px 0; word-break:break-all; }
   .unclassified ul { padding-left:14px; }
+  /* --- Production over time (#24 Stage 2, inline hand-rolled SVG, zero-dep) --- */
+  .prod { border:1px solid var(--border); border-radius:6px; background:var(--bg2); padding:12px 14px; margin-bottom:16px; }
+  .prod-top { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px; }
+  .prod-top h3 { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; font-weight:600; }
+  .toggle { display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+  .toggle button { background:var(--bg3); color:var(--muted); border:none; font:inherit; font-size:11px; padding:4px 12px; cursor:pointer; border-left:1px solid var(--border); }
+  .toggle button:first-child { border-left:none; }
+  .toggle button.on { background:var(--accent); color:var(--bg); font-weight:600; }
+  .prod-row { display:flex; align-items:center; gap:12px; padding:5px 0; border-top:1px solid var(--bg3); }
+  .prod-row:first-child { border-top:none; }
+  .prod-label { color:var(--accent); font-size:12px; flex:0 0 200px; width:200px; word-break:break-all; }
+  .prod-strip { flex:1; min-width:0; }
+  .prod-strip svg { display:block; width:100%; height:auto; max-height:20px; }
+  .prod-stats { flex:0 0 auto; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; text-align:right; }
+  .prod-stats b { color:var(--text); font-weight:600; }
+  .prod-deliv { color:var(--green); } .prod-deliv.zero { color:var(--muted); }
+  .prod-legend { display:flex; flex-wrap:wrap; gap:14px; margin-top:10px; font-size:11px; color:var(--muted); align-items:center; }
+  .prod-legend span { display:inline-flex; align-items:center; gap:5px; }
+  .prod-legend i { width:9px; height:9px; border-radius:2px; display:inline-block; }
+  .lg-claude { background:var(--cyan); } .lg-codex { background:var(--green); }
+  .lg-opencode { background:var(--purple); } .lg-qwen { background:var(--orange); }
+  .lg-cursor { background:var(--yellow); } .lg-other { background:var(--muted); }
+  .prod-scale { display:inline-flex; align-items:center; gap:3px; margin-left:auto; }
+  .prod-scale i { width:11px; height:11px; border-radius:2px; display:inline-block; background:var(--cyan); }
 </style>
 </head>
 <body>
@@ -74,6 +103,18 @@
   <div class="section-title">Proyectos (harness colapsado, agrupado)</div>
   <div class="hint">Las carpetas de harness (scratchpad, session-storage) se pliegan sobre su proyecto real; subdirs y materiales anidan bajo su proyecto. Nada se borra: se agrupa. Un nodo se enciende venga la actividad de una <b>sesión</b>, del <b>filesystem</b> o de <b>git</b> — conteos por señal, nunca sumados.</div>
   <div class="summary" id="pf-summary"></div>
+  <div class="prod" id="prod-card">
+    <div class="prod-top">
+      <h3 title="Sesiones fechadas por ingesta (MAX created_at). Los totales son de la ventana elegida; una sesión que tocó varios proyectos cuenta en cada uno, así que no son aditivos entre filas.">Producción por proyecto en el tiempo — esfuerzo (sesiones), no duración</h3>
+      <div class="toggle" id="prod-toggle">
+        <button data-days="4">4 días</button>
+        <button data-days="7" class="on">semana</button>
+        <button data-days="30">mes</button>
+      </div>
+    </div>
+    <div id="prod-body"><div class="empty">Cargando…</div></div>
+    <div class="prod-legend" id="prod-legend"></div>
+  </div>
   <div id="pf-body"><div class="empty">Cargando…</div></div>
 </div>
 
@@ -98,6 +139,92 @@ function label(r){ return r.label || r.remote_url || r.root_path || r.dir_path |
 function badges(sources){ return (sources||[]).map(s => `<span class="badge b-${esc(s)}">${esc(s)}</span>`).join('') || ''; }
 function metaStr(r){ return `${r.session_touches||0}s / ${r.fs_touches||0}f / ${r.git_touches||0}g · ${r.active_days||0}d · ${esc((r.last_activity||'—').replace('T',' ').slice(0,16))}`; }
 
+// --- Production over time (#24 Stage 2): per-project contribution strip.
+// Effort = sessions (NOT duration), dated by ingestion (MAX events.created_at),
+// aggregated over the canonical project. Cell color = the day's dominant
+// provider; shade = session volume vs the window's busiest day. Hand-rolled
+// inline SVG, zero-dep. hide_project_names is honored server-side (labels come
+// already masked; we never fall back to project_key).
+const PROV_COLOR = {claude:'var(--cyan)', codex:'var(--green)', opencode:'var(--purple)', qwen:'var(--orange)', cursor:'var(--yellow)'};
+function provColor(p){ return PROV_COLOR[p] || 'var(--muted)'; }
+function provClass(p){ return ['claude','codex','opencode','qwen','cursor'].includes(p) ? 'lg-'+p : 'lg-other'; }
+function ymd(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function windowDaysList(n){
+  const out=[]; const t=new Date(); t.setHours(0,0,0,0);
+  for(let i=n-1;i>=0;i--){ const d=new Date(t); d.setDate(t.getDate()-i); out.push(ymd(d)); }
+  return out;
+}
+function dayTotal(rec){ let t=0; if(rec) for(const n of Object.values(rec)) t+=n; return t; }
+
+function renderStrip(daysList, dayData, maxCount){
+  const cw=14, gap=3, h=16;
+  const W = Math.max(daysList.length*(cw+gap)-gap, cw);
+  const cells = daysList.map((day,i)=>{
+    const x = i*(cw+gap);
+    const rec = dayData[day];
+    const total = dayTotal(rec);
+    if (!total) return `<rect x="${x}" y="0" width="${cw}" height="${h}" rx="2" fill="var(--bg3)"><title>${esc(day)}: sin sesiones</title></rect>`;
+    let top=null, topN=-1;
+    for (const [prov,n] of Object.entries(rec)){ if(n>topN){topN=n; top=prov;} }
+    const op = 0.35 + 0.65*(maxCount>0 ? Math.min(total,maxCount)/maxCount : 0);
+    const detail = Object.entries(rec).map(([p,n])=>`${p} ${n}`).join(', ');
+    return `<rect x="${x}" y="0" width="${cw}" height="${h}" rx="2" fill="${provColor(top)}" fill-opacity="${op.toFixed(2)}"><title>${esc(day)}: ${total} ses (${esc(detail)})</title></rect>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${W} ${h}" preserveAspectRatio="xMinYMid meet" role="img" aria-label="Producción diaria">${cells}</svg>`;
+}
+
+function renderProduction(data, daysN){
+  const body = document.getElementById('prod-body');
+  const legendEl = document.getElementById('prod-legend');
+  const projects = data.projects||[];
+  if (!projects.length){
+    body.innerHTML = '<div class="empty">Sin sesiones atribuidas en esta ventana. Corré <code>mool workspace backfill</code> o ampliá el rango.</div>';
+    legendEl.innerHTML = ''; return;
+  }
+  const daysList = windowDaysList(daysN);
+  let maxCount = 1;
+  projects.forEach(p => daysList.forEach(d => { const t=dayTotal(p.days[d]); if(t>maxCount) maxCount=t; }));
+
+  body.innerHTML = projects.map(p => {
+    const deliv = data.deliverables_measurable
+      ? `<span class="prod-deliv${p.deliverables?'':' zero'}">${p.deliverables} entreg.</span>`
+      : `<span class="prod-deliv zero" title="Marcá un root con: mool workspace root add &lt;ruta&gt;">— entreg.</span>`;
+    return `<div class="prod-row">
+      <span class="prod-label">${esc(p.project_label || '—')}</span>
+      <span class="prod-strip">${renderStrip(daysList, p.days||{}, maxCount)}</span>
+      <span class="prod-stats"><b>${p.sessions}</b> ses · <b>${p.active_days}</b>d · ${deliv}</span>
+    </div>`;
+  }).join('');
+
+  // Legend: one swatch per provider seen + an intensity note.
+  const provs = data.providers||[];
+  let leg = provs.map(pv => `<span><i class="${provClass(pv)}"></i>${esc(pv)}</span>`).join('');
+  if (!data.deliverables_measurable){
+    leg += `<span title="El watcher de filesystem es opt-in">Entregables sin medir — <code>mool workspace root add &lt;ruta&gt;</code></span>`;
+  }
+  leg += `<span class="prod-scale">− <i style="opacity:.35"></i><i style="opacity:.7"></i><i style="opacity:1"></i> + sesiones/día</span>`;
+  legendEl.innerHTML = leg;
+}
+
+let prodDays = 7;
+async function loadProduction(days){
+  prodDays = days;
+  const body = document.getElementById('prod-body');
+  try {
+    const data = await (await fetch(`/api/workspace/portfolio/production?days=${days}`)).json();
+    renderProduction(data, days);
+  } catch(e){ body.innerHTML = '<div class="empty">Error al cargar producción.</div>'; }
+}
+function initProdToggle(){
+  const tg = document.getElementById('prod-toggle');
+  tg.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-days]');
+    if (!btn) return;
+    [...tg.querySelectorAll('button')].forEach(b => b.classList.toggle('on', b===btn));
+    loadProduction(parseInt(btn.dataset.days, 10));
+  });
+}
+
 async function loadPortfolio(){
   const body = document.getElementById('pf-body');
   const sum = document.getElementById('pf-summary');
@@ -118,14 +245,23 @@ async function loadPortfolio(){
           <span class="kid-meta">${metaStr(c)}</span>
         </div>`).join('');
       const harnessChip = p.collapsed_harness ? `<span class="chip">+${p.collapsed_harness} harness</span>` : '';
-      const kidsChip = (p.children||[]).length ? `<span class="chip">${p.children.length} anidadas</span>` : '';
-      return `<div class="proj">
-        <div class="proj-head" onclick="this.parentNode.classList.toggle('open')">
-          <span class="caret">▶</span>
+      const hasKids = (p.children||[]).length > 0;
+      const kidsChip = hasKids ? `<span class="chip">${p.children.length} anidadas</span>` : '';
+      // Only projects with nested children are expandable: the caret glyph,
+      // the onclick toggle and the pointer/hover affordance are all gated on
+      // hasKids. Leaf projects get a .leaf row and an empty caret gutter (no
+      // glyph) so names stay column-aligned — no dead click, no empty
+      // "Sin subdirectorios" placeholder (#24 caret fix).
+      const cls = hasKids ? 'proj' : 'proj leaf';
+      const onclick = hasKids ? ` onclick="this.parentNode.classList.toggle('open')"` : '';
+      const caret = hasKids ? '▶' : '';
+      return `<div class="${cls}">
+        <div class="proj-head"${onclick}>
+          <span class="caret">${caret}</span>
           <span class="proj-name">${esc(p.project_label || p.project_key)}${harnessChip}${kidsChip}</span>
           <span class="proj-meta">${badges(p.sources)} ${metaStr(p)}</span>
         </div>
-        <div class="kids">${kids || '<div class="kid"><span class="muted">Sin subdirectorios anidados.</span></div>'}</div>
+        ${hasKids ? `<div class="kids">${kids}</div>` : ''}
       </div>`;
     }).join('');
 
@@ -153,6 +289,8 @@ async function loadDelivery(){
   } catch(e){ body.innerHTML = '<tr><td colspan="5" class="empty">Error al cargar.</td></tr>'; }
 }
 
+initProdToggle();
+loadProduction(prodDays);
 loadPortfolio();
 loadDelivery();
 </script>

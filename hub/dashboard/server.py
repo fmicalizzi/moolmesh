@@ -496,6 +496,21 @@ class DashboardServer:
                             _get_portfolio_grouped,
                         )
                         self._serve_json(_get_portfolio_grouped(WORKSPACE_DB))
+                    case _ if self.path.startswith("/api/workspace/portfolio/production"):
+                        from urllib.parse import urlparse, parse_qs
+                        from hub.mcp_server import (
+                            EVENTS_DB,
+                            WORKSPACE_DB,
+                            _get_portfolio_production,
+                        )
+                        qs = parse_qs(urlparse(self.path).query)
+                        try:
+                            days = int(qs.get("days", ["30"])[0])
+                        except (ValueError, TypeError):
+                            days = 30
+                        self._serve_json(
+                            _get_portfolio_production(EVENTS_DB, WORKSPACE_DB, days)
+                        )
                     case "/api/workspace/delivery":
                         from hub.mcp_server import (
                             WORKSPACE_DB,
