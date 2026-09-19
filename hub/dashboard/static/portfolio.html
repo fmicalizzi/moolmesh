@@ -69,6 +69,21 @@
   .unclassified summary { cursor:pointer; color:var(--muted); font-size:11px; padding:8px 0; }
   .unclassified li { list-style:none; color:var(--muted); font-size:11px; padding:2px 0; word-break:break-all; }
   .unclassified ul { padding-left:14px; }
+  /* Client/org tier (#29): a collapsible node grouping a client's projects.
+     Effort + outcome + hottest state roll up to the client head; members render
+     as the same project rows nested inside. Externos (deps/repos clonados) go in
+     their own drawer; los proyectos del owner quedan sueltos arriba. */
+  .client { border:1px solid var(--border); border-radius:6px; margin-bottom:10px; background:var(--bg2); }
+  .client > summary { list-style:none; display:flex; align-items:center; gap:10px; padding:11px 14px; cursor:pointer; }
+  .client > summary::-webkit-details-marker { display:none; }
+  .client > summary:hover { background:var(--bg3); }
+  .client-caret { color:var(--muted); width:12px; display:inline-block; transition:transform .12s; }
+  .client[open] > summary .client-caret { transform:rotate(90deg); }
+  .client-name { color:var(--yellow); font-weight:700; flex:1; word-break:break-all; letter-spacing:.2px; }
+  .client-meta { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .client-body { padding:2px 12px 10px 12px; }
+  .client-out { font-size:10px; color:var(--muted); margin-left:6px; }
+  .loose-head { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; margin:14px 0 6px; }
   /* --- Production over time (#24 Stage 2, inline hand-rolled SVG, zero-dep) --- */
   .prod { border:1px solid var(--border); border-radius:6px; background:var(--bg2); padding:12px 14px; margin-bottom:16px; }
   .prod-top { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px; }
@@ -303,46 +318,84 @@ function initProdToggle(){
   });
 }
 
+// One project node (reused loose, inside a client, and in the externos drawer).
+// hide_project_names is honored server-side: labels arrive already masked, so we
+// NEVER fall back to project_key (that would leak the raw name).
+function projRow(p){
+  const kids = (p.children||[]).map(c => `
+    <div class="kid">
+      <span class="kid-cat">${esc(c.category)}/${esc(c.subtype)}</span>
+      <span class="kid-name">${esc(label(c))}</span>
+      <span class="kid-meta">${metaStr(c)}</span>
+    </div>`).join('');
+  const harnessChip = p.collapsed_harness ? `<span class="chip">+${p.collapsed_harness} harness</span>` : '';
+  const hasKids = (p.children||[]).length > 0;
+  const kidsChip = hasKids ? `<span class="chip">${p.children.length} anidadas</span>` : '';
+  // Only projects with nested children are expandable (empty caret gutter keeps
+  // names column-aligned — #24 caret fix).
+  const cls = hasKids ? 'proj' : 'proj leaf';
+  const onclick = hasKids ? ` onclick="this.parentNode.classList.toggle('open')"` : '';
+  const caret = hasKids ? '▶' : '';
+  return `<div class="${cls}">
+    <div class="proj-head"${onclick}>
+      <span class="caret">${caret}</span>
+      <span class="proj-name">${esc(p.project_label || '—')}${stateChip(p.state)}${harnessChip}${kidsChip}</span>
+      <span class="proj-meta">${badges(p.sources)} ${metaStr(p)}</span>
+    </div>
+    ${hasKids ? `<div class="kids">${kids}</div>` : ''}
+  </div>`;
+}
+
+// A client/org node (#29): collapsible, groups its member projects, carries the
+// rolled-up effort/outcome/state. client_label arrives masked; never leak the key.
+function clientNode(c){
+  const out = c.outcome||{};
+  const outStr = (out.merged_prs||out.closed_issues||out.open_issues)
+    ? `<span class="client-out" title="Entrega GitHub del cliente (todos los autores sumados, all-time)">${out.merged_prs||0} PR · ${out.closed_issues||0} issues cerrados · ${out.open_issues||0} abiertos</span>` : '';
+  const members = (c.projects||[]).map(projRow).join('');
+  return `<details class="client">
+    <summary>
+      <span class="client-caret">▶</span>
+      <span class="client-name">${esc(c.client_label || '—')}${stateChip(c.state)}<span class="chip">${(c.projects||[]).length} proyectos</span></span>
+      <span class="client-meta">${badges(c.sources)} ${metaStr(c)}${outStr}</span>
+    </summary>
+    <div class="client-body">${members}</div>
+  </details>`;
+}
+
 async function loadPortfolio(){
   const body = document.getElementById('pf-body');
   const sum = document.getElementById('pf-summary');
   try {
     const data = await (await fetch('/api/workspace/portfolio/grouped')).json();
+    const clients = data.clients||[];
     const projects = data.projects||[];
-    if (!projects.length && !(data.unclassified||[]).length){
+    const external = data.external||[];
+    if (!clients.length && !projects.length && !external.length && !(data.unclassified||[]).length){
       body.innerHTML = '<div class="empty">Sin datos. Corré: <code>mool workspace rollup</code></div>'; return;
     }
     const s = data.summary||{};
-    sum.textContent = `${s.projects||0} proyectos · ${s.collapsed_harness||0} carpetas de harness colapsadas · ${s.children||0} anidadas · ${s.unclassified||0} sin clasificar`;
+    const parts = [`${s.projects||0} proyectos`, `${s.collapsed_harness||0} carpetas de harness colapsadas`,
+                   `${s.children||0} anidadas`];
+    if (s.clients) parts.push(`${s.clients} cliente(s)`);
+    if (s.external) parts.push(`${s.external} externo(s)`);
+    parts.push(`${s.unclassified||0} sin clasificar`);
+    sum.textContent = parts.join(' · ');
 
-    let html = projects.map(p => {
-      const kids = (p.children||[]).map(c => `
-        <div class="kid">
-          <span class="kid-cat">${esc(c.category)}/${esc(c.subtype)}</span>
-          <span class="kid-name">${esc(label(c))}</span>
-          <span class="kid-meta">${metaStr(c)}</span>
-        </div>`).join('');
-      const harnessChip = p.collapsed_harness ? `<span class="chip">+${p.collapsed_harness} harness</span>` : '';
-      const hasKids = (p.children||[]).length > 0;
-      const kidsChip = hasKids ? `<span class="chip">${p.children.length} anidadas</span>` : '';
-      // Only projects with nested children are expandable: the caret glyph,
-      // the onclick toggle and the pointer/hover affordance are all gated on
-      // hasKids. Leaf projects get a .leaf row and an empty caret gutter (no
-      // glyph) so names stay column-aligned — no dead click, no empty
-      // "Sin subdirectorios" placeholder (#24 caret fix).
-      const cls = hasKids ? 'proj' : 'proj leaf';
-      const onclick = hasKids ? ` onclick="this.parentNode.classList.toggle('open')"` : '';
-      const caret = hasKids ? '▶' : '';
-      return `<div class="${cls}">
-        <div class="proj-head"${onclick}>
-          <span class="caret">${caret}</span>
-          <span class="proj-name">${esc(p.project_label || p.project_key)}${stateChip(p.state)}${harnessChip}${kidsChip}</span>
-          <span class="proj-meta">${badges(p.sources)} ${metaStr(p)}</span>
-        </div>
-        ${hasKids ? `<div class="kids">${kids}</div>` : ''}
-      </div>`;
-    }).join('');
-
+    let html = '';
+    // 1. Client/org nodes (collapsible), hottest/most-active first.
+    if (clients.length) html += clients.map(clientNode).join('');
+    // 2. Loose projects — el owner (personal) y workspaces compartidos propios.
+    if (projects.length){
+      if (clients.length) html += `<div class="loose-head">Propios / sueltos</div>`;
+      html += projects.map(projRow).join('');
+    }
+    // 3. Externos / referencia — deps y repos clonados, en su cajón.
+    if (external.length){
+      html += `<details class="unclassified"><summary>Externos / referencia (${external.length})</summary><div style="padding-left:6px">` +
+        external.map(projRow).join('') + `</div></details>`;
+    }
+    // 4. Sin clasificar / herramientas.
     const orphans = data.unclassified||[];
     if (orphans.length){
       html += `<details class="unclassified"><summary>Sin clasificar / herramientas (${orphans.length})</summary><ul>` +

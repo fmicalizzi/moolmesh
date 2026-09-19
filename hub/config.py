@@ -98,6 +98,19 @@ class HubConfig:
     # (preserva el comportamiento actual: el watcher igual sólo arranca si hay
     # workspace_roots marcados).
     filesystem_monitoring: bool = True
+    # --- Jerarquía cliente/org del portfolio (issue #29, Unit 3) ---
+    # Orgs reales del owner que son CLIENTES (agrupan sus proyectos en un nodo
+    # cliente). Curable. Vacío → auto-seed en el read-layer SÓLO si se conoce la
+    # identidad del owner (personal_orgs no vacío); si no, el portfolio queda
+    # plano (comportamiento previo). Se comparan normalizando (lstrip('_')+lower).
+    client_orgs: list[str] = field(default_factory=list)
+    # Org(es) del propio owner: sus proyectos se muestran SUELTOS (sin nodo
+    # cliente). Default: el github_handle si está seteado. Sin identidad de owner
+    # no hay jerarquía (portfolio plano).
+    personal_orgs: list[str] = field(default_factory=list)
+    # Override manual para bordes: project_key → nombre de cliente. Gana sobre
+    # la escalera git-org/carpeta.
+    client_overrides: dict[str, str] = field(default_factory=dict)
 
 
 def _serialize_toml(config: HubConfig) -> str:
@@ -130,6 +143,21 @@ def _serialize_toml(config: HubConfig) -> str:
     lines.append("[workspace]")
     lines.append(f'hide_project_names = {str(config.hide_project_names).lower()}')
     lines.append(f'filesystem_monitoring = {str(config.filesystem_monitoring).lower()}')
+    # Jerarquía cliente/org (issue #29) — arrays/tabla inline; sólo se escriben
+    # si tienen contenido, para no ensuciar configs que no usan la capa. Van
+    # DENTRO de [workspace] (escalares/inline antes de cualquier array-de-tablas).
+    if config.client_orgs:
+        orgs = ", ".join(f'"{_toml_escape(o)}"' for o in config.client_orgs)
+        lines.append(f'client_orgs = [{orgs}]')
+    if config.personal_orgs:
+        porgs = ", ".join(f'"{_toml_escape(o)}"' for o in config.personal_orgs)
+        lines.append(f'personal_orgs = [{porgs}]')
+    if config.client_overrides:
+        pairs = ", ".join(
+            f'"{_toml_escape(k)}" = "{_toml_escape(v)}"'
+            for k, v in config.client_overrides.items()
+        )
+        lines.append(f'client_overrides = {{{pairs}}}')
     lines.append("")
 
     # Sección [[repos]] - array de tablas
@@ -216,6 +244,13 @@ def load_config() -> HubConfig:
         config.hide_project_names = bool(ws.get("hide_project_names", False))
         # Ausente → True: un config viejo (sin la clave) mantiene el monitoreo on.
         config.filesystem_monitoring = bool(ws.get("filesystem_monitoring", True))
+        # Jerarquía cliente/org (issue #29) — todas opcionales.
+        config.client_orgs = [str(o) for o in ws.get("client_orgs", []) if str(o)]
+        config.personal_orgs = [str(o) for o in ws.get("personal_orgs", []) if str(o)]
+        config.client_overrides = {
+            str(k): str(v) for k, v in dict(ws.get("client_overrides", {})).items()
+            if str(k) and str(v)
+        }
 
     # Parse [[workspace_roots]] array (issue #21, opt-in)
     if "workspace_roots" in data:
