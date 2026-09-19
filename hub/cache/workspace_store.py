@@ -760,6 +760,333 @@ class WorkspaceStore:
             wconn.close()
         return out
 
+    # --- Derived project state (issue #28 — Unit 2, integrate) ---
+
+    # Human-scale quiescence bands for the per-project state chip. UNLIKE
+    # ``QUIET_WINDOW_SECONDS`` (a modest 2h gate where a recorded SECOND signal
+    # carries the claim), a *state* IS the read of evidence, so the bands are
+    # day-scale: below ACTIVE the project is warm, between ACTIVE and COOLING it
+    # is tapering (enfriándose), past COOLING it is quiet and its GitHub outcome
+    # decides delivered / stalled / paused. Injectable (like
+    # ``quiet_window_seconds``) so tests pin exact ages instead of racing wall time.
+    STATE_ACTIVE_WINDOW_SECONDS: float = 3 * 86400.0     # < 3d  → activo/caliente
+    STATE_COOLING_WINDOW_SECONDS: float = 14 * 86400.0   # 3–14d → enfriándose; ≥14d quiet
+    # A GitHub delivery (merged PR / closed issue) counts as *closing the burst*
+    # only when it lands within this slack of the project's last local activity —
+    # the same "did this signal close the burst" discipline as
+    # ``detect_delivery_candidates``, but deliberately day-scale, NOT that
+    # method's 120s: the remote GitHub clock and the local activity clock are
+    # independent streams, so a merge is essentially never within minutes of the
+    # last local touch. Too-tight a slack would make ``entregado`` never fire.
+    STATE_DELIVERY_SLACK_SECONDS: float = 3 * 86400.0
+
+    def derive_project_states(
+        self,
+        events_db_path: str | Path | None = None,
+        github_db_path: str | Path | None = None,
+        now: datetime | None = None,
+        active_window_seconds: float | None = None,
+        cooling_window_seconds: float | None = None,
+        delivery_slack_seconds: float | None = None,
+        session_ingest: dict[tuple[str, str], datetime] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Derive one honest STATE per canonical project — the epic integrator.
+
+        Fuses **local activity** (session ingest, filesystem touches, git commits)
+        with **GitHub outcome** (#27) into a single read per ``project_key``:
+
+          * ``activo``      — real activity within the ACTIVE window.
+          * ``enfriandose`` — activity tapering (ACTIVE ≤ age < COOLING).
+          * ``entregado``   — quiet + a merged-PR/closed-issue that *closed the
+            burst* (git, a FACT); or, for a gitless project, a
+            ``delivery_candidate`` (#22, the heuristic) — never conflated.
+          * ``estancado``   — quiet + a repo with open issues still hanging.
+          * ``pausado``     — quiet + nothing open and no measurable outcome.
+
+        **Honest clocks only.** Quiescence age is measured from the *real* last
+        activity: ``max`` of the session ingest epoch (``events.created_at`` — the
+        honest metric even on resumed sessions, #18), ``path_touches.last_seen``,
+        and ``git_commits.timestamp``, each normalized to aware UTC (epoch via
+        ``fromtimestamp(..., utc)``, the two string clocks via ``_parse_ts``).
+        NEVER ``path_attributions.first_seen`` (a backfill artifact) and NEVER
+        session ``duration`` (unreliable on resume) — same discipline as
+        ``detect_delivery_candidates``. A project with NO real activity yields NO
+        state (evidence-first; absence is never fabricated into ``pausado``).
+
+        **``outcome_measurable`` (has-repo vs not).** Comes from the *repos* side
+        of ``github.db``, not the outcome counts: a repo-backed project with zero
+        PRs still has a repo, so it CAN be ``estancado`` when issues hang; a
+        gitless project's outcome is *not measurable* and it can only fall to
+        ``entregado`` (via ``delivery_candidate``) or ``pausado`` — never
+        ``estancado`` for lacking PRs it could never have (the #28 comment).
+
+        Each state carries its ``basis`` (which signal determined it) + the
+        contributing counts + ``last_activity``/``age_days`` — a read of evidence
+        surfaced with its ground, never a bare asserted flag. Reads ``events.db``
+        and ``github.db`` strictly read-only; the ``delivery_candidates`` table is
+        only READ here (this never runs detection or writes it). Returns
+        ``{project_key: {state, basis, last_activity, age_days,
+        outcome_measurable, merged_prs, closed_issues, open_issues}}``.
+        """
+        events_db_path = events_db_path or (self.db_path.parent / "events.db")
+        github_db_path = github_db_path or (self.db_path.parent / "github.db")
+        now = now or datetime.now(timezone.utc)
+        active_w = (
+            self.STATE_ACTIVE_WINDOW_SECONDS if active_window_seconds is None
+            else active_window_seconds
+        )
+        cooling_w = (
+            self.STATE_COOLING_WINDOW_SECONDS if cooling_window_seconds is None
+            else cooling_window_seconds
+        )
+        slack = timedelta(seconds=(
+            self.STATE_DELIVERY_SLACK_SECONDS if delivery_slack_seconds is None
+            else delivery_slack_seconds
+        ))
+
+        # Readers that open their own connections / take the store lock: call
+        # them OUTSIDE the lock block below (never re-enter self._lock). The
+        # session-ingest scan over events.db can be handed in by a caller that
+        # already computed it (the production view runs the same MAX(created_at)
+        # group-by), so the hot path pays for that ~194MB scan ONCE, not twice
+        # (invariant §2.4 — the dashboard stays fast).
+        sess_ingest = (
+            self._read_session_ingest(events_db_path)
+            if session_ingest is None else session_ingest
+        )
+        git_last = self._read_git_latest_by_workspace(github_db_path)
+        github_state = self._read_github_state(github_db_path)
+
+        # Real last-activity clock per canonical project, folded over every
+        # workspace that maps to it.
+        last_real: dict[str, datetime] = {}
+
+        def _bump(pk: str | None, ts: datetime | None) -> None:
+            if pk is None or ts is None:
+                return
+            cur = last_real.get(pk)
+            if cur is None or ts > cur:
+                last_real[pk] = ts
+
+        with self._lock:
+            conn = self._conn
+            wid_pk: dict[int, str] = {}
+            for wid, pk in conn.execute(
+                "SELECT workspace_id, project_key FROM workspace_classification "
+                "WHERE project_key IS NOT NULL"
+            ):
+                wid_pk[wid] = pk
+            # Sessions attributed to each workspace → project ingest recency.
+            for wid, sid, prov in conn.execute(
+                "SELECT workspace_id, session_id, provider FROM path_attributions"
+            ):
+                _bump(wid_pk.get(wid), sess_ingest.get((sid, prov or "")))
+            # Filesystem watcher touches.
+            for wid, last_seen in conn.execute(
+                "SELECT workspace_id, last_seen FROM path_touches"
+            ):
+                _bump(wid_pk.get(wid), _parse_ts(last_seen))
+            # Git commits (already parsed to aware UTC by the reader).
+            for wid, (ts, _sha) in git_last.items():
+                _bump(wid_pk.get(wid), ts)
+            # Gitless delivery heuristic: which projects have a candidate row.
+            dc_projects: set[str] = set()
+            for (wid,) in conn.execute(
+                "SELECT DISTINCT workspace_id FROM delivery_candidates"
+            ):
+                pk = wid_pk.get(wid)
+                if pk is not None:
+                    dc_projects.add(pk)
+
+        out: dict[str, dict[str, Any]] = {}
+        for pk, lr in last_real.items():
+            gh = github_state.get(pk, {})
+            measurable = bool(gh.get("has_repo", False))
+            merged = int(gh.get("merged_prs", 0))
+            closed = int(gh.get("closed_issues", 0))
+            open_ = int(gh.get("open_issues", 0))
+            age = (now - lr).total_seconds()
+
+            if age < active_w:
+                state, basis = "activo", "recent_activity"
+            elif age < cooling_w:
+                state, basis = "enfriandose", "tapering_activity"
+            else:
+                # Quiet band — the outcome decides. A delivery closes the burst
+                # only if it landed within slack of the real last activity.
+                cutoff = lr - slack
+                lm = gh.get("latest_merge")
+                lc = gh.get("latest_close")
+                merged_closing = lm is not None and lm >= cutoff
+                closed_closing = lc is not None and lc >= cutoff
+                if merged_closing or closed_closing:
+                    state = "entregado"
+                    # Attribute to whichever qualifying signal is the more recent.
+                    if merged_closing and (lc is None or lm >= lc):
+                        basis = "merged_pr"
+                    else:
+                        basis = "closed_issue"
+                elif not measurable and pk in dc_projects:
+                    # Gitless: fall back to the local heuristic (never a FACT).
+                    state, basis = "entregado", "delivery_candidate"
+                elif measurable and open_ > 0:
+                    state, basis = "estancado", "open_issues"
+                else:
+                    state, basis = "pausado", "quiescent_no_outcome"
+
+            out[pk] = {
+                "state": state,
+                "basis": basis,
+                "last_activity": lr.isoformat(),
+                "age_days": round(age / 86400.0, 2),
+                "outcome_measurable": measurable,
+                "merged_prs": merged,
+                "closed_issues": closed,
+                "open_issues": open_,
+            }
+        return out
+
+    @staticmethod
+    def _read_session_ingest(
+        events_db_path: str | Path,
+    ) -> dict[tuple[str, str], datetime]:
+        """Real session ingest recency from events.db (read-only).
+
+        ``{(session_id, provider): aware-UTC datetime}`` where the datetime is
+        ``MAX(events.created_at)`` — the *ingestion* epoch, the honest activity
+        clock (#18: original timestamps span months on resumed sessions, the
+        ingest epoch does not). ``created_at`` is a ``REAL`` epoch, so it is
+        converted with ``fromtimestamp(..., utc)`` — ``_parse_ts`` (string clocks)
+        cannot parse it.
+        """
+        if not os.path.exists(str(events_db_path)):
+            return {}
+        try:
+            src = sqlite3.connect(f"file:{events_db_path}?mode=ro", uri=True, timeout=5)
+        except sqlite3.OperationalError:
+            return {}
+        out: dict[tuple[str, str], datetime] = {}
+        try:
+            for sid, prov, mx in src.execute(
+                "SELECT session_id, provider, MAX(created_at) FROM events "
+                "WHERE session_id IS NOT NULL AND session_id != '' "
+                "GROUP BY session_id, provider"
+            ):
+                if mx is None:
+                    continue
+                try:
+                    out[(sid, prov or "")] = datetime.fromtimestamp(
+                        float(mx), tz=timezone.utc
+                    )
+                except (OverflowError, OSError, ValueError):
+                    continue
+        except sqlite3.OperationalError:
+            return {}
+        finally:
+            src.close()
+        return out
+
+    def _read_github_state(
+        self, github_db_path: str | Path
+    ) -> dict[str, dict[str, Any]]:
+        """Per-project GitHub state for the state chip (read-only over github.db).
+
+        Like ``read_github_outcome`` but two things differ, both required by the
+        #28 model: (1) ``has_repo`` is folded from the *repos* side, so a
+        repo-backed project with ZERO PRs/issues still reports measurable (the
+        outcome map would drop it — line-733 ``any(counts)`` filter — reproducing
+        the "repo-with-0-PRs looks gitless" bug the #28 comment calls out); and
+        (2) the *latest* merged-PR / closed-issue timestamps are carried so the
+        state layer can tell a delivery that CLOSED the burst from an old one.
+        ``read_github_outcome`` (#27, tested + consumed by the production view) is
+        left untouched — the state layer uses its own reader.
+
+        Contributor-agnostic (author never selected). Returns
+        ``{project_key: {merged_prs, closed_issues, open_issues, has_repo,
+        latest_merge, latest_close}}`` (the two timestamps aware-UTC or ``None``);
+        ``{}`` when github.db or its tables are absent.
+        """
+        if not os.path.exists(str(github_db_path)):
+            return {}
+        try:
+            src = sqlite3.connect(f"file:{github_db_path}?mode=ro", uri=True, timeout=5)
+        except sqlite3.OperationalError:
+            return {}
+        try:
+            repos = src.execute("SELECT id, path FROM repos").fetchall()
+            agg = src.execute(
+                """SELECT repo_id,
+                          SUM(CASE WHEN is_pull_request = 1
+                                    AND pr_merged_at IS NOT NULL
+                                   THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN is_pull_request = 0
+                                    AND state = 'closed'
+                                   THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN is_pull_request = 0
+                                    AND state = 'open'
+                                   THEN 1 ELSE 0 END),
+                          MAX(CASE WHEN is_pull_request = 1
+                                    AND pr_merged_at IS NOT NULL
+                                   THEN pr_merged_at END),
+                          MAX(CASE WHEN is_pull_request = 0
+                                    AND state = 'closed'
+                                   THEN closed_at END)
+                   FROM github_issues GROUP BY repo_id"""
+            ).fetchall()
+        except sqlite3.OperationalError:
+            src.close()
+            return {}
+        src.close()
+        by_repo = {
+            rid: (m or 0, c or 0, o or 0, mt, ct)
+            for rid, m, c, o, mt, ct in agg
+        }
+
+        out: dict[str, dict[str, Any]] = {}
+        key_cache: dict[str, str | None] = {}
+        with self._lock:
+            for repo_id, repo_path in repos:
+                if not repo_path:
+                    continue
+                pk = key_cache.get(repo_path, ...)  # type: ignore[arg-type]
+                if pk is ...:
+                    ident = resolve_dir(repo_path)
+                    try:
+                        row = self._conn.execute(
+                            """SELECT c.project_key
+                               FROM workspaces w
+                               JOIN workspace_classification c
+                                 ON c.workspace_id = w.id
+                               WHERE w.workspace_key = ?""",
+                            (ident.key,),
+                        ).fetchone()
+                    except sqlite3.OperationalError:
+                        return {}
+                    pk = row[0] if row and row[0] else None
+                    key_cache[repo_path] = pk
+                if pk is None:  # repo has no canonical project — skip, never guess
+                    continue
+                m, c, o, mt, ct = by_repo.get(repo_id, (0, 0, 0, None, None))
+                cell = out.setdefault(pk, {
+                    "merged_prs": 0, "closed_issues": 0, "open_issues": 0,
+                    "has_repo": True, "latest_merge": None, "latest_close": None,
+                })
+                cell["has_repo"] = True
+                cell["merged_prs"] += m
+                cell["closed_issues"] += c
+                cell["open_issues"] += o
+                mtd = _parse_ts(mt)
+                if mtd is not None and (
+                    cell["latest_merge"] is None or mtd > cell["latest_merge"]
+                ):
+                    cell["latest_merge"] = mtd
+                ctd = _parse_ts(ct)
+                if ctd is not None and (
+                    cell["latest_close"] is None or ctd > cell["latest_close"]
+                ):
+                    cell["latest_close"] = ctd
+        return out
+
     # --- delivery_candidate (issue #22 — Phase C, correlate) ---
 
     # Precondition window: a workspace must have been silent (across REAL clocks)

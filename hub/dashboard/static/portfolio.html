@@ -44,6 +44,15 @@
   .proj-name { color:var(--accent); font-weight:600; flex:1; word-break:break-all; }
   .proj-meta { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
   .chip { display:inline-block; padding:1px 7px; border-radius:10px; font-size:10px; border:1px solid var(--border); color:var(--muted); margin-left:6px; }
+  /* Derived project state (#28): activity+outcome fused into one honest read.
+     Each chip carries its basis + last-activity age in the tooltip — a read of
+     evidence, never a bare flag. Colored by state; muted border baseline. */
+  .st { border-radius:10px; font-size:10px; padding:1px 7px; margin-left:6px; display:inline-block; border:1px solid; white-space:nowrap; }
+  .st-activo      { color:#3fb950; border-color:#3fb95055; background:#3fb95015; }
+  .st-enfriandose { color:#d29922; border-color:#d2992255; background:#d2992215; }
+  .st-entregado   { color:#58a6ff; border-color:#58a6ff55; background:#58a6ff15; }
+  .st-estancado   { color:#db6d28; border-color:#db6d2855; background:#db6d2815; }
+  .st-pausado     { color:var(--muted); border-color:var(--border); }
   .caret { color:var(--muted); width:12px; display:inline-block; transition:transform .12s; }
   .proj.open .caret { transform:rotate(90deg); }
   /* Leaf projects (no nested children) are not expandable — no caret glyph, no
@@ -181,6 +190,45 @@ function outcomeStr(p){
   return s;
 }
 
+// Derived project state (#28): the epic integrator — actividad local (sesiones/
+// bolitas/fs/git) FUSIONADA con el outcome de GitHub en una sola lectura honesta.
+// El chip trae su base (qué señal lo determinó) y la antigüedad de la última
+// actividad en el tooltip: es una lectura de evidencia surfaced con su fundamento,
+// nunca un flag pelado. Frío (#25) = los estados quietos (pausado/enfriándose/
+// estancado), cada uno con su antigüedad.
+const STATE_META = {
+  activo:      {emoji:'🟢', label:'activo'},
+  enfriandose: {emoji:'🟡', label:'enfriándose'},
+  entregado:   {emoji:'🔵', label:'entregado'},
+  estancado:   {emoji:'🟠', label:'estancado'},
+  pausado:     {emoji:'⚪', label:'pausado'},
+};
+const STATE_BASIS = {
+  recent_activity:      'actividad reciente en la ventana',
+  tapering_activity:    'actividad decayendo, algo de tiempo sin sesiones',
+  merged_pr:            'PR mergeado que cerró el burst (GitHub, hecho)',
+  closed_issue:         'issue cerrado que cerró el burst (GitHub, hecho)',
+  delivery_candidate:   'candidato de entrega local (gitless, heurístico)',
+  open_issues:          'quieto con issues abiertos colgando',
+  quiescent_no_outcome: 'quieto, nada abierto, sin outcome medible',
+};
+function ageStr(d){
+  if (d == null) return '';
+  if (d < 1) return 'hoy';
+  const n = Math.round(d);
+  return n === 1 ? 'hace 1 día' : `hace ${n} días`;
+}
+function stateChip(st){
+  if (!st || !st.state) return '';
+  const m = STATE_META[st.state];
+  if (!m) return '';
+  const age = ageStr(st.age_days);
+  const basis = STATE_BASIS[st.basis] || st.basis || '';
+  const meas = st.outcome_measurable ? 'con repo (outcome medible)' : 'sin repo (outcome no medible)';
+  const tip = `${m.label} — ${basis}. Última actividad: ${age}. ${meas}.`;
+  return `<span class="st st-${st.state}" title="${esc(tip)}">${m.emoji} ${m.label}${age?` · ${esc(age)}`:''}</span>`;
+}
+
 function renderStrip(daysList, dayData, maxCount){
   const cw=14, gap=3, h=16;
   const W = Math.max(daysList.length*(cw+gap)-gap, cw);
@@ -220,7 +268,7 @@ function renderProduction(data, daysN){
     // proyecto tiene algo entregado; enteros contributor-agnostic, sin nombres.
     const outcome = outcomeStr(p);
     return `<div class="prod-row">
-      <span class="prod-label">${esc(p.project_label || '—')}</span>
+      <span class="prod-label">${esc(p.project_label || '—')}${stateChip(p.state)}</span>
       <span class="prod-strip">${renderStrip(daysList, p.days||{}, maxCount)}</span>
       <span class="prod-stats"><b>${p.sessions}</b> ses · <b>${p.active_days}</b>d · ${deliv}${outcome}</span>
     </div>`;
@@ -288,7 +336,7 @@ async function loadPortfolio(){
       return `<div class="${cls}">
         <div class="proj-head"${onclick}>
           <span class="caret">${caret}</span>
-          <span class="proj-name">${esc(p.project_label || p.project_key)}${harnessChip}${kidsChip}</span>
+          <span class="proj-name">${esc(p.project_label || p.project_key)}${stateChip(p.state)}${harnessChip}${kidsChip}</span>
           <span class="proj-meta">${badges(p.sources)} ${metaStr(p)}</span>
         </div>
         ${hasKids ? `<div class="kids">${kids}</div>` : ''}
