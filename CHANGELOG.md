@@ -6,6 +6,62 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.17.0] — 2026-09-19
+
+Third and final unit of the **Project Intelligence** epic (#26): the portfolio
+grows a third tier — **client/org → project → materials** — so the work reads
+by *who it's for*, not just as a flat list of repos. **Closes epic #26**
+(Observe → Correlate, from effort to outcome, is now whole).
+
+### Added
+- **Unified client/org hierarchy (#29)** — a read-layer projection
+  (`hub/cache/portfolio_clients.py`) that hangs a client tier over the Stage-1
+  project grouping. A **client attribution ladder** decides, per project, who it
+  belongs to (first match wins):
+  - **Manual override** (`client_overrides`: `project_key → client`) → **git-remote
+    owner** (primary: `github.com/<org>/<repo>` → org) → **parent-folder
+    convention** (gitless fallback: `~/Downloads/Claude/<client>/<project>`).
+  - Orgs are matched **case- and underscore-insensitively** (`_eventsmx` /
+    `EventsMX` → `eventsmx`), so a non-git materials folder **reconciles onto the
+    same client node** as the git products under it — two feeds (filesystem +
+    GitHub org) of the one tree.
+- **Client classification** — a known client org (`[workspace] client_orgs`,
+  curatable) becomes a **client node** grouping its projects; the owner's own org
+  (`personal_orgs`) shows its projects **loose** (no client node); an unknown git
+  org lands in the **externos / referencia** drawer (cloned deps/repos); a shared
+  workspace of the owner's own (e.g. `PRODUCCIONES`) stays a **top-level node**,
+  never forced under a client.
+- **Auto-seed for `client_orgs`** — computed from the two stores (github.db repo
+  owners ∪ workspace.db orgs with ≥2 projects), firing **only when the owner
+  identity is known** (`personal_orgs` / `[user] github_handle`). Owner-curatable.
+- **Client-level rollup (contributor-agnostic)** — effort (session/fs/git touches;
+  `active_days` **UNIONed** over real day sets, never summed), **outcome**
+  (merged-PR / closed-issue / open-issue, all authors summed, none surfaced), and
+  the **hottest** project state (activo ≻ enfriándose ≻ estancado ≻ entregado ≻
+  pausado) all roll up to the client node, each carrying its evidence.
+- **Config `[workspace]`** — `client_orgs`, `personal_orgs`, `client_overrides`
+  (all optional; serialize/parse alongside `hide_project_names`).
+- **Dashboard `/portfolio`** — renders the collapsible client tier + externos
+  drawer, read-on-load; `hide_project_names` masks client and project labels
+  (join keys untouched).
+
+### Notes
+- **Starts invisible** — with no owner identity configured the projection is a
+  **flat no-op**, byte-for-byte the pre-#29 portfolio. One config line activates
+  it: `[workspace] personal_orgs = ["<your-org>"]` (or `[user] github_handle`),
+  and the auto-seed does the rest.
+- **Invariants held** — `delivery_candidate` (#22), the outcome layer (#27) and
+  derived state (#28) are **consumed, not changed**; resolver (#20), watcher
+  (#21), the `project` field, `events.db`/`github.db` (read **read-only**) and
+  the SSE stream are untouched; `author` is never surfaced (team latent, deferred
+  to v2.x Org-Scale). Zero new dependencies.
+- **Follow-up [#30](https://github.com/fmicalizzi/moolmesh/issues/30)** —
+  container split (e.g. `PRODUCCIONES` decomposed into its distinct
+  projects/clients) needs re-anchoring at the resolver layer and is deferred; the
+  shared workspace renders as its own node until then.
+
+---
+
 ## [1.16.0] — 2026-09-19
 
 Second unit of the **Project Intelligence** epic (#26): the portfolio stops

@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.16.0
+Last updated: September 2026 — v1.17.0
 
 ---
 
@@ -124,6 +124,17 @@ Second unit of the **Project Intelligence** epic ([#26](https://github.com/fmica
 - **Absorbs the cold-projects view (#25)** — the quiet states (*pausado/enfriándose/estancado*) are the cold surface, each with its last-activity age; #25 folds in and closes.
 - **Additive** — `delivery_candidate` detection (#22), resolver (#20), watcher (#21), the `project` field, and SSE are untouched; `events.db`/`github.db` read **read-only**; `author` never surfaced (team latent). Zero new dependencies.
 
+### v1.17 — Project Intelligence (Unit 3: client/org hierarchy)
+
+Third and final unit of the **Project Intelligence** epic ([#26](https://github.com/fmicalizzi/moolmesh/issues/26)): the portfolio grows a third tier — **client/org → project → materials** — so the work reads by *who it's for*. **Closes epic #26.**
+
+- **#29 (Unit 3) — unified client/org hierarchy.** A read-layer projection hangs a client tier over the Stage-1 grouping via a **client attribution ladder**: manual override → **git-remote owner** (primary) → **parent-folder convention** (gitless fallback). Orgs are matched **case/underscore-insensitively** (`_eventsmx` / `EventsMX` → `eventsmx`), so the non-git materials folder **reconciles onto the same client** as its git products — filesystem + GitHub org as two feeds of one tree.
+- **Client classification.** A known client org (`[workspace] client_orgs`, curatable, **auto-seeded** from github.db repo owners ∪ workspace.db orgs with ≥2 projects) → a **client node**; the owner's own org (`personal_orgs`) → projects shown **loose**; an unknown git org → **externos/referencia** drawer; a shared workspace of the owner's own (`PRODUCCIONES`) → its own **top-level node**, never forced under a client.
+- **Client rollup (contributor-agnostic).** Effort (`active_days` **UNIONed**, not summed), **outcome** (merged-PR/closed-issue, all authors summed), and the **hottest** project state all roll up to the client, each with its evidence.
+- **Starts invisible** — no owner identity → **flat no-op** (byte-for-byte pre-#29); one config line (`personal_orgs` / `github_handle`) activates it.
+- **Consumes, doesn't change** — `delivery_candidate` (#22), the outcome layer (#27) and derived state (#28); resolver (#20), watcher (#21), the `project` field, SSE and `events.db`/`github.db` (read-only) untouched; `author` never surfaced. Zero new dependencies.
+- **Follow-up [#30](https://github.com/fmicalizzi/moolmesh/issues/30)** — container split (`PRODUCCIONES` → its distinct child projects/clients) needs re-anchoring at the resolver and is deferred.
+
 ---
 
 ## Planned
@@ -141,14 +152,16 @@ Recover the project-first model of MoolMesh's root and add **direct folder obser
 
 Indicative release mapping (features = minor bumps; each phase independently shippable per its issue's Definition of Done): Phase A → `v1.10.0` ([#20](https://github.com/fmicalizzi/moolmesh/issues/20), **delivered**; see Delivered above), Phase B → `v1.11.0` ([#21](https://github.com/fmicalizzi/moolmesh/issues/21), **delivered**; see Delivered above), Phase C → `v1.12.0` ([#22](https://github.com/fmicalizzi/moolmesh/issues/22), **delivered**; see Delivered above), Phase D → `v2.x`. Preceded by the Observe-hygiene line (delivered in `v1.9.0`; see Delivered above). Standard flow: AGENTS.md §7 + CI `preflight`. Epic: [#19](https://github.com/fmicalizzi/moolmesh/issues/19).
 
-### Project Intelligence (epic #26)
+### Project Intelligence (epic #26) — ✅ complete
 
-From *effort* to *outcome* — the loose portfolio follow-ups (#24 Stage 3, #25) unify into one model here. Unit 1 (outcome layer + folder-monitoring flag, #27) is delivered in `v1.15.0` and Unit 2 (derived project state, #28, absorbing #25) in `v1.16.0` — see Delivered above. Remaining unit:
+From *effort* to *outcome* — the loose portfolio follow-ups (#24 Stage 3, #25) unified into one model here. **All three units are delivered:** Unit 1 (outcome layer + folder-monitoring flag, #27) in `v1.15.0`, Unit 2 (derived project state, #28, absorbing #25) in `v1.16.0`, and Unit 3 (unified client/org hierarchy, #29, absorbing #24 Stage 3) in `v1.17.0` — see Delivered above. The epic is closed.
 
-- **Unit 3 — unified client/org hierarchy** ([#29](https://github.com/fmicalizzi/moolmesh/issues/29)): a three-tier client → project → materials tree fed by BOTH the filesystem and the GitHub org. **Absorbs client attribution (#24 Stage 3).**
+Deferred out of the epic:
+
+- **Container split** ([#30](https://github.com/fmicalizzi/moolmesh/issues/30)): decompose a shared-workspace node (`PRODUCCIONES`) into its distinct child projects/clients — needs re-anchoring at the resolver layer, so it is a separate follow-up rather than part of #29.
 - **Team/org visibility** — deferred to `v2.x` Org-Scale: the outcome data is inherently multi-actor and the model already carries contributors latently (counted contributor-agnostic today); not built now — the largest privacy surface.
 
-(#24 and #25 are folded into this epic and closed as superseded.)
+(#24 and #25 were folded into this epic and closed as superseded.)
 
 ### Provider pipeline (Breadth — VISION §5)
 
