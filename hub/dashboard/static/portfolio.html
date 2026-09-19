@@ -76,6 +76,9 @@
   .prod-stats { flex:0 0 auto; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; text-align:right; }
   .prod-stats b { color:var(--text); font-weight:600; }
   .prod-deliv { color:var(--green); } .prod-deliv.zero { color:var(--muted); }
+  /* Outcome (#27): entrega GitHub — hecho, totales all-time (ver tooltip). */
+  .prod-pr { color:var(--purple); } .prod-issue { color:var(--cyan); } .prod-open { color:var(--orange); }
+  .prod-pr b, .prod-issue b, .prod-open b { color:var(--text); }
   .prod-legend { display:flex; flex-wrap:wrap; gap:14px; margin-top:10px; font-size:11px; color:var(--muted); align-items:center; }
   .prod-legend span { display:inline-flex; align-items:center; gap:5px; }
   .prod-legend i { width:9px; height:9px; border-radius:2px; display:inline-block; }
@@ -84,6 +87,11 @@
   .lg-cursor { background:var(--yellow); } .lg-other { background:var(--muted); }
   .prod-scale { display:inline-flex; align-items:center; gap:3px; margin-left:auto; }
   .prod-scale i { width:11px; height:11px; border-radius:2px; display:inline-block; background:var(--cyan); }
+  /* Folder-monitoring indicator (#27) — capa de carpetas apagable. */
+  .fs-mon { display:flex; align-items:center; gap:8px; font-size:11px; color:var(--muted); margin-bottom:12px; padding:8px 12px; border:1px solid var(--border); border-radius:6px; background:var(--bg2); flex-wrap:wrap; }
+  .fs-mon .dot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; }
+  .fs-mon.on .dot { background:var(--green); } .fs-mon.off .dot { background:var(--muted); }
+  .fs-mon b { color:var(--text); } .fs-mon code { color:var(--accent); }
 </style>
 </head>
 <body>
@@ -103,6 +111,7 @@
   <div class="section-title">Proyectos (harness colapsado, agrupado)</div>
   <div class="hint">Las carpetas de harness (scratchpad, session-storage) se pliegan sobre su proyecto real; subdirs y materiales anidan bajo su proyecto. Nada se borra: se agrupa. Un nodo se enciende venga la actividad de una <b>sesión</b>, del <b>filesystem</b> o de <b>git</b> — conteos por señal, nunca sumados.</div>
   <div class="summary" id="pf-summary"></div>
+  <div class="fs-mon" id="fs-mon"></div>
   <div class="prod" id="prod-card">
     <div class="prod-top">
       <h3 title="Sesiones fechadas por ingesta (MAX created_at). Los totales son de la ventana elegida; una sesión que tocó varios proyectos cuenta en cada uno, así que no son aditivos entre filas.">Producción por proyecto en el tiempo — esfuerzo (sesiones), no duración</h3>
@@ -156,6 +165,22 @@ function windowDaysList(n){
 }
 function dayTotal(rec){ let t=0; if(rec) for(const n of Object.values(rec)) t+=n; return t; }
 
+// Outcome (#27): entrega autoritativa desde GitHub (PRs mergeados / issues
+// cerrados / abiertos), TOTAL all-time — no de la ventana. El tooltip lo aclara
+// para no mezclar relojes con el esfuerzo (que sí es de la ventana). Un HECHO,
+// distinto de los candidatos de entrega (heurístico). Vacío si el proyecto no
+// tiene repo GitHub o no entregó nada aún.
+function outcomeStr(p){
+  const pr=p.merged_prs||0, cl=p.closed_issues||0, op=p.open_issues||0;
+  if (!pr && !cl && !op) return '';
+  const tip='Entrega GitHub — totales all-time (no de la ventana). PR mergeados + issues cerrados/abiertos, sumando a todos los contribuidores.';
+  let s='';
+  if (pr) s += ` · <span class="prod-pr" title="${tip}"><b>${pr}</b> PR</span>`;
+  if (cl) s += ` · <span class="prod-issue" title="${tip}"><b>${cl}</b> cerr.</span>`;
+  if (op) s += ` · <span class="prod-open" title="${tip}"><b>${op}</b> abiertos</span>`;
+  return s;
+}
+
 function renderStrip(daysList, dayData, maxCount){
   const cw=14, gap=3, h=16;
   const W = Math.max(daysList.length*(cw+gap)-gap, cw);
@@ -189,10 +214,15 @@ function renderProduction(data, daysN){
     const deliv = data.deliverables_measurable
       ? `<span class="prod-deliv${p.deliverables?'':' zero'}">${p.deliverables} entreg.</span>`
       : `<span class="prod-deliv zero" title="Marcá un root con: mool workspace root add &lt;ruta&gt;">— entreg.</span>`;
+    // Outcome (#27): merged-PR / closed-issue / open-issue = entrega
+    // autoritativa desde GitHub. TOTALES all-time (no de la ventana) — distinto
+    // del esfuerzo (sesiones/días, sí de la ventana). Sólo se muestra cuando el
+    // proyecto tiene algo entregado; enteros contributor-agnostic, sin nombres.
+    const outcome = outcomeStr(p);
     return `<div class="prod-row">
       <span class="prod-label">${esc(p.project_label || '—')}</span>
       <span class="prod-strip">${renderStrip(daysList, p.days||{}, maxCount)}</span>
-      <span class="prod-stats"><b>${p.sessions}</b> ses · <b>${p.active_days}</b>d · ${deliv}</span>
+      <span class="prod-stats"><b>${p.sessions}</b> ses · <b>${p.active_days}</b>d · ${deliv}${outcome}</span>
     </div>`;
   }).join('');
 
@@ -289,10 +319,35 @@ async function loadDelivery(){
   } catch(e){ body.innerHTML = '<tr><td colspan="5" class="empty">Error al cargar.</td></tr>'; }
 }
 
+// Folder-monitoring indicator (#27): read-on-load, no SSE. Muestra si la capa
+// de monitoreo de CARPETAS está encendida y cómo activarla. Apagarla no toca
+// agentes, GitHub ni el portfolio — sólo el watcher de filesystem.
+async function loadMonitoring(){
+  const el = document.getElementById('fs-mon');
+  try {
+    const m = await (await fetch('/api/workspace/monitoring')).json();
+    let msg, how='';
+    if (m.active){
+      el.className = 'fs-mon on';
+      msg = `Monitoreo de carpetas <b>activo</b> · ${m.roots_count} root(s) marcado(s)`;
+    } else if (!m.filesystem_monitoring){
+      el.className = 'fs-mon off';
+      msg = `Monitoreo de carpetas <b>apagado</b> (flag)`;
+      how = ` — activá con <code>filesystem_monitoring = true</code> en <code>[workspace]</code>`;
+    } else {
+      el.className = 'fs-mon off';
+      msg = `Monitoreo de carpetas <b>inactivo</b> — ningún root marcado`;
+      how = ` — activá con <code>mool workspace root add &lt;ruta&gt;</code>`;
+    }
+    el.innerHTML = `<span class="dot"></span><span>${msg}${how}. Capa opcional: agentes, GitHub y el portfolio funcionan igual.</span>`;
+  } catch(e){ el.innerHTML=''; }
+}
+
 initProdToggle();
 loadProduction(prodDays);
 loadPortfolio();
 loadDelivery();
+loadMonitoring();
 </script>
 </body>
 </html>

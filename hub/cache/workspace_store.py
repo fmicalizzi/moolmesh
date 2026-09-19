@@ -654,6 +654,112 @@ class WorkspaceStore:
             src.close()
         return out
 
+    # --- Outcome layer (issue #27 — Unit 1, authoritative delivery) ---
+
+    @staticmethod
+    def read_github_outcome(
+        workspace_db_path: str | Path,
+        github_db_path: str | Path,
+    ) -> dict[str, dict[str, int]]:
+        """Merged-PR / closed-issue / open-issue counts per CANONICAL project.
+
+        Reads ``github.db`` READ-ONLY (``mode=ro``, like ``_read_git_commits``)
+        and folds each repo's outcome onto the same canonical project the rollup
+        already groups commits/sessions under: ``repos.path`` → ``resolve_dir()``
+        → ``workspaces.workspace_key`` → ``workspace_classification.project_key``.
+        Returns ``{project_key: {"merged_prs": n, "closed_issues": n,
+        "open_issues": n}}``.
+
+        The two DBs are held separate (invariant §2.4) and the join goes ONE
+        direction — the portfolio reads ``github.db``, never the reverse. Only
+        ``github.db`` is opened ``mode=ro``; ``workspace.db`` is opened with a
+        plain (read-only-used) connection, the same idiom every read helper in
+        ``mcp_server`` uses, avoiding the WAL-``mode=ro`` shm-recovery trap while
+        writing nothing.
+
+        **Contributor-agnostic / team-latent (locked #27 decision):** all
+        authors are summed at project level — ``author`` is NEVER selected here,
+        so no per-person signal leaks out; it stays stored in ``github.db`` for
+        the deferred v2.x team view. Merged-PR/closed-issue is a **FACT** for
+        git-backed projects; it is a DIFFERENT signal from ``delivery_candidate``
+        (#22, the gitless heuristic) and is never conflated with it.
+
+        Returns ``{}`` when either DB (or the needed tables) is absent —
+        GitHub/outcome is optional, exactly like the git signal. A read error
+        that fires mid-way (e.g. the classifier is DELETE+re-inserting
+        ``workspace_classification`` and a busy timeout trips) discards the WHOLE
+        outcome map and returns ``{}`` — all-or-nothing on purpose, so the view
+        never shows a half-populated set of counts that reads as authoritative.
+        """
+        if not os.path.exists(str(github_db_path)):
+            return {}
+        try:
+            src = sqlite3.connect(f"file:{github_db_path}?mode=ro", uri=True, timeout=5)
+        except sqlite3.OperationalError:
+            return {}
+        try:
+            repos = src.execute("SELECT id, path FROM repos").fetchall()
+            # Per-repo outcome (contributor-agnostic — author never selected).
+            agg = src.execute(
+                """SELECT repo_id,
+                          SUM(CASE WHEN is_pull_request = 1
+                                    AND pr_merged_at IS NOT NULL
+                                   THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN is_pull_request = 0
+                                    AND state = 'closed'
+                                   THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN is_pull_request = 0
+                                    AND state = 'open'
+                                   THEN 1 ELSE 0 END)
+                   FROM github_issues GROUP BY repo_id"""
+            ).fetchall()
+        except sqlite3.OperationalError:
+            src.close()
+            return {}
+        src.close()
+        outcome_by_repo = {rid: (m or 0, c or 0, o or 0) for rid, m, c, o in agg}
+
+        try:
+            wconn = sqlite3.connect(str(workspace_db_path), timeout=5)
+        except sqlite3.OperationalError:
+            return {}
+        out: dict[str, dict[str, int]] = {}
+        key_cache: dict[str, str | None] = {}
+        try:
+            for repo_id, repo_path in repos:
+                if not repo_path:
+                    continue
+                counts = outcome_by_repo.get(repo_id)
+                if not counts or not any(counts):
+                    continue
+                pk = key_cache.get(repo_path, ...)  # type: ignore[arg-type]
+                if pk is ...:
+                    ident = resolve_dir(repo_path)
+                    try:
+                        row = wconn.execute(
+                            """SELECT c.project_key
+                               FROM workspaces w
+                               JOIN workspace_classification c
+                                 ON c.workspace_id = w.id
+                               WHERE w.workspace_key = ?""",
+                            (ident.key,),
+                        ).fetchone()
+                    except sqlite3.OperationalError:
+                        return {}
+                    pk = row[0] if row and row[0] else None
+                    key_cache[repo_path] = pk
+                if pk is None:  # repo has no canonical project — skip, never guess
+                    continue
+                cell = out.setdefault(
+                    pk, {"merged_prs": 0, "closed_issues": 0, "open_issues": 0}
+                )
+                cell["merged_prs"] += counts[0]
+                cell["closed_issues"] += counts[1]
+                cell["open_issues"] += counts[2]
+        finally:
+            wconn.close()
+        return out
+
     # --- delivery_candidate (issue #22 — Phase C, correlate) ---
 
     # Precondition window: a workspace must have been silent (across REAL clocks)

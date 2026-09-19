@@ -237,9 +237,13 @@ class DashboardServer:
 
         # WorkspaceWatcher — filesystem path-touches (issue #21, strictly opt-in).
         # Writes to workspace.db only; never imports EventStore / the SSE hot path.
+        # The watcher starts only when folder monitoring is BOTH explicitly enabled
+        # (config.filesystem_monitoring, #27 — an apagable layer) AND at least one
+        # root is marked. Gating ONLY folder monitoring: agents + GitHub + the
+        # portfolio (incl. the outcome layer) stay ON regardless of this flag.
         self.workspace_store: Any | None = None
         self.workspace_watcher: Any | None = None
-        if config.workspace_roots:
+        if config.filesystem_monitoring and config.workspace_roots:
             from hub.cache.workspace_store import WorkspaceStore
             from hub.watchers.workspace_watcher import WorkspaceWatcher
             self.workspace_store = WorkspaceStore()
@@ -517,6 +521,19 @@ class DashboardServer:
                             _get_delivery_candidates,
                         )
                         self._serve_json(_get_delivery_candidates(WORKSPACE_DB))
+                    case "/api/workspace/monitoring":
+                        # Folder-monitoring state (#27) — read-on-load, no SSE.
+                        # Exposes whether the filesystem watcher layer is enabled
+                        # and how to turn it on (flag + a marked root). Gates ONLY
+                        # folder monitoring; agents/GitHub/portfolio are unaffected.
+                        from hub.config import load_config
+                        _cfg = load_config()
+                        _roots = len(_cfg.workspace_roots)
+                        self._serve_json({
+                            "filesystem_monitoring": bool(_cfg.filesystem_monitoring),
+                            "roots_count": _roots,
+                            "active": bool(server_ref.workspace_watcher is not None),
+                        })
                     # --- API: Repos ---
                     case "/api/repos":
                         if server_ref.git_store:

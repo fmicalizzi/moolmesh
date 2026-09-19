@@ -761,6 +761,7 @@ def _portfolio_production(
     days: int = 30,
     today: str | None = None,
     hide: bool | None = None,
+    github_db: str | None = None,
 ) -> dict[str, Any]:
     """Per-project production over time — the honest-metric chart (#24 Stage 2).
 
@@ -778,10 +779,21 @@ def _portfolio_production(
     cross-project session is genuine activity in every project it touched;
     portfolio-wide session counts are therefore NOT additive across rows.
 
+    Each project also carries an OUTCOME layer (issue #27) — ``merged_prs``,
+    ``closed_issues``, ``open_issues`` — the authoritative delivery already
+    ingested in ``github.db``, folded onto the SAME canonical project (read-only
+    join; see ``WorkspaceStore.read_github_outcome``). Contributor-agnostic (all
+    authors summed, none surfaced). These are a merged-PR/closed-issue **FACT**,
+    a distinct signal from ``delivery_candidate`` (#22) — never conflated. NOTE:
+    outcome counts are **all-time totals**, not windowed like the effort columns
+    (the UI labels this); they attach only to projects already visible in the
+    window (no phantom rows). Missing ``github.db`` → all three are 0.
+
     Window: the last ``days`` local days ending at ``today`` (defaults to the
     local current day; injectable for tests). Read-only over events.db +
-    workspace.db; empty structure when either DB or its tables are absent.
-    Labels masked when ``hide_project_names`` is set.
+    workspace.db (+ github.db for outcome); empty structure when events/workspace
+    DB or its tables are absent. Labels masked when ``hide_project_names`` is set
+    (outcome counts are integers — nothing to mask).
     """
     import datetime
     days = min(max(int(days), 1), 90)
@@ -890,15 +902,30 @@ def _portfolio_production(
             if day > g["last_day"]:
                 g["last_day"] = day
 
+    # 5. Outcome layer (#27) — merged-PR/closed-issue/open-issue per canonical
+    #    project from github.db (read-only). Best-effort: a missing/unreadable
+    #    github.db must never break the effort view, so failures fall back to {}.
+    if github_db is None:
+        github_db = os.path.join(os.path.dirname(workspace_db), "github.db")
+    try:
+        from hub.cache.workspace_store import WorkspaceStore
+        outcome = WorkspaceStore.read_github_outcome(workspace_db, github_db)
+    except Exception:
+        outcome = {}
+
     from hub.config import masked_label
     projects = []
     for pk, g in proj.items():
+        oc = outcome.get(pk, {})
         projects.append({
             "project_key": pk,
             "project_label": masked_label(g["project_label"], hide),
             "sessions": len(g["_sessions"]),
             "active_days": len(g["_days"]),
             "deliverables": deliverables.get(pk, 0),
+            "merged_prs": oc.get("merged_prs", 0),
+            "closed_issues": oc.get("closed_issues", 0),
+            "open_issues": oc.get("open_issues", 0),
             "last_day": g["last_day"],
             "days": g["days"],
         })
@@ -914,14 +941,19 @@ def _portfolio_production(
 
 
 def _get_portfolio_production(
-    events_db: str, workspace_db: str, days: int = 30, today: str | None = None
+    events_db: str, workspace_db: str, days: int = 30, today: str | None = None,
+    github_db: str | None = None,
 ) -> dict[str, Any]:
-    """MCP/dashboard entry for the production chart (issue #24 Stage 2).
+    """MCP/dashboard entry for the production chart (issue #24 Stage 2 + #27).
 
     Thin wrapper resolving ``hide_project_names`` at call time; the work lives
     in ``_portfolio_production`` (pure over its DB paths + injectable ``today``).
+    ``github_db`` defaults to the ``events.db`` sibling for the outcome layer.
     """
-    return _portfolio_production(events_db, workspace_db, days, today=today)
+    if github_db is None:
+        github_db = GITHUB_DB
+    return _portfolio_production(events_db, workspace_db, days, today=today,
+                                 github_db=github_db)
 
 
 def _get_workspace_activity(
@@ -1308,10 +1340,16 @@ if _mcp is not None:
         devuelve la serie diaria por provider (la tira de contribución),
         `sessions`, `active_days` y `deliverables` (conteo de imagen/video desde
         el watcher de filesystem — 0 hasta que se marca un root, con
-        `deliverables_measurable` para no mostrar un cero silencioso). Una sesión
-        que tocó N proyectos cuenta en CADA uno (los totales NO son aditivos
-        entre filas). Ordenado por actividad más reciente. Con
-        `hide_project_names`, los labels se enmascaran.
+        `deliverables_measurable` para no mostrar un cero silencioso). Cada
+        proyecto trae además la capa de OUTCOME (#27): `merged_prs`,
+        `closed_issues`, `open_issues` desde `github.db` (entrega autoritativa,
+        contributor-agnostic — todos los autores sumados, ninguno expuesto),
+        plegada sobre el mismo proyecto canónico. Son TOTALES all-time (no de la
+        ventana) y un HECHO distinto de `delivery_candidate` (#22, heurístico
+        gitless) — nunca se confunden. Una sesión que tocó N proyectos cuenta en
+        CADA uno (los totales de esfuerzo NO son aditivos entre filas). Ordenado
+        por actividad más reciente. Con `hide_project_names`, los labels se
+        enmascaran (los conteos de outcome son enteros — nada que enmascarar).
 
         Args:
             days: Ventana en días (1–90, default 30).
