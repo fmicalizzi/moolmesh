@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.14.0
+Last updated: September 2026 — v1.15.0
 
 ---
 
@@ -102,6 +102,19 @@ Second stage of the portfolio-intelligence epic ([#24](https://github.com/fmical
 
 ---
 
+### v1.15 — Project Intelligence (Unit 1: outcome layer)
+
+First unit of the **Project Intelligence** epic ([#26](https://github.com/fmicalizzi/moolmesh/issues/26)): the portfolio moves from measuring *effort* to also surfacing *outcome* (the "Correlate" rung — activity ↔ delivery).
+
+- **#27 (Unit 1) — outcome layer.** The production view now carries, next to the effort columns, the **authoritative delivery already ingested in `github.db`**: **merged PRs + closed issues + open issues** per **canonical project** (`workspace_classification.project_key`, so harness folds into its real project). e.g. *fiestados: 39 ses · 10d · 180 PR · 101 cerr · 52 abiertos*.
+  - **Fact, not heuristic** — a merged PR / closed issue is a **fact** for git-backed projects, a distinct signal from `delivery_candidate` (#22, the gitless heuristic); the two are never conflated.
+  - **Contributor-agnostic (team latent)** — all authors summed at project level; no per-person breakdown, `author` never surfaced. All-time totals, labelled as such in the UI (not window-scoped like effort).
+  - **`github.db` read-only** — the join goes one direction (portfolio reads `github.db`, `mode=ro`); nothing writes back.
+- **#27 (Unit 1) — explicit folder-monitoring opt-in.** A `[workspace] filesystem_monitoring` flag (default on) makes the Phase B watcher an explicit, discoverable toggle; it gates **only** folder monitoring — agents, GitHub and the portfolio (incl. the outcome layer) stay on regardless. Dashboard shows the state + how to enable.
+- **Additive** — `delivery_candidate` (#22), resolver (#20), watcher (#21) logic, `events.db`, the `project` field, SSE and the Stage-1 classification are untouched (consumed only). Zero new dependencies.
+
+---
+
 ## Planned
 
 > Strategy lives in [`VISION_ROADMAP.md`](VISION_ROADMAP.md) (español: [`VISION_ROADMAP.es.md`](VISION_ROADMAP.es.md)); this is the tactical log. Version numbers below are indicative, not committed.
@@ -117,10 +130,15 @@ Recover the project-first model of MoolMesh's root and add **direct folder obser
 
 Indicative release mapping (features = minor bumps; each phase independently shippable per its issue's Definition of Done): Phase A → `v1.10.0` ([#20](https://github.com/fmicalizzi/moolmesh/issues/20), **delivered**; see Delivered above), Phase B → `v1.11.0` ([#21](https://github.com/fmicalizzi/moolmesh/issues/21), **delivered**; see Delivered above), Phase C → `v1.12.0` ([#22](https://github.com/fmicalizzi/moolmesh/issues/22), **delivered**; see Delivered above), Phase D → `v2.x`. Preceded by the Observe-hygiene line (delivered in `v1.9.0`; see Delivered above). Standard flow: AGENTS.md §7 + CI `preflight`. Epic: [#19](https://github.com/fmicalizzi/moolmesh/issues/19).
 
-### Portfolio intelligence (epic #24)
+### Project Intelligence (epic #26)
 
-- **Stage 3 — client attribution** ([#24](https://github.com/fmicalizzi/moolmesh/issues/24)): group/re-axis the portfolio by client (git-remote owner → parent-folder convention → manual override). Stages 1 (grouping, `v1.13.0`) and 2 (production-over-time, `v1.14.0`) are delivered — see Delivered above.
-- **Cold-projects view** ([#25](https://github.com/fmicalizzi/moolmesh/issues/25)): surface projects with no activity in the selected window (the production strip currently shows only projects active in-window). A known follow-up to Stage 2.
+From *effort* to *outcome* — the loose portfolio follow-ups (#24 Stage 3, #25) unify into one model here. Unit 1 (outcome layer + folder-monitoring flag, #27) is delivered in `v1.15.0` — see Delivered above. Remaining units, each independently shippable:
+
+- **Unit 2 — derived project state** ([#28](https://github.com/fmicalizzi/moolmesh/issues/28)): a per-project state (activo / caliente / enfriándose / pausado / entregado / estancado) fusing local activity + the GitHub outcome layer. **Absorbs the cold-projects view (#25).**
+- **Unit 3 — unified client/org hierarchy** ([#29](https://github.com/fmicalizzi/moolmesh/issues/29)): a three-tier client → project → materials tree fed by BOTH the filesystem and the GitHub org. **Absorbs client attribution (#24 Stage 3).**
+- **Team/org visibility** — deferred to `v2.x` Org-Scale: the outcome data is inherently multi-actor and the model already carries contributors latently (counted contributor-agnostic today); not built now — the largest privacy surface.
+
+(#24 and #25 are folded into this epic and closed as superseded.)
 
 ### Provider pipeline (Breadth — VISION §5)
 

@@ -517,7 +517,8 @@ MoolMesh started with coding-agent sessions, but the vision is to **observe the 
 | **Shipped** | v1.12 | **Workspace axis — Phase C:** signal-agnostic portfolio rollup (session + filesystem + git) + `delivery_candidate` (candidate with confidence); read-on-load `/portfolio` dashboard view (#22) |
 | **Shipped** | v1.13 | **Portfolio intelligence — Stage 1:** collapse agent-harness folders onto their real project (session-cwd + validated decode) + hierarchical grouping (subdirs/materials nested, config dotfolders de-prioritized); additive `workspace_classification`, grouped `/portfolio` view (#24) |
 | **Shipped** | v1.14 | **Portfolio intelligence — Stage 2:** production-over-time — per-project contribution strip (sessions/day by honest ingestion `created_at`), colored by agent, ordered by recency, 4d/week/month toggle; effort = sessions + active days (not duration); image/video deliverable count; inline SVG (zero-dep); leaf-project caret fix (#24) |
-| **Planned** | v1.15 | **Portfolio intelligence — Stage 3:** client attribution + manual override (#24); cold-projects view (#25) |
+| **Shipped** | v1.15 | **Project Intelligence — Unit 1: outcome layer:** merged-PR / closed-issue / open-issue per canonical project in the production view (authoritative delivery from `github.db`, read-only, contributor-agnostic) + explicit `[workspace] filesystem_monitoring` opt-in flag & dashboard indicator (gates only folder monitoring, not the portfolio) (#27) |
+| **Planned** | — | **Project Intelligence (epic #26):** Unit 2 — derived project state (absorbs cold-projects #25) (#28); Unit 3 — unified client/org hierarchy (absorbs client attribution #24 Stage 3) (#29) |
 | **Future** | v2.x | Workspace Phase D (cross-machine, opt-in); autonomous agents; org-scale observability |
 
 See [ROADMAP.md](ROADMAP.md) for detailed plans, open questions, and design principles.
