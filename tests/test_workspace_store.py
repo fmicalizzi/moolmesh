@@ -2,6 +2,7 @@
 
 import sqlite3
 import time
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
 from pathlib import Path
 
 import pytest
@@ -788,3 +789,213 @@ class TestGithubOutcome:
         assert rows[0]["open_issues"] == 1
         assert rows[0]["closed_issues"] == 0
         assert rows[0]["sessions"] == 1  # effort column still present
+
+
+def _utc_iso(dt) -> str:
+    """Explicit-UTC ISO string — _parse_ts reads naive strings as SYSTEM-LOCAL,
+    so every GitHub timestamp in a fixture MUST carry an offset or the test is
+    timezone-dependent (passes in UTC-3, fails on a UTC CI runner)."""
+    return dt.astimezone(_tz.utc).isoformat()
+
+
+class TestProjectStates:
+    """derive_project_states (#28): one honest state per canonical project,
+    fusing local activity (session ingest / fs / git) with GitHub outcome over
+    real clocks — activo / enfriandose / entregado / estancado / pausado."""
+
+    def _classify(self, s, key, project_key, project_label):
+        with s._lock:
+            wid = s._conn.execute(
+                "SELECT id FROM workspaces WHERE workspace_key=?", (key,)
+            ).fetchone()[0]
+            s._conn.execute(
+                """INSERT OR REPLACE INTO workspace_classification
+                   (workspace_id, category, subtype, role, project_key,
+                    project_label, resolved_via, classified_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (wid, "A", "project", "project", project_key, project_label,
+                 "self", "2026-01-01T00:00:00"),
+            )
+            s._conn.commit()
+        return wid
+
+    def _git_project(self, tmp_path):
+        """A git-backed workspace classified to proj:acme, with one session
+        attributed to it (ingest ≈ real now)."""
+        from hub.correlation.workspace_resolver import resolve_dir, resolve_path
+        repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        f = str(repo / "src" / "x.py")
+        s.record_attribution("sess1", "claude", f, resolve_path(f))
+        self._classify(s, resolve_dir(str(repo)).key, "proj:acme", "acme")
+        ev = _make_events_db(tmp_path / "events.db",
+                             [("sess1", "claude", f, str(repo))])
+        return s, repo, str(ev)
+
+    def test_activo_recent_activity(self, tmp_path):
+        """A session ingested ~now → activo, regardless of outcome."""
+        s, repo, ev = self._git_project(tmp_path)
+        gh = _make_github_db_issues(tmp_path / "github.db", [(1, str(repo))], [])
+        st = s.derive_project_states(ev, str(gh))
+        s.close()
+        assert st["proj:acme"]["state"] == "activo"
+        assert st["proj:acme"]["basis"] == "recent_activity"
+        assert st["proj:acme"]["outcome_measurable"] is True
+
+    def test_enfriandose_between_windows(self, tmp_path):
+        """Age past ACTIVE but under COOLING → enfriándose (activity-only read)."""
+        s, repo, ev = self._git_project(tmp_path)
+        gh = _make_github_db_issues(tmp_path / "github.db", [(1, str(repo))], [])
+        now = _dt.now(_tz.utc) + _td(days=7)
+        st = s.derive_project_states(ev, str(gh), now=now)
+        s.close()
+        assert st["proj:acme"]["state"] == "enfriandose"
+
+    def test_entregado_merged_pr_closes_burst(self, tmp_path):
+        """Quiet + a merged PR within slack of the last activity → entregado
+        (a git FACT)."""
+        s, repo, ev = self._git_project(tmp_path)
+        merge_ts = _utc_iso(_dt.now(_tz.utc))  # ≈ the session ingest clock
+        gh = _make_github_db_issues(
+            tmp_path / "github.db", [(1, str(repo))],
+            [{"repo_id": 1, "state": "closed", "is_pull_request": 1,
+              "pr_merged_at": merge_ts}],
+        )
+        now = _dt.now(_tz.utc) + _td(days=30)  # quiet
+        st = s.derive_project_states(ev, str(gh), now=now)
+        s.close()
+        assert st["proj:acme"]["state"] == "entregado"
+        assert st["proj:acme"]["basis"] == "merged_pr"
+        assert st["proj:acme"]["merged_prs"] == 1
+
+    def test_estancado_repo_with_open_issues(self, tmp_path):
+        """Quiet + a repo with open issues and NO recent merge → estancado."""
+        s, repo, ev = self._git_project(tmp_path)
+        gh = _make_github_db_issues(
+            tmp_path / "github.db", [(1, str(repo))],
+            [{"repo_id": 1, "state": "open"},
+             {"repo_id": 1, "state": "open"}],
+        )
+        now = _dt.now(_tz.utc) + _td(days=30)
+        st = s.derive_project_states(ev, str(gh), now=now)
+        s.close()
+        assert st["proj:acme"]["state"] == "estancado"
+        assert st["proj:acme"]["basis"] == "open_issues"
+        assert st["proj:acme"]["open_issues"] == 2
+
+    def test_repo_zero_prs_is_measurable_not_gitless(self, tmp_path):
+        """outcome_measurable comes from the repos side: a repo with 0 PRs/issues
+        is still measurable — quiet with nothing open → pausado, never mistaken
+        for a gitless project (the #28 comment)."""
+        s, repo, ev = self._git_project(tmp_path)
+        gh = _make_github_db_issues(tmp_path / "github.db", [(1, str(repo))], [])
+        now = _dt.now(_tz.utc) + _td(days=30)
+        st = s.derive_project_states(ev, str(gh), now=now)
+        s.close()
+        assert st["proj:acme"]["outcome_measurable"] is True
+        assert st["proj:acme"]["state"] == "pausado"
+
+    def test_gitless_delivery_candidate_is_entregado(self, tmp_path):
+        """A project with no repo (outcome not measurable) but a delivery_candidate
+        row → entregado via the local heuristic; never estancado for missing PRs."""
+        from hub.correlation.workspace_resolver import resolve_path
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        f = str(tmp_path / "materials" / "brief.pdf")
+        wid = s.record_attribution("sess1", "claude", f, resolve_path(f))
+        key = s._conn.execute(
+            "SELECT workspace_key FROM workspaces WHERE id=?", (wid,)
+        ).fetchone()[0]
+        self._classify(s, key, "proj:gitless", "materials")
+        with s._lock:
+            s._conn.execute(
+                """INSERT INTO delivery_candidates
+                   (workspace_id, signal, signal_detail, quiescent_since,
+                    confidence, detected_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (wid, "root_artifact", f, "2026-01-01T00:00:00", 0.5,
+                 "2026-01-01T00:00:00"),
+            )
+            s._conn.commit()
+        ev = _make_events_db(tmp_path / "events.db",
+                             [("sess1", "claude", f, str(tmp_path / "materials"))])
+        now = _dt.now(_tz.utc) + _td(days=30)
+        st = s.derive_project_states(ev, str(tmp_path / "nope.db"), now=now)
+        s.close()
+        assert st["proj:gitless"]["state"] == "entregado"
+        assert st["proj:gitless"]["basis"] == "delivery_candidate"
+        assert st["proj:gitless"]["outcome_measurable"] is False
+
+    def test_gitless_no_candidate_is_pausado(self, tmp_path):
+        """Gitless + quiet + no candidate → pausado (outcome not measurable);
+        never estancado (it has no PRs it could ever have)."""
+        from hub.correlation.workspace_resolver import resolve_path
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        f = str(tmp_path / "notes" / "todo.md")
+        wid = s.record_attribution("sess1", "claude", f, resolve_path(f))
+        key = s._conn.execute(
+            "SELECT workspace_key FROM workspaces WHERE id=?", (wid,)
+        ).fetchone()[0]
+        self._classify(s, key, "proj:notes", "notes")
+        ev = _make_events_db(tmp_path / "events.db",
+                             [("sess1", "claude", f, str(tmp_path / "notes"))])
+        now = _dt.now(_tz.utc) + _td(days=30)
+        st = s.derive_project_states(ev, str(tmp_path / "nope.db"), now=now)
+        s.close()
+        assert st["proj:notes"]["state"] == "pausado"
+        assert st["proj:notes"]["outcome_measurable"] is False
+
+    def test_no_activity_no_state(self, tmp_path):
+        """A classified project with zero real activity yields NO state —
+        absence is never fabricated into pausado."""
+        from hub.correlation.workspace_resolver import resolve_dir
+        repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        with s._lock:
+            s._upsert_workspace_locked(resolve_dir(str(repo)), "2026-01-01T00:00:00")
+            s._conn.commit()
+        self._classify(s, resolve_dir(str(repo)).key, "proj:acme", "acme")
+        st = s.derive_project_states(
+            str(tmp_path / "no_ev.db"), str(tmp_path / "no_gh.db"))
+        s.close()
+        assert st == {}
+
+    def test_last_activity_age_surfaced(self, tmp_path):
+        """The chip's basis carries its ground: last_activity + age_days for the
+        cold sub-cases (#25 absorbed)."""
+        s, repo, ev = self._git_project(tmp_path)
+        gh = _make_github_db_issues(tmp_path / "github.db", [(1, str(repo))], [])
+        now = _dt.now(_tz.utc) + _td(days=20)
+        st = s.derive_project_states(ev, str(gh), now=now)
+        s.close()
+        cell = st["proj:acme"]
+        assert cell["last_activity"] is not None
+        assert 19 <= cell["age_days"] <= 21
+
+    def test_grouped_view_carries_state(self, tmp_path):
+        """End-to-end: the grouped portfolio attaches a masked-safe state chip
+        (no labels) to each project row, read-on-load."""
+        from hub.mcp_server import _get_portfolio_grouped
+        from hub.correlation.workspace_resolver import resolve_dir
+        s, repo, ev = self._git_project(tmp_path)
+        # A rollup row so the grouped view surfaces the project.
+        with s._lock:
+            wid = s._conn.execute(
+                "SELECT id FROM workspaces WHERE workspace_key=?",
+                (resolve_dir(str(repo)).key,),
+            ).fetchone()[0]
+            s._conn.execute(
+                """INSERT INTO workspace_rollup
+                   (workspace_id, day, session_touches, fs_touches, git_touches,
+                    last_activity, built_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (wid, "2026-01-01", 1, 0, 0, "2026-01-01T00:00:00",
+                 "2026-01-01T00:00:00"),
+            )
+            s._conn.commit()
+        s.close()
+        gh = _make_github_db_issues(tmp_path / "github.db", [(1, str(repo))], [])
+        data = _get_portfolio_grouped(
+            str(tmp_path / "workspace.db"), events_db=ev, github_db=str(gh))
+        rows = [p for p in data["projects"] if p["project_key"] == "proj:acme"]
+        assert len(rows) == 1
+        assert rows[0]["state"]["state"] == "activo"

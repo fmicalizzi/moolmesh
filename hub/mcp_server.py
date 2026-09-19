@@ -9,10 +9,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import sys
 from typing import Any, Optional
+
+_log = logging.getLogger("moolmesh.mcp_server")
 
 # ── Database paths ──────────────────────────────────────────────────
 EVENTS_DB = os.path.expanduser("~/.moolmesh/events.db")
@@ -708,24 +711,42 @@ def _mask_grouped(grouped: dict[str, Any], hide: bool) -> dict[str, Any]:
 
 
 def _get_portfolio_grouped(
-    db_path: str, since: str | None = None
+    db_path: str, since: str | None = None,
+    events_db: str | None = None, github_db: str | None = None,
 ) -> dict[str, Any]:
     """Hierarchical portfolio (issue #24, Stage 1): projects with nested children.
 
     Collapses harness folders onto their real project and nests subdirs/materials
     under it — a read-time projection over ``workspace_classification`` +
-    ``workspace_rollup`` (the rollup is never re-keyed). Returns an empty
-    structure when workspace.db or the classification table is absent (never
-    classified). Masked when ``hide_project_names`` is set.
+    ``workspace_rollup`` (the rollup is never re-keyed). Each project also carries
+    a derived ``state`` (#28) — the honest activity+outcome fusion from
+    ``derive_project_states`` (day-scale quiescence over real clocks); it holds no
+    labels, so it passes through ``_mask_grouped`` untouched and
+    ``hide_project_names`` still holds. Returns an empty structure when
+    workspace.db or the classification table is absent (never classified). Masked
+    when ``hide_project_names`` is set.
     """
     empty = {"projects": [], "unclassified": [], "summary": {}}
     if not os.path.exists(db_path):
         return empty
+    if events_db is None:
+        events_db = EVENTS_DB
+    if github_db is None:
+        github_db = GITHUB_DB
     from pathlib import Path
     from hub.cache.workspace_store import WorkspaceStore
     store = WorkspaceStore(Path(db_path))
     try:
         grouped = store.get_portfolio_grouped(since)
+        try:
+            states = store.derive_project_states(events_db, github_db)
+        except Exception:
+            _log.exception("derive_project_states failed; states omitted")
+            states = {}
+        for p in grouped.get("projects", []):
+            st = states.get(p.get("project_key"))
+            if st:
+                p["state"] = st
     finally:
         store.close()
     return _mask_grouped(grouped, _hide_project_names())
@@ -907,9 +928,43 @@ def _portfolio_production(
     #    github.db must never break the effort view, so failures fall back to {}.
     if github_db is None:
         github_db = os.path.join(os.path.dirname(workspace_db), "github.db")
+    # Outcome counts (#27) and derived per-project STATE (#28) both fold onto the
+    # canonical project. The state is a read of evidence over honest clocks
+    # (session ingest / fs / git) fused with outcome — carrying no labels, so it
+    # needs no masking (see WorkspaceStore.derive_project_states). Best-effort:
+    # neither a missing github.db nor a state-derivation failure may break the
+    # effort view.
+    outcome: dict[str, Any] = {}
+    states: dict[str, Any] = {}
     try:
+        import datetime as _dtmod
+        from pathlib import Path
         from hub.cache.workspace_store import WorkspaceStore
-        outcome = WorkspaceStore.read_github_outcome(workspace_db, github_db)
+        # Reuse the ingest map already computed above (erows = MAX(created_at)
+        # per session): the state layer needs the SAME scan, so hand it in and
+        # the ~194MB events.db is read once, not twice (hot-path invariant).
+        ingest_map: dict[tuple[str, str], _dtmod.datetime] = {}
+        for r in erows:
+            if r["mx"] is None:
+                continue
+            try:
+                ingest_map[(r["session_id"], r["provider"] or "")] = (
+                    _dtmod.datetime.fromtimestamp(
+                        float(r["mx"]), tz=_dtmod.timezone.utc)
+                )
+            except (OverflowError, OSError, ValueError):
+                continue
+        store = WorkspaceStore(Path(workspace_db))
+        try:
+            outcome = store.read_github_outcome(workspace_db, github_db)
+            try:
+                states = store.derive_project_states(
+                    events_db, github_db, session_ingest=ingest_map)
+            except Exception:
+                _log.exception("derive_project_states failed; states omitted")
+                states = {}
+        finally:
+            store.close()
     except Exception:
         outcome = {}
 
@@ -917,7 +972,7 @@ def _portfolio_production(
     projects = []
     for pk, g in proj.items():
         oc = outcome.get(pk, {})
-        projects.append({
+        row = {
             "project_key": pk,
             "project_label": masked_label(g["project_label"], hide),
             "sessions": len(g["_sessions"]),
@@ -928,7 +983,11 @@ def _portfolio_production(
             "open_issues": oc.get("open_issues", 0),
             "last_day": g["last_day"],
             "days": g["days"],
-        })
+        }
+        st = states.get(pk)
+        if st:
+            row["state"] = st
+        projects.append(row)
     # Hottest (most-recent activity) on top; ties broken by session volume.
     projects.sort(key=lambda p: (p["last_day"], p["sessions"]), reverse=True)
 
@@ -1319,9 +1378,17 @@ if _mcp is not None:
         `{projects: [...], unclassified: [...], summary: {...}}`; cada proyecto
         trae sus totales (con el harness plegado), `collapsed_harness` (cuántas
         carpetas se plegaron — nada se borra, se agrupa) y sus `children`
-        anidados. Proyección de read-layer sobre `workspace_classification` (no
-        re-keyea el rollup). Vacío si no se corrió `mool workspace classify`
-        (o `rollup`). Con `hide_project_names`, los nombres se enmascaran.
+        anidados. Cada proyecto trae además `state` (#28) — el estado derivado
+        que FUSIONA la actividad local (sesiones/fs/git) con el outcome de GitHub
+        en una sola lectura honesta sobre relojes reales: `{state: activo |
+        enfriandose | entregado | estancado | pausado, basis: <qué señal lo
+        determinó>, last_activity, age_days, outcome_measurable, merged_prs,
+        closed_issues, open_issues}`. Es una lectura de evidencia surfaced con su
+        base (auditable), nunca un flag asertado; los proyectos sin actividad no
+        traen `state`. No lleva nombres → no hay nada que enmascarar. Proyección
+        de read-layer sobre `workspace_classification` (no re-keyea el rollup).
+        Vacío si no se corrió `mool workspace classify` (o `rollup`). Con
+        `hide_project_names`, los nombres se enmascaran.
 
         Args:
             since: Fecha ISO 8601 desde (compara por día). None = todo.
@@ -1346,10 +1413,15 @@ if _mcp is not None:
         contributor-agnostic — todos los autores sumados, ninguno expuesto),
         plegada sobre el mismo proyecto canónico. Son TOTALES all-time (no de la
         ventana) y un HECHO distinto de `delivery_candidate` (#22, heurístico
-        gitless) — nunca se confunden. Una sesión que tocó N proyectos cuenta en
-        CADA uno (los totales de esfuerzo NO son aditivos entre filas). Ordenado
-        por actividad más reciente. Con `hide_project_names`, los labels se
-        enmascaran (los conteos de outcome son enteros — nada que enmascarar).
+        gitless) — nunca se confunden. Cada proyecto trae además `state` (#28) —
+        el estado derivado que fusiona esa actividad con el outcome en una sola
+        lectura honesta: `{state: activo | enfriandose | entregado | estancado |
+        pausado, basis, last_activity, age_days, outcome_measurable, ...}`,
+        surfaced con su base (nunca un flag pelado; sin `state` si no hay
+        actividad). Una sesión que tocó N proyectos cuenta en CADA uno (los
+        totales de esfuerzo NO son aditivos entre filas). Ordenado por actividad
+        más reciente. Con `hide_project_names`, los labels se enmascaran (los
+        conteos de outcome y el `state` son enteros/tokens — nada que enmascarar).
 
         Args:
             days: Ventana en días (1–90, default 30).
