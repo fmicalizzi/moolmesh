@@ -278,6 +278,38 @@ class TestWorkspaceRoots:
         save_config(HubConfig(filesystem_monitoring=True))
         assert load_config().filesystem_monitoring is True
 
+    def test_client_hierarchy_roundtrip(self, temp_config_path):
+        """The #29 client/org config (orgs + overrides) serializes and parses,
+        surviving the array-of-tables trap next to workspace_roots + repos."""
+        from hub.config import (
+            HubConfig, WorkspaceRoot, load_config, save_config,
+        )
+        save_config(HubConfig(
+            hide_project_names=True,
+            client_orgs=["eventsmx", "ddtyi"],
+            personal_orgs=["fmicalizzi"],
+            client_overrides={"git_remote:github.com/x/y": "acme-corp"},
+            workspace_roots=[WorkspaceRoot(path="/x", max_depth=2)],
+            repos=[RepoConfig(path="/r", remote_url="github.com/o/r",
+                              owner="o", repo="r", added_at="2026-01-01")],
+        ))
+        loaded = load_config()
+        assert loaded.client_orgs == ["eventsmx", "ddtyi"]
+        assert loaded.personal_orgs == ["fmicalizzi"]
+        assert loaded.client_overrides == {"git_remote:github.com/x/y": "acme-corp"}
+        # Scalars and array-of-tables intact around the new keys.
+        assert loaded.hide_project_names is True
+        assert loaded.workspace_roots[0].path == "/x"
+        assert loaded.repos[0].path == "/r"
+
+    def test_client_hierarchy_default_empty(self, temp_config_path):
+        """Unset → empty containers (portfolio stays flat by default, #29)."""
+        from hub.config import load_config
+        c = load_config()
+        assert c.client_orgs == []
+        assert c.personal_orgs == []
+        assert c.client_overrides == {}
+
     def test_filesystem_monitoring_gates_folder_watching(self, temp_config_path):
         """The gate at server.py:242 — `filesystem_monitoring AND workspace_roots`
         — turns folder monitoring off with the flag EVEN when a root is marked,

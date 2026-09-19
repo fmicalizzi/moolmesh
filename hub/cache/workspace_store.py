@@ -1724,6 +1724,11 @@ class WorkspaceStore:
                 "session_touches": s, "fs_touches": f, "git_touches": g,
                 "active_days": len(days), "last_activity": last or None,
                 "sources": _lit_sources(s, f, g),
+                # Internal: the DISTINCT day set (not just its count) so the
+                # client rollup (#29) can UNION days across a client's projects
+                # instead of summing counts (same discipline as active_days).
+                # Stripped before the payload leaves ``_get_portfolio_grouped``.
+                "_day_set": sorted(days),
             }
 
         # Group projects by project_key; children (nest) held per project.
@@ -1746,6 +1751,7 @@ class WorkspaceStore:
             grp = groups.setdefault(pkey, {
                 "project_key": pkey, "project_label": plabel,
                 "_fold_wids": [], "collapsed_harness": 0,
+                "_remote_url": None, "_anchor_path": None,
             })
             if not grp.get("project_label"):
                 grp["project_label"] = plabel
@@ -1753,6 +1759,15 @@ class WorkspaceStore:
                 grp["_fold_wids"].append(wid)
                 if role == "collapse":
                     grp["collapsed_harness"] += 1
+                elif role == "project":
+                    # The real project row carries the evidence the client
+                    # ladder reads (#29): git remote (→ org) and the on-disk
+                    # anchor path (→ parent-folder client). Harness/collapse
+                    # rows hold scratchpad paths, so never source it from them.
+                    if grp["_remote_url"] is None:
+                        grp["_remote_url"] = remote_url
+                    if grp["_anchor_path"] is None:
+                        grp["_anchor_path"] = root_path or dir_path
             else:  # nest
                 child = _agg([wid])
                 child.update({"workspace_key": wkey, "kind": kind,
@@ -1774,6 +1789,10 @@ class WorkspaceStore:
                 **agg,
                 "collapsed_harness": grp["collapsed_harness"],
                 "children": kids,
+                # Internal evidence for the client ladder (#29); stripped before
+                # the payload leaves the read wrapper.
+                "_remote_url": grp["_remote_url"],
+                "_anchor_path": grp["_anchor_path"],
             })
 
         projects.sort(

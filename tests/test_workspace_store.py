@@ -971,9 +971,15 @@ class TestProjectStates:
         assert cell["last_activity"] is not None
         assert 19 <= cell["age_days"] <= 21
 
-    def test_grouped_view_carries_state(self, tmp_path):
+    def test_grouped_view_carries_state(self, tmp_path, monkeypatch):
         """End-to-end: the grouped portfolio attaches a masked-safe state chip
         (no labels) to each project row, read-on-load."""
+        import hub.config as cfgmod
+        from hub.config import HubConfig
+        # Neutralize the dev machine's real ~/.moolmesh/config.toml: with no
+        # owner identity the #29 client tier is a flat no-op, so the project
+        # stays in `projects` deterministically (not machine-dependent).
+        monkeypatch.setattr(cfgmod, "load_config", lambda: HubConfig())
         from hub.mcp_server import _get_portfolio_grouped
         from hub.correlation.workspace_resolver import resolve_dir
         s, repo, ev = self._git_project(tmp_path)
@@ -999,3 +1005,47 @@ class TestProjectStates:
         rows = [p for p in data["projects"] if p["project_key"] == "proj:acme"]
         assert len(rows) == 1
         assert rows[0]["state"]["state"] == "activo"
+        # Flat no-op: no client tier without an owner identity.
+        assert data["clients"] == []
+        # Internal join-only fields never ship.
+        assert "_remote_url" not in rows[0]
+
+    def test_grouped_view_client_hierarchy_active(self, tmp_path, monkeypatch):
+        """With an owner identity + a client org configured, the git project
+        (remote github.com/acme/r) groups under the acme client node instead of
+        staying loose — the #29 hierarchy end-to-end, effort rolled up."""
+        import hub.config as cfgmod
+        from hub.config import HubConfig
+        monkeypatch.setattr(
+            cfgmod, "load_config",
+            lambda: HubConfig(personal_orgs=["me"], client_orgs=["acme"]))
+        from hub.mcp_server import _get_portfolio_grouped
+        from hub.correlation.workspace_resolver import resolve_dir
+        s, repo, ev = self._git_project(tmp_path)
+        with s._lock:
+            wid = s._conn.execute(
+                "SELECT id FROM workspaces WHERE workspace_key=?",
+                (resolve_dir(str(repo)).key,),
+            ).fetchone()[0]
+            s._conn.execute(
+                """INSERT INTO workspace_rollup
+                   (workspace_id, day, session_touches, fs_touches, git_touches,
+                    last_activity, built_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (wid, "2026-01-01", 2, 0, 0, "2026-01-01T00:00:00",
+                 "2026-01-01T00:00:00"),
+            )
+            s._conn.commit()
+        s.close()
+        gh = _make_github_db_issues(tmp_path / "github.db", [(1, str(repo))], [])
+        data = _get_portfolio_grouped(
+            str(tmp_path / "workspace.db"), events_db=ev, github_db=str(gh))
+        # The project is NOT loose — it lives under the acme client node.
+        assert all(p["project_key"] != "proj:acme" for p in data["projects"])
+        clients = {c["client_key"]: c for c in data["clients"]}
+        assert "client:acme" in clients
+        acme = clients["client:acme"]
+        assert [p["project_key"] for p in acme["projects"]] == ["proj:acme"]
+        assert acme["session_touches"] == 2          # effort rolled up
+        assert acme["state"]["state"] == "activo"    # hottest inherited
+        assert data["summary"]["clients"] == 1

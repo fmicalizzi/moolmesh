@@ -1513,6 +1513,12 @@ def cmd_workspace_portfolio(args: argparse.Namespace) -> None:
     if getattr(args, "grouped", False):
         grouped = store.get_portfolio_grouped(getattr(args, "since", None))
         store.close()
+        # This CLI view keeps the flat project list (no client tier); still drop
+        # the internal join-only fields (_day_set/_remote_url/_anchor_path) the
+        # store now attaches for the dashboard's #29 hierarchy — they must never
+        # reach output (and the two path fields would bypass masking).
+        from hub.cache.portfolio_clients import strip_internal
+        strip_internal(grouped)
         _print_portfolio_grouped(grouped, getattr(args, "json_output", False))
         return
     rows = store.get_portfolio(getattr(args, "since", None))

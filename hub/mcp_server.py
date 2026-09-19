@@ -695,17 +695,28 @@ def _get_portfolio(
 
 
 def _mask_grouped(grouped: dict[str, Any], hide: bool) -> dict[str, Any]:
-    """Mask every display name in a grouped-portfolio payload (issue #24).
+    """Mask every display name in a grouped-portfolio payload (issues #24, #29).
 
-    Recurses into project groups and their nested children. ``project_label`` and
-    the child/orphan name fields are NAMES → masked; ``project_key`` and
-    ``workspace_key`` are JOIN HANDLES → never touched (same contract as
-    ``_mask_workspace_rows``).
+    Recurses into client nodes, project groups and their nested children.
+    ``client_label``/``project_label`` and the child/orphan name fields are NAMES
+    → masked; ``client_key``/``project_key``/``workspace_key`` are JOIN HANDLES →
+    never touched (same contract as ``_mask_workspace_rows``). State/outcome dicts
+    hold no labels, so they pass through untouched.
     """
     from hub.config import masked_label
-    for p in grouped.get("projects", []):
+
+    def _mask_project(p: dict[str, Any]) -> None:
         p["project_label"] = masked_label(p.get("project_label") or "", hide)
         p["children"] = _mask_workspace_rows(p.get("children", []), hide)
+
+    for c in grouped.get("clients", []):
+        c["client_label"] = masked_label(c.get("client_label") or "", hide)
+        for p in c.get("projects", []):
+            _mask_project(p)
+    for p in grouped.get("projects", []):
+        _mask_project(p)
+    for p in grouped.get("external", []):
+        _mask_project(p)
     grouped["unclassified"] = _mask_workspace_rows(grouped.get("unclassified", []), hide)
     return grouped
 
@@ -749,7 +760,55 @@ def _get_portfolio_grouped(
                 p["state"] = st
     finally:
         store.close()
+
+    # Third tier (#29): client/org hierarchy over the flat projects. Resolve the
+    # effective client config — auto-seed only when the owner identity is known
+    # (personal_orgs), else the projection is a flat no-op (pre-#29 shape).
+    grouped = _apply_client_hierarchy(grouped, db_path, github_db)
     return _mask_grouped(grouped, _hide_project_names())
+
+
+def _apply_client_hierarchy(
+    grouped: dict[str, Any], workspace_db: str, github_db: str,
+) -> dict[str, Any]:
+    """Hang the client/org tier over the flat grouped payload (issue #29).
+
+    Reads the client config lazily (mcp is config-free); resolves
+    ``personal_orgs`` from ``[user].github_handle`` when unset and auto-seeds
+    ``client_orgs`` from the two stores ONLY when a personal identity is known.
+    Strips the internal join-only fields before returning.
+    """
+    from hub.cache.portfolio_clients import (
+        group_by_client, suggest_client_orgs, strip_internal, _norm_org,
+    )
+    from hub.config import load_config
+    try:
+        cfg = load_config()
+        personal = list(cfg.personal_orgs)
+        if not personal and cfg.github_handle:
+            personal = [cfg.github_handle]
+        client_orgs = list(cfg.client_orgs)
+        if not client_orgs and personal:
+            client_orgs = suggest_client_orgs(workspace_db, github_db)
+        overrides = dict(cfg.client_overrides)
+    except Exception:
+        _log.exception("client config unavailable; portfolio stays flat")
+        personal, client_orgs, overrides = [], [], {}
+
+    hierarchy = group_by_client(
+        grouped.get("projects", []),
+        client_orgs={_norm_org(o) for o in client_orgs},
+        personal_orgs={_norm_org(o) for o in personal},
+        overrides=overrides,
+    )
+    grouped["clients"] = hierarchy["clients"]
+    grouped["projects"] = hierarchy["projects"]
+    grouped["external"] = hierarchy["external"]
+    summary = grouped.setdefault("summary", {})
+    summary["clients"] = len(hierarchy["clients"])
+    summary["external"] = len(hierarchy["external"])
+    strip_internal(grouped)
+    return grouped
 
 
 # Deliverable = a produced image or video artifact, by extension (issue #24
