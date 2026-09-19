@@ -93,6 +93,11 @@ class HubConfig:
     # --- Workspace filesystem watcher (issue #21, opt-in) ---
     workspace_roots: list[WorkspaceRoot] = field(default_factory=list)
     hide_project_names: bool = False  # enmascara nombres de carpeta en la superficie visible
+    # Capa apagable de monitoreo de CARPETAS (issue #27). Gatea SÓLO el watcher
+    # de filesystem — agentes, GitHub y portfolio quedan intactos. Default True
+    # (preserva el comportamiento actual: el watcher igual sólo arranca si hay
+    # workspace_roots marcados).
+    filesystem_monitoring: bool = True
 
 
 def _serialize_toml(config: HubConfig) -> str:
@@ -124,6 +129,7 @@ def _serialize_toml(config: HubConfig) -> str:
     # array-de-tablas o TOML anidaría el flag bajo la última tabla).
     lines.append("[workspace]")
     lines.append(f'hide_project_names = {str(config.hide_project_names).lower()}')
+    lines.append(f'filesystem_monitoring = {str(config.filesystem_monitoring).lower()}')
     lines.append("")
 
     # Sección [[repos]] - array de tablas
@@ -208,6 +214,8 @@ def load_config() -> HubConfig:
     if "workspace" in data:
         ws = data["workspace"]
         config.hide_project_names = bool(ws.get("hide_project_names", False))
+        # Ausente → True: un config viejo (sin la clave) mantiene el monitoreo on.
+        config.filesystem_monitoring = bool(ws.get("filesystem_monitoring", True))
 
     # Parse [[workspace_roots]] array (issue #21, opt-in)
     if "workspace_roots" in data:

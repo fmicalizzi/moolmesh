@@ -252,6 +252,59 @@ class TestWorkspaceRoots:
         config = load_config()
         assert config.workspace_roots == []
         assert config.hide_project_names is False
+        # filesystem_monitoring default ON (#27) — preserves current behavior.
+        assert config.filesystem_monitoring is True
+
+    def test_filesystem_monitoring_roundtrip(self, temp_config_path):
+        """The #27 folder-monitoring flag serializes and parses (default True).
+
+        Saves WITH a workspace_root present so the `[workspace]` scalars are
+        exercised against the array-of-tables trap (config.py:123): the new
+        scalar must survive, not get nested under the last table.
+        """
+        from hub.config import (
+            HubConfig, WorkspaceRoot, load_config, save_config,
+        )
+        save_config(HubConfig(
+            filesystem_monitoring=False, hide_project_names=True,
+            workspace_roots=[WorkspaceRoot(path="/x", max_depth=2)],
+        ))
+        loaded = load_config()
+        assert loaded.filesystem_monitoring is False
+        # ... and neither the other [workspace] scalar nor the root is clobbered.
+        assert loaded.hide_project_names is True
+        assert len(loaded.workspace_roots) == 1
+        assert loaded.workspace_roots[0].path == "/x"
+        save_config(HubConfig(filesystem_monitoring=True))
+        assert load_config().filesystem_monitoring is True
+
+    def test_filesystem_monitoring_gates_folder_watching(self, temp_config_path):
+        """The gate at server.py:242 — `filesystem_monitoring AND workspace_roots`
+        — turns folder monitoring off with the flag EVEN when a root is marked,
+        while leaving the root (and every other layer) untouched."""
+        from hub.config import (
+            HubConfig, WorkspaceRoot, load_config, save_config,
+        )
+        root = [WorkspaceRoot(path="/data", max_depth=2)]
+        # Flag on + root marked → monitoring runs.
+        save_config(HubConfig(filesystem_monitoring=True, workspace_roots=root))
+        c = load_config()
+        assert bool(c.filesystem_monitoring and c.workspace_roots) is True
+        # Flag off + SAME root still marked → monitoring gated off, root kept.
+        save_config(HubConfig(filesystem_monitoring=False, workspace_roots=root))
+        c = load_config()
+        assert bool(c.filesystem_monitoring and c.workspace_roots) is False
+        assert len(c.workspace_roots) == 1  # the layer is toggled, not erased
+
+    def test_filesystem_monitoring_absent_key_defaults_on(self, temp_config_path):
+        """A config predating the flag keeps monitoring ON, never silently off."""
+        from hub.config import load_config
+        temp_config_path.write_text(
+            "[workspace]\nhide_project_names = true\n", encoding="utf-8"
+        )
+        config = load_config()
+        assert config.filesystem_monitoring is True
+        assert config.hide_project_names is True
 
     def test_masked_label_stable_and_key_preserved(self):
         from hub.config import masked_label

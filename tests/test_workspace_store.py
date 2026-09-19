@@ -644,3 +644,147 @@ class TestDeliveryCandidate:
     def test_mcp_delivery_empty_when_absent(self, tmp_path):
         from hub.mcp_server import _get_delivery_candidates
         assert _get_delivery_candidates(str(tmp_path / "nope.db")) == []
+
+
+def _make_github_db_issues(path: Path, repos: list[tuple[int, str]],
+                           issues: list[dict]) -> Path:
+    """repos: (repo_id, path). issues: dicts with the outcome-relevant cols."""
+    c = sqlite3.connect(path)
+    c.execute("""CREATE TABLE repos (
+        id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, remote_url TEXT)""")
+    c.execute("""CREATE TABLE github_issues (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, repo_id INTEGER NOT NULL,
+        number INTEGER, title TEXT, state TEXT, author TEXT,
+        closed_at TEXT, is_pull_request INTEGER DEFAULT 0, pr_merged_at TEXT)""")
+    for rid, rpath in repos:
+        c.execute("INSERT INTO repos (id, path) VALUES (?, ?)", (rid, rpath))
+    for n, i in enumerate(issues):
+        c.execute(
+            "INSERT INTO github_issues (repo_id, number, title, state, author,"
+            " closed_at, is_pull_request, pr_merged_at) VALUES (?,?,?,?,?,?,?,?)",
+            (i["repo_id"], n, "t", i["state"], i.get("author"),
+             i.get("closed_at"), i.get("is_pull_request", 0), i.get("pr_merged_at")),
+        )
+    c.commit()
+    c.close()
+    return path
+
+
+class TestGithubOutcome:
+    """read_github_outcome (#27): merged-PR/closed-issue/open-issue per canonical
+    project, contributor-agnostic, read-only over github.db."""
+
+    def _classify(self, s, key, project_key, project_label):
+        """Insert a minimal classification row mapping a workspace to a project."""
+        with s._lock:
+            wid = s._conn.execute(
+                "SELECT id FROM workspaces WHERE workspace_key=?", (key,)
+            ).fetchone()[0]
+            s._conn.execute(
+                """INSERT OR REPLACE INTO workspace_classification
+                   (workspace_id, category, subtype, role, project_key,
+                    project_label, resolved_via, classified_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (wid, "A", "project", "project", project_key, project_label,
+                 "self", "2026-01-01T00:00:00"),
+            )
+            s._conn.commit()
+
+    def test_outcome_folds_two_repos_onto_one_canonical_project(self, tmp_path):
+        """Two repos collapsing to the same project_key sum their outcome; all
+        authors are counted (contributor-agnostic), none surfaced."""
+        from hub.correlation.workspace_resolver import resolve_dir
+        r1 = _mkrepo(tmp_path, "R1", "git@github.com:acme/R1.git")
+        r2 = _mkrepo(tmp_path, "R2", "git@github.com:acme/R2.git")
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        now = "2026-01-01T00:00:00"
+        with s._lock:
+            for r in (r1, r2):
+                s._upsert_workspace_locked(resolve_dir(str(r)), now)
+            s._conn.commit()
+        # Both repos map to the SAME canonical project group.
+        self._classify(s, resolve_dir(str(r1)).key, "proj:acme", "acme")
+        self._classify(s, resolve_dir(str(r2)).key, "proj:acme", "acme")
+        gh = _make_github_db_issues(
+            tmp_path / "github.db", [(1, str(r1)), (2, str(r2))],
+            [
+                # r1: 2 merged PRs (owner + collaborator), 1 unmerged PR (ignored)
+                {"repo_id": 1, "state": "closed", "is_pull_request": 1,
+                 "pr_merged_at": now, "author": "owner"},
+                {"repo_id": 1, "state": "closed", "is_pull_request": 1,
+                 "pr_merged_at": now, "author": "avillegas"},
+                {"repo_id": 1, "state": "closed", "is_pull_request": 1,
+                 "pr_merged_at": None, "author": "owner"},
+                # r1: 1 closed issue, 1 open issue
+                {"repo_id": 1, "state": "closed", "closed_at": now},
+                {"repo_id": 1, "state": "open"},
+                # r2: 1 merged PR, 2 open issues
+                {"repo_id": 2, "state": "closed", "is_pull_request": 1,
+                 "pr_merged_at": now, "author": "almacreativa"},
+                {"repo_id": 2, "state": "open"},
+                {"repo_id": 2, "state": "open"},
+            ],
+        )
+        out = WorkspaceStore.read_github_outcome(str(s.db_path), str(gh))
+        s.close()
+        assert out == {"proj:acme": {
+            "merged_prs": 3,       # 2 (r1) + 1 (r2); unmerged PR not counted
+            "closed_issues": 1,    # only non-PR closed
+            "open_issues": 3,      # 1 (r1) + 2 (r2)
+        }}
+
+    def test_outcome_empty_when_github_absent(self, tmp_path):
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        out = WorkspaceStore.read_github_outcome(
+            str(s.db_path), str(tmp_path / "nope.db"))
+        s.close()
+        assert out == {}
+
+    def test_outcome_skips_unclassified_repo(self, tmp_path):
+        """A repo whose workspace has no project_key contributes nothing —
+        never guessed onto some other project."""
+        from hub.correlation.workspace_resolver import resolve_dir
+        r = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        with s._lock:
+            s._upsert_workspace_locked(resolve_dir(str(r)), "2026-01-01T00:00:00")
+            s._conn.commit()
+        # No classification row inserted → no canonical project.
+        gh = _make_github_db_issues(
+            tmp_path / "github.db", [(1, str(r))],
+            [{"repo_id": 1, "state": "closed", "is_pull_request": 1,
+              "pr_merged_at": "2026-01-01T00:00:00"}],
+        )
+        out = WorkspaceStore.read_github_outcome(str(s.db_path), str(gh))
+        s.close()
+        assert out == {}
+
+    def test_production_view_carries_outcome(self, tmp_path):
+        """End-to-end: the augmented production view exposes outcome columns on
+        the canonical project row, next to the effort columns."""
+        from hub.correlation.workspace_resolver import resolve_dir, resolve_path
+        from hub.mcp_server import _portfolio_production
+        repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        f = str(repo / "src" / "x.py")
+        s.record_attribution("sess1", "claude", f, resolve_path(f))
+        self._classify(s, resolve_dir(str(repo)).key, "proj:acme", "acme")
+        s.close()
+        ev = _make_events_db(tmp_path / "events.db",
+                             [("sess1", "claude", f, str(repo))])
+        gh = _make_github_db_issues(
+            tmp_path / "github.db", [(1, str(repo))],
+            [{"repo_id": 1, "state": "closed", "is_pull_request": 1,
+              "pr_merged_at": "2026-01-01T00:00:00"},
+             {"repo_id": 1, "state": "open"}],
+        )
+        # _make_events_db dates rows at time.time() (real now); leave `today`
+        # at its default so the session falls inside the 90-day window.
+        data = _portfolio_production(str(ev), str(tmp_path / "workspace.db"),
+                                     days=90, github_db=str(gh))
+        rows = [p for p in data["projects"] if p["project_key"] == "proj:acme"]
+        assert len(rows) == 1
+        assert rows[0]["merged_prs"] == 1
+        assert rows[0]["open_issues"] == 1
+        assert rows[0]["closed_issues"] == 0
+        assert rows[0]["sessions"] == 1  # effort column still present
