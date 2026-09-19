@@ -6,6 +6,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.15.0] — 2026-09-19
+
+First step of the **Project Intelligence** epic (#26): the portfolio moves from
+measuring *effort* to also surfacing *outcome*.
+
+### Added
+- **Outcome layer — authoritative delivery in the production view (#27)** — the
+  `/portfolio` production view now shows, next to the effort columns (sessions ·
+  active days), the **delivery already recorded in `github.db`**: **merged PRs,
+  closed issues, and open issues** per **canonical project** (the Stage-1
+  `workspace_classification.project_key`, so agent-harness folders fold into
+  their real project). e.g. *fiestados: 39 ses · 10d · 180 PR · 101 cerr · 52
+  abiertos*.
+  - **Authoritative fact, not heuristic.** A merged PR / closed issue is a
+    **fact** for git-backed projects — a different signal from
+    `delivery_candidate` (#22, which stays the heuristic for gitless projects).
+    The two are never conflated.
+  - **Contributor-agnostic (team latent).** All authors are summed at project
+    level (owner + collaborators + agents); no per-person breakdown, and the
+    `author` column is never surfaced — the model carries the team dimension
+    latently for a future org-scale unit.
+  - **All-time totals**, labelled as such in the UI (a tooltip) so they never
+    read as window-scoped like the effort columns; they attach only to projects
+    already visible in the window (no phantom rows).
+  - **`github.db` read-only.** The join goes one direction only — the portfolio
+    reads `github.db` (`mode=ro`); nothing writes back. `workspace.db` and
+    `events.db` are untouched by the read.
+- **Explicit folder-monitoring opt-in — `[workspace] filesystem_monitoring` flag
+  (#27)** — folder monitoring (the Phase B filesystem watcher) was already opt-in
+  (it runs only when a root is marked); this makes it an **explicit, discoverable
+  toggle**. Default `true` (preserves current behavior). The flag gates **only**
+  the filesystem watcher — agents, GitHub ingestion, and the whole portfolio
+  (including the new outcome layer) stay on regardless. The `/portfolio`
+  dashboard shows the folder-monitoring state (on/off) and how to enable it
+  (read-on-load; no SSE change).
+
+### Unchanged (invariants held)
+- `delivery_candidate` (#22), the workspace resolver, the filesystem watcher
+  logic, `events.db`, the `project` layer, and the SSE hot path are all
+  untouched — this unit only **consumes** existing data. Zero new dependencies;
+  zero-cloud; separate stores held; `hide_project_names` masks every new label.
+
 ## [1.14.0] — 2026-09-18
 
 ### Added
