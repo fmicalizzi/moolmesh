@@ -6,6 +6,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.16.0] — 2026-09-19
+
+Second unit of the **Project Intelligence** epic (#26): the portfolio stops
+showing effort and outcome as two separate figures and **fuses them into one
+honest per-project state** — the integrator of the epic.
+
+### Added
+- **Derived project state — the activity ↔ outcome fusion (#28)** — every
+  canonical project now carries a single **state** chip in the `/portfolio` view
+  (both the production strip and the grouped project list), derived by fusing
+  **local activity** (session ingest / filesystem / git) with the **GitHub
+  outcome** layer (#27, merged PRs / closed & open issues):
+  - **🟢 activo · 🟡 enfriándose · 🔵 entregado · 🟠 estancado · ⚪ pausado.**
+    Recent activity reads *activo*; tapering reads *enfriándose*; a quiet project
+    is split by its outcome — a merged-PR/closed-issue that **closed the burst**
+    is *entregado* (a git **fact**; for a gitless project the `delivery_candidate`
+    heuristic (#22) stands in, never conflated), a repo with **open issues still
+    hanging** is *estancado*, and quiet-with-nothing-open is *pausado*.
+  - **Honest clocks only.** Quiescence age is measured from the *real* last
+    activity — session ingest epoch (`events.created_at`, honest even on resumed
+    sessions), `path_touches.last_seen`, and `git_commits.timestamp`, all
+    normalized to aware UTC via `_parse_ts` — **never** the backfill `first_seen`
+    artifact, never the unreliable session `duration`. A project with no real
+    activity gets **no state** (evidence-first, never fabricated).
+  - **`outcome_measurable` (has-repo vs not).** Taken from the *repos* side of
+    `github.db`, so a repo-backed project with **0 PRs is still measurable** (it
+    can be *estancado* when issues hang), while a **gitless** project's outcome is
+    *not measurable* — it falls to `delivery_candidate`/activity, never to
+    *estancado* for lacking PRs it could never have.
+  - **A read of evidence, surfaced with its basis** — each state carries the
+    signal that determined it plus its last-activity age, exactly the
+    `delivery_candidate` discipline: never a bare flag asserted as truth.
+  - **Absorbs the cold-projects view (#25).** The quiet states
+    (*pausado/enfriándose/estancado*) are the "cold" surface, each shown with its
+    last-activity age — #25 folds into this unit.
+
+### Unchanged (invariants held)
+- `delivery_candidate` detection (#22), the workspace resolver (#20), the
+  filesystem watcher (#21), the `project` layer, and the SSE hot path are all
+  untouched — this unit only **consumes** existing data. `events.db` and
+  `github.db` are read **read-only** (`mode=ro`); the shared events.db ingest
+  scan is handed from the production view into the state layer so the hot path
+  reads it once. `author` is never surfaced (contributor-agnostic, team latent).
+  Zero new dependencies; zero-cloud; separate stores held; the state chip carries
+  only tokens/ints (no labels) so `hide_project_names` still holds.
+
 ## [1.15.0] — 2026-09-19
 
 First step of the **Project Intelligence** epic (#26): the portfolio moves from
