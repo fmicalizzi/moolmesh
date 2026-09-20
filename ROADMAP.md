@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.17.2
+Last updated: September 2026 — v1.18.0
 
 ---
 
@@ -134,6 +134,15 @@ Third and final unit of the **Project Intelligence** epic ([#26](https://github.
 - **Starts invisible** — no owner identity → **flat no-op** (byte-for-byte pre-#29); one config line (`personal_orgs` / `github_handle`) activates it.
 - **Consumes, doesn't change** — `delivery_candidate` (#22), the outcome layer (#27) and derived state (#28); resolver (#20), watcher (#21), the `project` field, SSE and `events.db`/`github.db` (read-only) untouched; `author` never surfaced. Zero new dependencies.
 - **Follow-up [#30](https://github.com/fmicalizzi/moolmesh/issues/30)** — container split (`PRODUCCIONES` → its distinct child projects/clients) needs re-anchoring at the resolver and is deferred.
+
+### v1.18 — Portfolio UX redesign (layout)
+
+Part A of the `/portfolio` UX pass ([#35](https://github.com/fmicalizzi/moolmesh/issues/35)) — **presentation only**, reclaiming the wasted horizontal space and making the view scannable.
+
+- **Production strip fills its column.** The inline SVG (`preserveAspectRatio="xMinYMid meet"`, rendered left-anchored at its ~65px natural width, leaving a ~1200px void) is replaced by a flex row of equal-flex cells that span the full width — same semantics (color = dominant provider, opacity = session volume), still hand-rolled and zero-dep.
+- **Dense, aligned rows** (~2–3× more projects per screen): single-line names, `github.com/` dropped, 1-line + ellipsis + tooltip; column headers on a shared grid; **derived state as a leading color-dot scan-anchor** column.
+- **Outcome as a first-class column** with an honest tri-state — merged-PR / closed / open counts (merged PRs weighted), a real `0 entregado`, and `— sin repo` for the not-measurable case (no longer conflated as one grey "— entreg.").
+- **Consumes, doesn't change** — resolver/state/outcome (#27/#28/#29), SSE (read-on-load) and `hide_project_names` masking untouched; zero new dependencies. Follow-ups **#35 Part B** (KPI tiles + charts) and **[#36](https://github.com/fmicalizzi/moolmesh/issues/36)** (data-accuracy audit) remain open.
 
 ---
 
