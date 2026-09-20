@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.17.2] — 2026-09-19
+
+Honest failure reporting for `mool repo sync`. Follow-up to #32 (the "0 commits"
+caller-message UX tracked in v1.17.1). No new features, no new dependencies.
+
+### Fixed
+- **#34 — `mool repo sync` reported "0 commits" on a real git failure.** The
+  `git_log_*` helpers now return `None` on failure (rc≠0 or exception) instead
+  of `""`, so a genuine git error is no longer indistinguishable from "0 new
+  commits". `cmd_repo_sync` reports an error and exits non-zero; `cmd_repo_add`
+  warns without failing (the add itself succeeded) and points at `mool repo
+  sync` to retry.
+- **Data-loss prevention in the daemon.** `GitHarvester` no longer advances the
+  stored cursor of a ref whose `git log` failed — it excludes that ref from
+  `update_refs` and retries it next cycle. Previously those commits were skipped
+  silently (§4).
+
+---
+
 ## [1.17.1] — 2026-09-19
 
 Robustness patch for Windows users under the default console codepage
