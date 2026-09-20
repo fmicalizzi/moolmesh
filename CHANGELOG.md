@@ -6,6 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.17.1] — 2026-09-19
+
+Robustness patch for Windows users under the default console codepage
+(cp1252). No new features, no new dependencies — `pyproject.dependencies`
+stays empty and the MCP server is **not** migrated to the `mcp` 2.x API (the
+version pin is a stopgap; UX of the "0 commits" caller message is tracked as
+follow-up #34).
+
+### Fixed
+- **#33 — MCP server broken by an unbounded inline dependency.** The PEP 723
+  inline dep `mcp>=1.2.0` had no upper bound, so `uv run hub/mcp_server.py`
+  resolved `mcp` 2.x (which renamed `FastMCP` → `MCPServer`), and the real
+  `ImportError` was swallowed and misreported as "not installed". Pinned to
+  `mcp>=1.2.0,<2`; the `except ImportError` now logs with context and the
+  startup message **distinguishes "no instalado" from "versión incompatible"**.
+- **#31 — CLI crashed with `UnicodeEncodeError` on Windows.** `mool --help`
+  (and any non-ASCII output, e.g. the `→` in help text) crashed on a cp1252
+  console. The CLI now reconfigures `stdout`/`stderr` to UTF-8 with
+  `errors="replace"` on Windows, early in the entrypoint.
+- **#32 — `mool repo sync` crashed (and silently reported "0 commits") on
+  non-ASCII commit messages on Windows.** The `git log` subprocess calls fell
+  back to the locale encoding (cp1252) and failed to decode accented commit
+  messages. All `git_utils` subprocess calls now pin `encoding="utf-8"`,
+  `errors="replace"`; a git failure is **logged with context** instead of
+  masquerading as an empty history.
+
+---
+
 ## [1.17.0] — 2026-09-19
 
 Third and final unit of the **Project Intelligence** epic (#26): the portfolio
