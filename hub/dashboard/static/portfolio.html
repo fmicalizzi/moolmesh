@@ -38,10 +38,12 @@
   .disclaimer { background:var(--bg2); border:1px solid var(--border); border-left:3px solid var(--orange); border-radius:6px; padding:10px 14px; font-size:11px; color:var(--muted); margin-bottom:12px; }
   /* --- Grouped portfolio (#24) --- */
   .summary { font-size:11px; color:var(--muted); margin-bottom:12px; }
-  .proj { border:1px solid var(--border); border-radius:6px; margin-bottom:8px; background:var(--bg2); }
-  .proj-head { display:flex; align-items:center; gap:10px; padding:10px 14px; cursor:pointer; }
+  .proj { border:1px solid var(--border); border-radius:6px; margin-bottom:5px; background:var(--bg2); }
+  .proj-head { display:flex; align-items:center; gap:8px; padding:6px 12px; cursor:pointer; }
   .proj-head:hover { background:var(--bg3); }
-  .proj-name { color:var(--accent); font-weight:600; flex:1; word-break:break-all; }
+  /* Name: 1 line + ellipsis (P2/P3); flex:1 + min-width:0 lets it fill the row and
+     shrink so chips + meta stay right-aligned. github.com/ stripped via cleanName. */
+  .proj-name { color:var(--accent); font-weight:600; flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .proj-meta { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
   .chip { display:inline-block; padding:1px 7px; border-radius:10px; font-size:10px; border:1px solid var(--border); color:var(--muted); margin-left:6px; }
   /* Derived project state (#28): activity+outcome fused into one honest read.
@@ -85,24 +87,42 @@
   .client-out { font-size:10px; color:var(--muted); margin-left:6px; }
   .loose-head { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; margin:14px 0 6px; }
   /* --- Production over time (#24 Stage 2, inline hand-rolled SVG, zero-dep) --- */
-  .prod { border:1px solid var(--border); border-radius:6px; background:var(--bg2); padding:12px 14px; margin-bottom:16px; }
+  .prod { border:1px solid var(--border); border-radius:6px; background:var(--bg2); padding:12px 14px; margin-bottom:16px;
+          /* One grid template shared by the header row AND every data row so the
+             columns line up on identical edges (P4/P6). Every non-fr track is a
+             fixed px width — an `auto` track would size to each row's own content
+             and re-misalign the very thing we're fixing. min-width:0 on name+strip
+             lets them shrink so the name ellipsizes (P3) and the strip fills (P1). */
+          --pcols: 14px minmax(0,1.6fr) 42px 30px 186px minmax(0,2.4fr); }
   .prod-top { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px; }
   .prod-top h3 { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; font-weight:600; }
   .toggle { display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
   .toggle button { background:var(--bg3); color:var(--muted); border:none; font:inherit; font-size:11px; padding:4px 12px; cursor:pointer; border-left:1px solid var(--border); }
   .toggle button:first-child { border-left:none; }
   .toggle button.on { background:var(--accent); color:var(--bg); font-weight:600; }
-  .prod-row { display:flex; align-items:center; gap:12px; padding:5px 0; border-top:1px solid var(--bg3); }
-  .prod-row:first-child { border-top:none; }
-  .prod-label { color:var(--accent); font-size:12px; flex:0 0 200px; width:200px; word-break:break-all; }
-  .prod-strip { flex:1; min-width:0; }
-  .prod-strip svg { display:block; width:100%; height:auto; max-height:20px; }
-  .prod-stats { flex:0 0 auto; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; text-align:right; }
-  .prod-stats b { color:var(--text); font-weight:600; }
-  .prod-deliv { color:var(--green); } .prod-deliv.zero { color:var(--muted); }
-  /* Outcome (#27): entrega GitHub — hecho, totales all-time (ver tooltip). */
-  .prod-pr { color:var(--purple); } .prod-issue { color:var(--cyan); } .prod-open { color:var(--orange); }
-  .prod-pr b, .prod-issue b, .prod-open b { color:var(--text); }
+  .prod-hrow, .prod-row { display:grid; grid-template-columns:var(--pcols); align-items:center; column-gap:12px; }
+  .prod-hrow { padding:0 0 6px; margin-bottom:2px; border-bottom:1px solid var(--border); }
+  .prod-hrow span { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .prod-hrow .h-num { text-align:right; }
+  .prod-row { padding:4px 0; border-top:1px solid var(--bg3); }
+  .prod-hrow + .prod-row { border-top:none; }
+  .prod-row:hover { background:var(--bg3); }
+  /* State dot = the vertical scan-anchor column (P7); colored by derived state. */
+  .pc-dot { width:9px; height:9px; border-radius:50%; background:var(--muted); justify-self:center; }
+  /* Name: 1 line, ellipsis, github.com/ stripped; tooltip holds the full label (P3). */
+  .pc-name { color:var(--accent); font-size:12px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pc-num { text-align:right; font-variant-numeric:tabular-nums; font-size:12px; color:var(--muted); }
+  .pc-num b { color:var(--text); font-weight:600; }
+  /* Outcome = first-class column (P5). Merged-PR (real delivery) is the star. */
+  .pc-out { font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .out-pr { color:var(--green); } .out-pr b { color:var(--green); font-weight:700; }
+  .out-cl { color:var(--cyan); } .out-op { color:var(--orange); }
+  .out-zero { color:var(--muted); }                 /* repo, 0 delivered  — a real zero */
+  .out-na   { color:#5A5A62; font-style:italic; }   /* no repo — not measurable, distinct from 0 */
+  /* Production strip = flex cells that each fill an equal slice of the column, so
+     the strip spans the full width instead of an SVG anchored left (P1). */
+  .pc-strip { display:flex; gap:2px; height:16px; min-width:0; }
+  .pc-cell { flex:1 1 0; min-width:0; border-radius:2px; background:var(--bg3); }
   .prod-legend { display:flex; flex-wrap:wrap; gap:14px; margin-top:10px; font-size:11px; color:var(--muted); align-items:center; }
   .prod-legend span { display:inline-flex; align-items:center; gap:5px; }
   .prod-legend i { width:9px; height:9px; border-radius:2px; display:inline-block; }
@@ -189,22 +209,6 @@ function windowDaysList(n){
 }
 function dayTotal(rec){ let t=0; if(rec) for(const n of Object.values(rec)) t+=n; return t; }
 
-// Outcome (#27): entrega autoritativa desde GitHub (PRs mergeados / issues
-// cerrados / abiertos), TOTAL all-time — no de la ventana. El tooltip lo aclara
-// para no mezclar relojes con el esfuerzo (que sí es de la ventana). Un HECHO,
-// distinto de los candidatos de entrega (heurístico). Vacío si el proyecto no
-// tiene repo GitHub o no entregó nada aún.
-function outcomeStr(p){
-  const pr=p.merged_prs||0, cl=p.closed_issues||0, op=p.open_issues||0;
-  if (!pr && !cl && !op) return '';
-  const tip='Entrega GitHub — totales all-time (no de la ventana). PR mergeados + issues cerrados/abiertos, sumando a todos los contribuidores.';
-  let s='';
-  if (pr) s += ` · <span class="prod-pr" title="${tip}"><b>${pr}</b> PR</span>`;
-  if (cl) s += ` · <span class="prod-issue" title="${tip}"><b>${cl}</b> cerr.</span>`;
-  if (op) s += ` · <span class="prod-open" title="${tip}"><b>${op}</b> abiertos</span>`;
-  return s;
-}
-
 // Derived project state (#28): the epic integrator — actividad local (sesiones/
 // bolitas/fs/git) FUSIONADA con el outcome de GitHub en una sola lectura honesta.
 // El chip trae su base (qué señal lo determinó) y la antigüedad de la última
@@ -244,21 +248,66 @@ function stateChip(st){
   return `<span class="st st-${st.state}" title="${esc(tip)}">${m.emoji} ${m.label}${age?` · ${esc(age)}`:''}</span>`;
 }
 
+// Name for display (P3): drop the `github.com/` prefix — it is pure noise and the
+// org/repo already reads as the client. hide_project_names is honored server-side
+// (labels arrive already masked); the FULL label goes in a tooltip. We never touch
+// project_key here — it holds the unmasked absolute path (masking trap).
+function cleanName(lbl){ return String(lbl==null?'—':lbl).replace(/^https?:\/\//,'').replace(/^github\.com\//,''); }
+
+// State dot = the vertical scan-anchor (P7): same colors as the .st chips, its
+// evidence (basis + last-activity age + measurable) surfaced in the tooltip.
+const STATE_DOT = {activo:'#3fb950', enfriandose:'#d29922', entregado:'#58a6ff', estancado:'#db6d28', pausado:'var(--muted)'};
+function stateDot(st){
+  if (!st || !st.state) return `<span class="pc-dot" title="sin estado derivado"></span>`;
+  const c = STATE_DOT[st.state] || 'var(--muted)';
+  const m = STATE_META[st.state];
+  const age = ageStr(st.age_days);
+  const basis = STATE_BASIS[st.basis] || st.basis || '';
+  const meas = st.outcome_measurable ? 'con repo (outcome medible)' : 'sin repo (outcome no medible)';
+  const tip = `${m ? m.label : st.state} — ${basis}. Última actividad: ${age}. ${meas}.`;
+  return `<span class="pc-dot" style="background:${c}" title="${esc(tip)}"></span>`;
+}
+
+// Outcome cell (#27, P5): entrega real como columna de primera clase. Tri-estado
+// honesto — sin repo (no medible, "—") ≠ repo con 0 entregado (cero real, "0").
+// measurable = el repos-side lo marcó (state.outcome_measurable) o hay algún conteo
+// >0 (un PR/issue implica repo). Los PR mergeados = la entrega estrella (verde).
+function outcomeCell(p, delivMeasurable){
+  const pr=p.merged_prs||0, cl=p.closed_issues||0, op=p.open_issues||0;
+  const measurable = (p.state && p.state.outcome_measurable) || pr || cl || op;
+  // Filesystem deliverables (#27) sólo cuando el watcher está encendido; si no,
+  // el banner fs-mon ya lo explica — no repetimos "— entreg." por fila (era ruido).
+  const arch = (delivMeasurable && p.deliverables)
+    ? ` · <span class="out-cl" title="Entregables detectados por el watcher de filesystem (ventana)">${p.deliverables} arch.</span>` : '';
+  if (!measurable)
+    return `<span class="pc-out out-na" title="Sin repo GitHub vinculado — entrega no medible (distinto de 0 entregado)">— sin repo${arch}</span>`;
+  if (!pr && !cl && !op)
+    return `<span class="pc-out out-zero" title="Repo GitHub vinculado, aún sin PRs mergeados ni issues cerrados — entrega real: 0">0 entregado${arch}</span>`;
+  const tip = 'Entrega GitHub — totales all-time (no de la ventana). PR mergeados + issues cerrados / abiertos, sumando a todos los contribuidores.';
+  const parts = [];
+  if (pr) parts.push(`<span class="out-pr"><b>${pr}</b> PR</span>`);
+  if (cl) parts.push(`<span class="out-cl">${cl} cerr.</span>`);
+  if (op) parts.push(`<span class="out-op">${op} ab.</span>`);
+  return `<span class="pc-out" title="${tip}">${parts.join(' · ')}${arch}</span>`;
+}
+
+// Production strip (P1): a flex row of equal-flex cells that spans the whole
+// column, replacing the left-anchored SVG (viewBox + preserveAspectRatio="meet"
+// rendered at natural width, leaving the ~1200px void). Same semantics: cell color
+// = the day's dominant provider, opacity = session volume vs the busiest day.
+// Zero-dep (plain divs, no chart lib).
 function renderStrip(daysList, dayData, maxCount){
-  const cw=14, gap=3, h=16;
-  const W = Math.max(daysList.length*(cw+gap)-gap, cw);
-  const cells = daysList.map((day,i)=>{
-    const x = i*(cw+gap);
+  const cells = daysList.map(day=>{
     const rec = dayData[day];
     const total = dayTotal(rec);
-    if (!total) return `<rect x="${x}" y="0" width="${cw}" height="${h}" rx="2" fill="var(--bg3)"><title>${esc(day)}: sin sesiones</title></rect>`;
+    if (!total) return `<span class="pc-cell" title="${esc(day)}: sin sesiones"></span>`;
     let top=null, topN=-1;
     for (const [prov,n] of Object.entries(rec)){ if(n>topN){topN=n; top=prov;} }
     const op = 0.35 + 0.65*(maxCount>0 ? Math.min(total,maxCount)/maxCount : 0);
     const detail = Object.entries(rec).map(([p,n])=>`${p} ${n}`).join(', ');
-    return `<rect x="${x}" y="0" width="${cw}" height="${h}" rx="2" fill="${provColor(top)}" fill-opacity="${op.toFixed(2)}"><title>${esc(day)}: ${total} ses (${esc(detail)})</title></rect>`;
+    return `<span class="pc-cell" style="background:${provColor(top)};opacity:${op.toFixed(2)}" title="${esc(day)}: ${total} ses (${esc(detail)})"></span>`;
   }).join('');
-  return `<svg viewBox="0 0 ${W} ${h}" preserveAspectRatio="xMinYMid meet" role="img" aria-label="Producción diaria">${cells}</svg>`;
+  return `<span class="pc-strip" role="img" aria-label="Producción diaria">${cells}</span>`;
 }
 
 function renderProduction(data, daysN){
@@ -273,21 +322,26 @@ function renderProduction(data, daysN){
   let maxCount = 1;
   projects.forEach(p => daysList.forEach(d => { const t=dayTotal(p.days[d]); if(t>maxCount) maxCount=t; }));
 
-  body.innerHTML = projects.map(p => {
-    const deliv = data.deliverables_measurable
-      ? `<span class="prod-deliv${p.deliverables?'':' zero'}">${p.deliverables} entreg.</span>`
-      : `<span class="prod-deliv zero" title="Marcá un root con: mool workspace root add &lt;ruta&gt;">— entreg.</span>`;
-    // Outcome (#27): merged-PR / closed-issue / open-issue = entrega
-    // autoritativa desde GitHub. TOTALES all-time (no de la ventana) — distinto
-    // del esfuerzo (sesiones/días, sí de la ventana). Sólo se muestra cuando el
-    // proyecto tiene algo entregado; enteros contributor-agnostic, sin nombres.
-    const outcome = outcomeStr(p);
-    return `<div class="prod-row">
-      <span class="prod-label">${esc(p.project_label || '—')}${stateChip(p.state)}</span>
-      <span class="prod-strip">${renderStrip(daysList, p.days||{}, maxCount)}</span>
-      <span class="prod-stats"><b>${p.sessions}</b> ses · <b>${p.active_days}</b>d · ${deliv}${outcome}</span>
-    </div>`;
-  }).join('');
+  // Column header (P6): tabular, aligned to the same grid as the rows. The state
+  // dot column (P7) needs no header; ses/d are right-aligned to match the numbers.
+  const header = `<div class="prod-hrow">
+    <span></span>
+    <span>proyecto</span>
+    <span class="h-num" title="Sesiones en la ventana (esfuerzo, no duración)">ses</span>
+    <span class="h-num" title="Días activos en la ventana">d</span>
+    <span title="Entrega GitHub — PR mergeados / issues cerrados / abiertos (all-time)">entrega</span>
+    <span title="Sesiones por día en la ventana; color = proveedor dominante, intensidad = volumen">producción · ${daysN}d</span>
+  </div>`;
+  const rows = projects.map(p =>
+    `<div class="prod-row">
+      ${stateDot(p.state)}
+      <span class="pc-name" title="${esc(p.project_label || '—')}">${esc(cleanName(p.project_label))}</span>
+      <span class="pc-num"><b>${p.sessions}</b></span>
+      <span class="pc-num">${p.active_days}</span>
+      ${outcomeCell(p, data.deliverables_measurable)}
+      ${renderStrip(daysList, p.days||{}, maxCount)}
+    </div>`).join('');
+  body.innerHTML = header + rows;
 
   // Legend: one swatch per provider seen + an intensity note.
   const provs = data.providers||[];
@@ -339,7 +393,9 @@ function projRow(p){
   return `<div class="${cls}">
     <div class="proj-head"${onclick}>
       <span class="caret">${caret}</span>
-      <span class="proj-name">${esc(p.project_label || '—')}${stateChip(p.state)}${harnessChip}${kidsChip}</span>
+      ${stateDot(p.state)}
+      <span class="proj-name" title="${esc(p.project_label || '—')}">${esc(cleanName(p.project_label))}</span>
+      ${stateChip(p.state)}${harnessChip}${kidsChip}
       <span class="proj-meta">${badges(p.sources)} ${metaStr(p)}</span>
     </div>
     ${hasKids ? `<div class="kids">${kids}</div>` : ''}
