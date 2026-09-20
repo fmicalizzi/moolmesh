@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.17.1
+Last updated: September 2026 — v1.17.2
 
 ---
 
