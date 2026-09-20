@@ -6,6 +6,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.18.0] — 2026-09-20
+
+Part A of the `/portfolio` UX redesign (#35): a layout + hierarchy pass that
+reclaims the wasted horizontal space and makes the view scannable. **Presentation
+only** — the resolver / derived-state / outcome computation (#27/#28/#29), the SSE
+schema (read-on-load), and `hide_project_names` masking are all untouched. No new
+dependencies (zero-dep: the production strip is hand-rolled `<div>` cells, no chart
+library).
+
+### Changed
+- **#35 — `/portfolio` layout redesign (Part A).**
+  - **Production strip fills its column.** The per-project strip was an inline SVG
+    with `preserveAspectRatio="xMinYMid meet"` that rendered at its ~65px natural
+    width, left-anchored, leaving a ~1200px horizontal void before the stats. It is
+    now a flex row of equal-flex cells that spans the full column width. Same
+    semantics (cell color = the day's dominant provider, opacity = session volume).
+  - **Dense, single-line rows** (~2–3× more projects per screen) replace the
+    two-line rows where the name wrapped and the status chip sat below it.
+  - **Clean names:** the `github.com/` prefix is dropped (the org already reads as
+    the client), names render on one line with an ellipsis, and the full (masked)
+    label is in the tooltip.
+  - **Outcome is a first-class column** with an honest tri-state: colored
+    merged-PR / closed / open counts (merged PRs weighted as the real delivery),
+    a real `0 entregado` for a repo that has merged nothing, and `— sin repo` for
+    the not-measurable case — no longer conflated as a single grey "— entreg."
+  - **Column headers** (proyecto · ses · d · entrega · producción) on a shared grid,
+    and the **derived state as a leading color-dot column** that anchors the
+    vertical scan (in both the production card and the grouped list).
+
+Follow-ups: **#35 Part B** (KPI tiles + charts) and **#36** (data-accuracy audit of
+the portfolio signals) remain open — both out of scope for this layout-only pass.
+
+---
+
 ## [1.17.2] — 2026-09-19
 
 Honest failure reporting for `mool repo sync`. Follow-up to #32 (the "0 commits"
