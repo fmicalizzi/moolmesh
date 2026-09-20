@@ -103,11 +103,15 @@ def get_remote_refs(path: str) -> dict[str, str]:
         return {}
 
 
-def git_log_range(path: str, old_sha: str, new_sha: str) -> str:
+def git_log_range(path: str, old_sha: str, new_sha: str) -> str | None:
     """Obtiene git log entre dos SHAs con formato estructurado + numstat.
 
     Format: SHA|author_name|author_email|timestamp|parent_shas|subject
     Seguido de --numstat output.
+
+    Devuelve el stdout (posiblemente "" cuando no hay commits) en éxito, o
+    None si git falló (rc≠0 o excepción). El caller debe distinguir None
+    ("git falló") de "" ("0 commits") para no reportar un fallo como cero (§4).
     """
     try:
         fmt = "%H|%an|%ae|%aI|%P|%s"
@@ -121,21 +125,22 @@ def git_log_range(path: str, old_sha: str, new_sha: str) -> str:
         if result.returncode == 0:
             return result.stdout
         # No confundir un fallo de git con "no hay commits" (§4): logueamos
-        # con contexto en vez de devolver "" en silencio.
+        # con contexto y devolvemos None en vez de "" en silencio.
         _log.warning("git log %s..%s falló en %s (rc=%s): %s",
                      old_sha, new_sha, path, result.returncode,
                      result.stderr.strip())
-        return ""
+        return None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         _log.warning("git log %s..%s no ejecutó en %s", old_sha, new_sha,
                      path, exc_info=True)
-        return ""
+        return None
 
 
-def git_log_since(path: str, since_date: str) -> str:
+def git_log_since(path: str, since_date: str) -> str | None:
     """Obtiene git log desde una fecha (para ingesta inicial).
 
-    Mismo formato que git_log_range pero con --since y --all.
+    Mismo formato que git_log_range pero con --since y --all. Devuelve "" en
+    éxito sin commits y None si git falló (ver git_log_range).
     """
     try:
         fmt = "%H|%an|%ae|%aI|%P|%s"
@@ -151,18 +156,19 @@ def git_log_since(path: str, since_date: str) -> str:
         _log.warning("git log --since=%s falló en %s (rc=%s): %s",
                      since_date, path, result.returncode,
                      result.stderr.strip())
-        return ""
+        return None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         _log.warning("git log --since=%s no ejecutó en %s", since_date, path,
                      exc_info=True)
-        return ""
+        return None
 
 
-def git_log_all(path: str) -> str:
+def git_log_all(path: str) -> str | None:
     """Obtiene todo el git log sin filtro de fecha.
 
     Para repos grandes puede tardar varios minutos.
-    Timeout extendido a 5 minutos.
+    Timeout extendido a 5 minutos. Devuelve "" en éxito sin commits y None si
+    git falló (ver git_log_range).
     """
     try:
         fmt = "%H|%an|%ae|%aI|%P|%s"
@@ -177,7 +183,7 @@ def git_log_all(path: str) -> str:
             return result.stdout
         _log.warning("git log --all falló en %s (rc=%s): %s",
                      path, result.returncode, result.stderr.strip())
-        return ""
+        return None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         _log.warning("git log --all no ejecutó en %s", path, exc_info=True)
-        return ""
+        return None

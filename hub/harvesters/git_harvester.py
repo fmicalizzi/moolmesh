@@ -15,6 +15,11 @@ from hub.log import get as get_logger
 
 _log = get_logger("GitHarvester")
 
+# Sentinel de ingest_history: git falló leyendo el historial (rc≠0 o excepción),
+# distinto de 0 (git ok, sin commits nuevos). El caller CLI lo traduce a error +
+# exit no-cero en vez del engañoso "0 commits" (issue #34).
+GIT_READ_FAILED: int = -1
+
 
 class GitHarvester:
     """Periodically fetches registered repos and ingests new commits."""
@@ -74,6 +79,7 @@ class GitHarvester:
 
             # 3. Detectar branches que avanzaron
             new_commits = []
+            failed_refs: set[str] = set()
             for ref, new_sha in new_refs.items():
                 old_sha = old_refs.get(ref)
                 if old_sha == new_sha:
@@ -85,6 +91,14 @@ class GitHarvester:
 
                 # Branch avanzó: obtener commits entre old y new
                 log_output = git_log_range(repo_path, old_sha, new_sha)
+                if log_output is None:
+                    # git falló en este rango (ya logueado en git_utils). En el
+                    # daemon no abortamos: saltamos esta ref y seguimos con el
+                    # resto del repo/loop, pero NO avanzamos su cursor (paso 5),
+                    # para reintentar en el próximo ciclo en vez de perder esos
+                    # commits en silencio (§4).
+                    failed_refs.add(ref)
+                    continue
                 if log_output:
                     branch_name = ref.replace("refs/remotes/origin/", "")
                     commits = self._parse_git_log(log_output, branch_name)
@@ -103,8 +117,13 @@ class GitHarvester:
                             **commit
                         })
 
-            # 5. Actualizar refs
-            self._store.update_refs(repo_id, new_refs)
+            # 5. Actualizar refs — excluyendo las que fallaron, para no avanzar
+            # su cursor y reintentarlas en el próximo ciclo (§4).
+            refs_to_store = ({r: s for r, s in new_refs.items()
+                              if r not in failed_refs}
+                             if failed_refs else new_refs)
+            if refs_to_store:
+                self._store.update_refs(repo_id, refs_to_store)
         except Exception:
             _log.warning("Error procesando repo %s", repo.get("path", "?"), exc_info=True)
             return
@@ -253,11 +272,17 @@ class GitHarvester:
     def ingest_history(self, repo_path: str, days: int | None = 14) -> int:
         """Ingesta inicial. days=None = historial completo.
 
-        Se llama una vez al hacer `mool repo add`.
+        Se llama al hacer `mool repo add` / `mool repo sync`. Retorna el número
+        de commits ingestados, o GIT_READ_FAILED (-1) si git falló leyendo el
+        historial — distinto de 0 (git ok, sin commits nuevos), para que el
+        caller CLI reporte el fallo en vez del engañoso "0 commits" (#34).
         """
         repo_id = self._store.get_repo_id(repo_path)
         if repo_id is None:
-            return 0
+            # Repo no está en el store: ingesta imposible. No es "0 commits" —
+            # señalamos el fallo hacia arriba igual que un fallo de git (#34/§4).
+            _log.warning("ingest_history: repo %s no está en el store", repo_path)
+            return GIT_READ_FAILED
 
         if days is None:
             log_output = git_log_all(repo_path)
@@ -265,7 +290,11 @@ class GitHarvester:
             since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
             log_output = git_log_since(repo_path, since)
 
+        if log_output is None:
+            # git falló (ya logueado en git_utils): señalamos hacia arriba.
+            return GIT_READ_FAILED
         if not log_output:
+            # git ok, sin commits nuevos.
             return 0
 
         commits = self._parse_git_log(log_output)
