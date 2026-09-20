@@ -306,6 +306,8 @@ def get_github_token(config: HubConfig) -> str | None:
             ["gh", "auth", "token"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5
         )
         if result.returncode == 0:

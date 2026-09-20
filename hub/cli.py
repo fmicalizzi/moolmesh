@@ -4,9 +4,30 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 
 from hub.colors import green, yellow, red, dim, bold
 from hub.discovery import ProjectDiscovery
+
+
+def _configure_stdio_encoding() -> None:
+    """Fuerza stdout/stderr a UTF-8 en Windows.
+
+    La consola por defecto de Windows usa cp1252, que no puede codificar
+    caracteres no-ASCII (p.ej. el '→' del texto de ayuda) y hace crashear el
+    CLI con UnicodeEncodeError. errors="replace" garantiza que nunca crashee
+    aunque la consola no soporte el glifo. Ver issue #31.
+    """
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:
@@ -484,7 +505,8 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
                 "moolmesh",
             ] + server_cmd
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(cmd, capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace", timeout=30)
                 if result.returncode == 0:
                     verb = "updated" if already else "registered"
                     print(green(f"  ✓ MCP server 'moolmesh' {verb} globally in Claude Code."))
@@ -727,6 +749,9 @@ exec "{venv_python}" -m hub.cli "$@"
 
 
 def main() -> None:
+    # UTF-8 en Windows antes de imprimir nada (issue #31).
+    _configure_stdio_encoding()
+
     # Raise fd limit — some OS defaults (e.g. macOS 256) are too low for SQLite + many session files
     try:
         import resource

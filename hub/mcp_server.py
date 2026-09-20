@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "mcp>=1.2.0",
+#     "mcp>=1.2.0,<2",
 # ]
 # ///
 """MoolMesh MCP Server — read-only access to AI agent session data."""
@@ -1155,11 +1155,35 @@ def _get_delivery_candidates(db_path: str, limit: int = 100) -> list[dict[str, A
 
 # ── MCP layer (guarded — only loads when mcp SDK is available) ──────
 
+_mcp_import_error: ImportError | None = None
+
 try:
     from mcp.server.fastmcp import FastMCP
     _mcp = FastMCP("moolmesh")
-except ImportError:
+except ImportError as exc:
+    # No tragamos el error: lo guardamos con contexto para distinguir
+    # "mcp no instalado" de "mcp versión incompatible" (2.x movió/renombró
+    # FastMCP → MCPServer). Ver issue #33 y AGENTS.md §4.
     _mcp = None
+    _mcp_import_error = exc
+    _log.warning("No se pudo cargar el SDK mcp: %s", exc, exc_info=True)
+
+
+def _mcp_unavailable_message(exc: ImportError | None) -> str:
+    """Mensaje que distingue 'mcp no instalado' de 'versión incompatible'.
+
+    Un ImportError sobre el módulo raíz 'mcp' → no está instalado.
+    Un ImportError sobre un submódulo (p.ej. 'mcp.server.fastmcp', que mcp 2.x
+    renombró a MCPServer) → está instalado pero es una versión incompatible.
+    """
+    missing = getattr(exc, "name", None)
+    if exc is not None and missing and missing != "mcp":
+        return (
+            f"Error: el paquete 'mcp' está instalado pero es una versión "
+            f"incompatible (no se encontró '{missing}'). MoolMesh requiere "
+            f"mcp>=1.2.0,<2. Ejecutá:  uv run --with \"mcp<2\" hub/mcp_server.py"
+        )
+    return "Error: mcp package not installed. Run with: uv run hub/mcp_server.py"
 
 if _mcp is not None:
 
@@ -1523,7 +1547,7 @@ if _mcp is not None:
 
 if __name__ == "__main__":
     if _mcp is None:
-        print("Error: mcp package not installed. Run with: uv run hub/mcp_server.py", file=sys.stderr)
+        print(_mcp_unavailable_message(_mcp_import_error), file=sys.stderr)
         sys.exit(1)
     print("MoolMesh MCP Server starting...", file=sys.stderr)
     _mcp.run(transport="stdio")

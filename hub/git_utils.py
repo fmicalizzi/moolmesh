@@ -4,6 +4,15 @@ from __future__ import annotations
 import re
 import subprocess
 
+from hub.log import get
+
+_log = get("GitUtils")
+
+# git escribe UTF-8 en su salida; forzamos la decodificación a UTF-8 con
+# errors="replace" para no depender del locale del proceso (en Windows cae a
+# cp1252 y revienta con mensajes de commit acentuados — issue #32).
+_DECODE = {"encoding": "utf-8", "errors": "replace"}
+
 
 def is_git_repo(path: str) -> bool:
     """Verifica que path es un repositorio git."""
@@ -11,7 +20,8 @@ def is_git_repo(path: str) -> bool:
         result = subprocess.run(
             ["git", "-C", path, "rev-parse", "--git-dir"],
             capture_output=True,
-            timeout=5
+            timeout=5,
+            **_DECODE,
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -24,8 +34,8 @@ def get_remote_url(path: str, remote: str = "origin") -> str | None:
         result = subprocess.run(
             ["git", "-C", path, "remote", "get-url", remote],
             capture_output=True,
-            text=True,
-            timeout=5
+            timeout=5,
+            **_DECODE,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -61,7 +71,8 @@ def git_fetch(path: str) -> bool:
         result = subprocess.run(
             ["git", "-C", path, "fetch", "--all", "--quiet"],
             capture_output=True,
-            timeout=60
+            timeout=60,
+            **_DECODE,
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -78,8 +89,8 @@ def get_remote_refs(path: str) -> dict[str, str]:
             ["git", "-C", path, "for-each-ref", "refs/remotes/",
              "--format=%(refname) %(objectname)"],
             capture_output=True,
-            text=True,
-            timeout=10
+            timeout=10,
+            **_DECODE,
         )
         refs = {}
         if result.returncode == 0:
@@ -104,11 +115,20 @@ def git_log_range(path: str, old_sha: str, new_sha: str) -> str:
             ["git", "-C", path, "log", f"{old_sha}..{new_sha}",
              f"--format={fmt}", "--numstat"],
             capture_output=True,
-            text=True,
-            timeout=30
+            timeout=30,
+            **_DECODE,
         )
-        return result.stdout if result.returncode == 0 else ""
+        if result.returncode == 0:
+            return result.stdout
+        # No confundir un fallo de git con "no hay commits" (§4): logueamos
+        # con contexto en vez de devolver "" en silencio.
+        _log.warning("git log %s..%s falló en %s (rc=%s): %s",
+                     old_sha, new_sha, path, result.returncode,
+                     result.stderr.strip())
+        return ""
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        _log.warning("git log %s..%s no ejecutó en %s", old_sha, new_sha,
+                     path, exc_info=True)
         return ""
 
 
@@ -123,11 +143,18 @@ def git_log_since(path: str, since_date: str) -> str:
             ["git", "-C", path, "log", "--all", f"--since={since_date}",
              f"--format={fmt}", "--numstat"],
             capture_output=True,
-            text=True,
-            timeout=60
+            timeout=60,
+            **_DECODE,
         )
-        return result.stdout if result.returncode == 0 else ""
+        if result.returncode == 0:
+            return result.stdout
+        _log.warning("git log --since=%s falló en %s (rc=%s): %s",
+                     since_date, path, result.returncode,
+                     result.stderr.strip())
+        return ""
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        _log.warning("git log --since=%s no ejecutó en %s", since_date, path,
+                     exc_info=True)
         return ""
 
 
@@ -143,9 +170,14 @@ def git_log_all(path: str) -> str:
             ["git", "-C", path, "log", "--all",
              f"--format={fmt}", "--numstat"],
             capture_output=True,
-            text=True,
-            timeout=300
+            timeout=300,
+            **_DECODE,
         )
-        return result.stdout if result.returncode == 0 else ""
+        if result.returncode == 0:
+            return result.stdout
+        _log.warning("git log --all falló en %s (rc=%s): %s",
+                     path, result.returncode, result.stderr.strip())
+        return ""
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        _log.warning("git log --all no ejecutó en %s", path, exc_info=True)
         return ""
