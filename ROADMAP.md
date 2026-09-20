@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.18.0
+Last updated: September 2026 — v1.19.0
 
 ---
 
@@ -142,7 +142,17 @@ Part A of the `/portfolio` UX pass ([#35](https://github.com/fmicalizzi/moolmesh
 - **Production strip fills its column.** The inline SVG (`preserveAspectRatio="xMinYMid meet"`, rendered left-anchored at its ~65px natural width, leaving a ~1200px void) is replaced by a flex row of equal-flex cells that span the full width — same semantics (color = dominant provider, opacity = session volume), still hand-rolled and zero-dep.
 - **Dense, aligned rows** (~2–3× more projects per screen): single-line names, `github.com/` dropped, 1-line + ellipsis + tooltip; column headers on a shared grid; **derived state as a leading color-dot scan-anchor** column.
 - **Outcome as a first-class column** with an honest tri-state — merged-PR / closed / open counts (merged PRs weighted), a real `0 entregado`, and `— sin repo` for the not-measurable case (no longer conflated as one grey "— entreg.").
-- **Consumes, doesn't change** — resolver/state/outcome (#27/#28/#29), SSE (read-on-load) and `hide_project_names` masking untouched; zero new dependencies. Follow-ups **#35 Part B** (KPI tiles + charts) and **[#36](https://github.com/fmicalizzi/moolmesh/issues/36)** (data-accuracy audit) remain open.
+- **Consumes, doesn't change** — resolver/state/outcome (#27/#28/#29), SSE (read-on-load) and `hide_project_names` masking untouched; zero new dependencies. Follow-up **[#36](https://github.com/fmicalizzi/moolmesh/issues/36)** (data-accuracy audit) remains open.
+
+### v1.19 — Portfolio UX redesign (charts + KPIs)
+
+Part B of the `/portfolio` UX pass ([#37](https://github.com/fmicalizzi/moolmesh/issues/37)) — the "new space" on top of the clean Part-A layout, **presentation only**, still zero-dep (inline hand-rolled SVG/`<div>`, no chart library).
+
+- **KPI tile row** — proyectos activos, PR mergeados (labeled all-time, since outcome counts are all-time totals), entregados, estancados, clientes activos; number + label + a status-colored accent (no series color).
+- **State distribution + recency histogram in one card** — a stacked bar with an icon+label+count legend (status palette, never color-alone), and projects bucketed by last-activity age (`state.age_days`, real clocks, not window-bounded: hoy / 1–3d / 4–7d / 8–30d / >30d, with a `sin dato` bucket).
+- **Top by activity / by delivery** — horizontal bars, one hue per measure + direct labels; the delivery chart keeps the tri-state honesty (hatched `sin repo` track, real-0 ≠ not-measurable) via the same `isMeasurable()` predicate as the Part-A column.
+- **Palette discipline** — the provider trio fails as a color-only identity channel (cyan↔purple ΔE 14.2, validated), so nothing distinguishes series by color alone.
+- **Consumes, doesn't change** — resolver/state/outcome (#27/#28/#29), SSE (read-on-load) and masking untouched; zero new dependencies. Follow-up **#36** (data-accuracy audit) remains open.
 
 ---
 

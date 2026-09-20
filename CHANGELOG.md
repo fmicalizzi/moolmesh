@@ -6,6 +6,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.19.0] — 2026-09-20
+
+Part B of the `/portfolio` UX redesign (#37): the "new space" on top of the
+now-clean Part-A layout — a KPI tile row and hand-rolled charts. **Presentation
+only** — the resolver / derived-state / outcome computation (#27/#28/#29), the SSE
+schema (read-on-load), and `hide_project_names` masking are all untouched. No new
+dependencies (zero-dep: every chart is inline hand-rolled SVG/`<div>`, no chart
+library or CDN).
+
+### Added
+- **#37 — portfolio KPIs + charts (Part B).**
+  - **KPI tile row** — headline numbers over the list: proyectos activos, PR
+    mergeados (labeled **all-time**, since outcome counts are all-time totals — not
+    windowed like the effort columns), entregados, estancados, clientes activos.
+    No series color (number + label + a status-colored top accent).
+  - **State distribution** — a single stacked bar plus a legend that carries
+    **icon + label + count**, so color is never the sole channel (the status
+    palette is exempt from the categorical rule precisely because it ships with a
+    label).
+  - **Recency histogram** in the same card (fills the previously half-empty space):
+    projects bucketed by last-activity age (`state.age_days`, real clocks across
+    session/fs/git, **not window-bounded**) — hoy / 1–3d / 4–7d / 8–30d / >30d,
+    with an honest `sin dato` bucket for stateless projects. Single measure → one
+    hue + direct labels.
+  - **Top by activity** (sessions) and **top by delivery** (merged PRs) — horizontal
+    bars, **one hue per measure + direct labels** (not a categorical rainbow).
+  - **Tri-state honesty in the delivery chart** — a hatched `sin repo` track plus a
+    note keep the outcome gap visible in-chart (real-0 ≠ not-measurable), driven by
+    the same `isMeasurable()` predicate the Part-A column uses, so they can never
+    disagree.
+  - **Palette discipline** — the provider trio fails as a color-only identity
+    channel (cyan↔purple ΔE 14.2, below the 15 floor), so nothing here distinguishes
+    series by color alone; validated, not eyeballed.
+  - KPIs/charts re-render on the window toggle (window labeled); labels honor
+    masking (`cleanName` over `project_label`, never `project_key`).
+
+Follow-up: **#36** (data-accuracy audit of the portfolio signals) remains open.
+
+---
+
 ## [1.18.0] — 2026-09-20
 
 Part A of the `/portfolio` UX redesign (#35): a layout + hierarchy pass that
