@@ -1813,8 +1813,16 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
 
     store.close()
     print(green(f"Registered {repo_config.owner}/{repo_config.repo}"))
-    days_desc = "full history" if days is None else f"last {days} days"
-    print(f"  Ingested {count} commits ({days_desc})")
+    # count < 0 (GIT_READ_FAILED): el repo quedó registrado (el add tuvo éxito)
+    # pero el backfill del historial falló. Avisamos sin exit no-cero — el add
+    # sí funcionó — y no lo reportamos como "0 commits" (#34). El retry se hace
+    # con `mool repo sync`, que sí devuelve exit no-cero ante el fallo.
+    if count < 0:
+        print(yellow(f"  Could not read git history in {path} (see logs) — "
+                     f"run 'mool repo sync {path}' to retry"))
+    else:
+        days_desc = "full history" if days is None else f"last {days} days"
+        print(f"  Ingested {count} commits ({days_desc})")
 
 
 def cmd_repo_list(args: argparse.Namespace) -> None:
@@ -1889,6 +1897,12 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
 
     count = harvester.ingest_history(path, days=days)
     store.close()
+
+    # count < 0 (GIT_READ_FAILED): git falló leyendo el historial — no es "0
+    # commits". Reportamos error real + exit no-cero en vez de mentir (#34).
+    if count < 0:
+        print(red(f"Error reading git in {path} (see logs)"))
+        sys.exit(1)
 
     days_desc = "full history" if days is None else f"last {days} days"
     print(green(f"Synced: {count} new commits ingested ({days_desc})"))

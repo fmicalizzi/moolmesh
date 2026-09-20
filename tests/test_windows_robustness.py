@@ -109,7 +109,7 @@ def test_git_log_failure_is_logged_not_silent(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="hub.GitUtils"):
         result = git_utils.git_log_range("/x", "a", "b")
 
-    assert result == ""  # el contrato de retorno no cambia
+    assert result is None  # fallo de git → None (distinto de "" = 0 commits, #34)
     assert any("falló" in r.message or "bad revision" in r.getMessage()
                for r in caplog.records), "el fallo de git no se logueó"
 
