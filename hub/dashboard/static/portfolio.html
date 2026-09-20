@@ -136,6 +136,52 @@
   .fs-mon .dot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; }
   .fs-mon.on .dot { background:var(--green); } .fs-mon.off .dot { background:var(--muted); }
   .fs-mon b { color:var(--text); } .fs-mon code { color:var(--accent); }
+  /* --- Executive summary: KPI tiles + charts (#37, zero-dep, hand-rolled) ---
+     Palette discipline: the provider trio (cyan/purple/yellow) FAILS as a
+     color-only identity channel (ΔE 14.2 cyan↔purple, below the 15 floor), so
+     NOTHING here distinguishes series by color alone. KPI tiles + top-bars use
+     ONE hue per measure with direct labels; the state distribution uses the
+     STATUS palette (exempt — it always ships with icon+label). */
+  .exec { border:1px solid var(--border); border-radius:6px; background:var(--bg2); padding:12px 14px; margin-bottom:16px; }
+  .exec-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+  .exec-head h3 { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; font-weight:600; }
+  .exec-win { font-size:10px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(118px,1fr)); gap:8px; margin-bottom:14px; }
+  .kpi { border:1px solid var(--border); border-top:2px solid var(--muted); border-radius:5px; background:var(--bg3); padding:9px 11px; }
+  .kpi-n { font-size:22px; font-weight:700; color:var(--text); font-variant-numeric:tabular-nums; line-height:1.1; }
+  /* na = not-measurable (distinct from a real zero), same tri-state honesty as
+     the Part-A outcome column (.out-na). */
+  .kpi-n.na { color:#5A5A62; font-style:italic; font-size:18px; }
+  .kpi-l { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-top:3px; }
+  .charts { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; }
+  .chart { border:1px solid var(--border); border-radius:5px; background:var(--bg3); padding:10px 12px; }
+  .chart h4 { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; font-weight:600; margin-bottom:10px; }
+  /* State distribution: one stacked bar; the legend below carries icon+label+
+     count so color is NEVER the sole channel (status palette is exempt for
+     exactly this reason — it ships with a label). */
+  .dist-bar { display:flex; height:18px; border-radius:3px; overflow:hidden; background:var(--bg); margin-bottom:10px; }
+  .dist-seg { min-width:2px; }
+  .dist-legend { display:flex; flex-direction:column; gap:5px; }
+  .dist-row { display:flex; align-items:center; gap:7px; font-size:11px; }
+  .dist-row .dot { width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
+  .dist-row .lab { color:var(--text); flex:1; }
+  .dist-row .cnt { color:var(--muted); font-variant-numeric:tabular-nums; }
+  /* Top bars: ONE hue per chart (measure → single hue) + direct labels. */
+  .tbar { margin-bottom:8px; }
+  .tbar-top { display:flex; justify-content:space-between; gap:8px; font-size:11px; margin-bottom:2px; }
+  .tbar-name { color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tbar-v { color:var(--muted); font-variant-numeric:tabular-nums; flex:0 0 auto; }
+  .tbar-track { height:10px; border-radius:2px; background:var(--bg); overflow:hidden; }
+  .tbar-fill { height:100%; border-radius:2px; }
+  .fill-act { background:var(--accent); }   /* actividad (sesiones) — un hue */
+  .fill-del { background:var(--green); }     /* entrega (PR mergeados) — un hue */
+  /* Not-measurable track — hatched, out-na color: the outcome gap made VISIBLE
+     in-chart (real-0 ≠ no-medible), not hidden as "0 entregado". */
+  .tbar-na .tbar-track { background:repeating-linear-gradient(45deg,#2A2A30 0,#2A2A30 4px,transparent 4px,transparent 8px); }
+  .tbar-na .tbar-name, .tbar-na .tbar-v { color:#5A5A62; font-style:italic; }
+  .chart-note { font-size:10px; color:var(--muted); margin-top:9px; line-height:1.45; }
+  .chart-note b { color:var(--text); }
+  .chart-empty { font-size:11px; color:var(--muted); padding:6px 0; }
 </style>
 </head>
 <body>
@@ -155,6 +201,27 @@
   <div class="section-title">Proyectos (harness colapsado, agrupado)</div>
   <div class="hint">Las carpetas de harness (scratchpad, session-storage) se pliegan sobre su proyecto real; subdirs y materiales anidan bajo su proyecto. Nada se borra: se agrupa. Un nodo se enciende venga la actividad de una <b>sesión</b>, del <b>filesystem</b> o de <b>git</b> — conteos por señal, nunca sumados.</div>
   <div class="summary" id="pf-summary"></div>
+  <div class="exec" id="exec" style="display:none">
+    <div class="exec-head">
+      <h3>Resumen ejecutivo</h3>
+      <span class="exec-win" id="exec-win"></span>
+    </div>
+    <div class="kpis" id="kpis"></div>
+    <div class="charts">
+      <div class="chart">
+        <h4>Distribución de estados</h4>
+        <div id="chart-dist"><div class="chart-empty">Cargando…</div></div>
+      </div>
+      <div class="chart">
+        <h4 title="Top proyectos por esfuerzo (sesiones) en la ventana">Top por actividad · sesiones</h4>
+        <div id="chart-act"><div class="chart-empty">Cargando…</div></div>
+      </div>
+      <div class="chart">
+        <h4 title="Top proyectos por entrega real (PR mergeados, all-time)">Top por entrega · PR mergeados</h4>
+        <div id="chart-del"><div class="chart-empty">Cargando…</div></div>
+      </div>
+    </div>
+  </div>
   <div class="fs-mon" id="fs-mon"></div>
   <div class="prod" id="prod-card">
     <div class="prod-top">
@@ -272,9 +339,17 @@ function stateDot(st){
 // honesto — sin repo (no medible, "—") ≠ repo con 0 entregado (cero real, "0").
 // measurable = el repos-side lo marcó (state.outcome_measurable) o hay algún conteo
 // >0 (un PR/issue implica repo). Los PR mergeados = la entrega estrella (verde).
+// Outcome measurability (#27/#37): a repo is linked when the state layer marks
+// it, OR any GitHub count is >0 (a PR/issue implies a repo). Factored out so the
+// Part-A column, the KPI tiles and the delivery chart share ONE predicate and can
+// never disagree on real-0 (repo, nothing delivered) vs not-measurable (no repo).
+function isMeasurable(p){
+  return !!((p.state && p.state.outcome_measurable)
+            || p.merged_prs || p.closed_issues || p.open_issues);
+}
 function outcomeCell(p, delivMeasurable){
   const pr=p.merged_prs||0, cl=p.closed_issues||0, op=p.open_issues||0;
-  const measurable = (p.state && p.state.outcome_measurable) || pr || cl || op;
+  const measurable = isMeasurable(p);
   // Filesystem deliverables (#27) sólo cuando el watcher está encendido; si no,
   // el banner fs-mon ya lo explica — no repetimos "— entreg." por fila (era ruido).
   const arch = (delivMeasurable && p.deliverables)
@@ -310,7 +385,159 @@ function renderStrip(daysList, dayData, maxCount){
   return `<span class="pc-strip" role="img" aria-label="Producción diaria">${cells}</span>`;
 }
 
+// --- Executive summary (#37): KPI tiles + charts, hand-rolled zero-dep. Fed by
+// the production payload (windowed effort + state + all-time outcome, per
+// canonical project_key) plus the client count from the grouped payload. The two
+// fetches race, so each caller stashes its slice and re-renders whatever is ready
+// — the KPI/chart block tolerates either being absent on first paint.
+let _prodData = null;      // last production payload (windowed)
+let _clientStat = null;    // {total, active} from grouped, or null until loaded
+
+// Masked chart label: same rule as everywhere — drop github.com/, honor server-
+// side masking, NEVER touch project_key (the raw path). project_label is already
+// masked when hide_project_names is set.
+function chartName(p){ return cleanName(p.project_label || '—'); }
+
+function stateCounts(projects){
+  const order = ['activo','enfriandose','entregado','estancado','pausado'];
+  const counts = {}; let unknown = 0;
+  for (const p of projects){
+    const s = p.state && p.state.state;
+    if (s && order.includes(s)) counts[s] = (counts[s]||0)+1;
+    else unknown++;   // derive_project_states can fall back to {}; never hide these
+  }
+  return {counts, unknown, order};
+}
+
+function kpiTile(n, label, tip, accent, na){
+  const cls = na ? 'kpi-n na' : 'kpi-n';
+  const style = accent ? ` style="border-top-color:${accent}"` : '';
+  return `<div class="kpi"${style} title="${esc(tip)}">`
+       + `<div class="${cls}">${esc(String(n))}</div>`
+       + `<div class="kpi-l">${esc(label)}</div></div>`;
+}
+
+// One measure → one hue + a direct label (no categorical color). rows already
+// sorted+sliced by the caller; maxV pins the fill scale.
+function topBars(rows, maxV, hueClass, valFn, nameFn){
+  return rows.map(r => {
+    const v = valFn(r);
+    const w = maxV>0 ? Math.max(2, Math.round(v/maxV*100)) : 0;
+    return `<div class="tbar">
+      <div class="tbar-top"><span class="tbar-name" title="${esc(nameFn(r))}">${esc(nameFn(r))}</span><span class="tbar-v">${esc(String(v))}</span></div>
+      <div class="tbar-track"><div class="tbar-fill ${hueClass}" style="width:${w}%"></div></div>
+    </div>`;
+  }).join('');
+}
+
+function renderExec(){
+  const wrap = document.getElementById('exec');
+  const data = _prodData;
+  if (!data) return;                 // production not loaded yet; will re-fire
+  const projects = data.projects || [];
+  wrap.style.display = '';
+  const winN = data.window_days || prodDays;
+  document.getElementById('exec-win').textContent =
+    `ventana: ${winN} días · ${projects.length} proyectos activos en la ventana`;
+
+  // --- KPI tiles ---
+  const sc = stateCounts(projects);
+  const nAct = sc.counts.activo || 0;
+  const nEnt = sc.counts.entregado || 0;
+  const nEst = sc.counts.estancado || 0;
+  const measurable = projects.filter(isMeasurable);
+  const totalPR = projects.reduce((a,p)=>a+(p.merged_prs||0),0);
+  const kpiEl = document.getElementById('kpis');
+  let kpis = '';
+  kpis += kpiTile(nAct, 'proyectos activos',
+    `Proyectos con actividad reciente en la ventana de ${winN} días (estado derivado #28).`,
+    STATE_DOT.activo);
+  kpis += kpiTile(totalPR, 'PR mergeados',
+    `PR mergeados — totales ALL-TIME (no de la ventana), sumados sobre los ${projects.length} proyectos activos en los últimos ${winN} días. Sólo ${measurable.length} de ${projects.length} tienen repo vinculado (entrega medible); el resto no ingirió repo.`,
+    'var(--green)');
+  kpis += kpiTile(nEnt, 'entregados',
+    `Proyectos cuyo estado derivado es 'entregado' — PR mergeado o issue cerrado que cerró el burst (#28).`,
+    STATE_DOT.entregado);
+  kpis += kpiTile(nEst, 'estancados',
+    `Proyectos 'estancados' — quietos con issues abiertos colgando (#28).`,
+    STATE_DOT.estancado);
+  // Clientes: tri-state honesty — tier oscuro hasta configurar personal_orgs.
+  if (_clientStat == null){
+    kpis += kpiTile('…', 'clientes activos', 'Cargando el tier de clientes…', null, true);
+  } else if (_clientStat.total === 0){
+    kpis += kpiTile('—', 'clientes activos',
+      'Sin clientes configurados — el tier de clientes queda oscuro hasta fijar personal_orgs / github_handle en [user]. No medible, distinto de 0.',
+      null, true);
+  } else {
+    kpis += kpiTile(_clientStat.active, 'clientes activos',
+      `Clientes/orgs con estado activo o enfriándose, de ${_clientStat.total} totales (#29).`,
+      STATE_DOT.activo);
+  }
+  kpiEl.innerHTML = kpis;
+
+  // --- State distribution (status palette + icon + label, never color-alone) ---
+  const total = projects.length;
+  const distEl = document.getElementById('chart-dist');
+  if (!total){
+    distEl.innerHTML = '<div class="chart-empty">Sin proyectos en la ventana.</div>';
+  } else {
+    const segs = sc.order.filter(s=>sc.counts[s]).map(s=>({
+      s, cnt:sc.counts[s], m:STATE_META[s], col:STATE_DOT[s],
+    }));
+    if (sc.unknown) segs.push({s:'sin_estado', cnt:sc.unknown,
+      m:{emoji:'⚫', label:'sin estado'}, col:'var(--muted)'});
+    const bar = segs.map(g=>{
+      const pct = (g.cnt/total*100).toFixed(2);
+      const tip = `${g.m.emoji} ${g.m.label}: ${g.cnt} de ${total} (${(g.cnt/total*100).toFixed(0)}%)`;
+      return `<div class="dist-seg" style="width:${pct}%;background:${g.col}" title="${esc(tip)}"></div>`;
+    }).join('');
+    const legend = segs.map(g=>
+      `<div class="dist-row"><span class="dot" style="background:${g.col}"></span>`
+      + `<span class="lab">${g.m.emoji} ${esc(g.m.label)}</span>`
+      + `<span class="cnt">${g.cnt} · ${(g.cnt/total*100).toFixed(0)}%</span></div>`).join('');
+    distEl.innerHTML = `<div class="dist-bar" role="img" aria-label="Distribución de estados">${bar}</div><div class="dist-legend">${legend}</div>`;
+  }
+
+  // --- Top by activity (sessions) — single hue (accent) + direct labels ---
+  const actEl = document.getElementById('chart-act');
+  const topAct = projects.slice().sort((a,b)=>b.sessions-a.sessions)
+                         .filter(p=>p.sessions>0).slice(0,6);
+  if (!topAct.length){
+    actEl.innerHTML = '<div class="chart-empty">Sin sesiones en la ventana.</div>';
+  } else {
+    const maxAct = topAct[0].sessions;
+    actEl.innerHTML = topBars(topAct, maxAct, 'fill-act',
+      p=>p.sessions, chartName);
+  }
+
+  // --- Top by delivery (merged PRs) — single hue (green) + tri-state honesty ---
+  const delEl = document.getElementById('chart-del');
+  const topDel = measurable.slice().sort((a,b)=>b.merged_prs-a.merged_prs).slice(0,6);
+  const notMeasN = projects.length - measurable.length;
+  let delHtml = '';
+  if (!measurable.length){
+    delHtml = '<div class="chart-empty">Ningún proyecto de la ventana tiene repo vinculado — entrega no medible.</div>';
+  } else {
+    const maxDel = Math.max(1, topDel[0].merged_prs);
+    delHtml = topBars(topDel, maxDel, 'fill-del', p=>p.merged_prs, chartName);
+  }
+  // The outcome gap made VISIBLE in-chart: a hatched, not-measurable track — so a
+  // 0-PR project with no repo is never implied to have "delivered nothing".
+  if (notMeasN){
+    delHtml += `<div class="tbar tbar-na">
+      <div class="tbar-top"><span class="tbar-name" title="Proyectos sin repo GitHub vinculado — entrega no medible (distinto de 0 entregado)">${notMeasN} proyectos · sin repo</span><span class="tbar-v">n/m</span></div>
+      <div class="tbar-track"></div>
+    </div>`;
+  }
+  delHtml += `<div class="chart-note"><b>${measurable.length}</b> de <b>${projects.length}</b> proyectos con repo vinculado (entrega medible). `
+    + `Los ${notMeasN} restantes no ingirieron repo — <b>no medible</b>, distinto de 0 entregado. `
+    + `Los conteos de PR son all-time. Vinculá un repo con <code>mool workspace root add</code> / repo add.</div>`;
+  delEl.innerHTML = delHtml;
+}
+
 function renderProduction(data, daysN){
+  _prodData = data;              // feed the exec summary (#37); re-render on toggle
+  renderExec();
   const body = document.getElementById('prod-body');
   const legendEl = document.getElementById('prod-legend');
   const projects = data.projects||[];
@@ -427,6 +654,13 @@ async function loadPortfolio(){
     const clients = data.clients||[];
     const projects = data.projects||[];
     const external = data.external||[];
+    // Feed the KPI client tile (#37): active = clients whose rolled-up state is
+    // hot (activo/enfriándose). 0 clients → tier oscuro (handled as not-measurable).
+    _clientStat = {
+      total: clients.length,
+      active: clients.filter(c => c.state && (c.state.state==='activo' || c.state.state==='enfriandose')).length,
+    };
+    renderExec();
     if (!clients.length && !projects.length && !external.length && !(data.unclassified||[]).length){
       body.innerHTML = '<div class="empty">Sin datos. Corré: <code>mool workspace rollup</code></div>'; return;
     }
