@@ -87,6 +87,18 @@ CREATE TABLE IF NOT EXISTS fs_cursors (
     updated_at TEXT NOT NULL
 );
 
+-- Session-attribution cursor (issue #39 — daemon-scheduled attribution).
+-- High-water mark over events.db ``events.id`` (INTEGER AUTOINCREMENT,
+-- monotonic; the events_new migration preserves ids): the incremental pass
+-- attributes only ``id > last_event_id``. Advanced ONLY after the attribution
+-- commit succeeded, so a failed pass re-reads its range next cycle. One row per
+-- source (``'events'``). Additive via IF NOT EXISTS — lands on existing DBs.
+CREATE TABLE IF NOT EXISTS attribution_cursors (
+    source TEXT PRIMARY KEY,
+    last_event_id INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- Machine-wide portfolio rollup (issue #22 — Workspace axis, Phase C).
 -- A materialized projection over the workspace tree, keyed (workspace, day),
 -- SIGNAL-AGNOSTIC: a node lights up whether the activity came from a session
@@ -431,6 +443,33 @@ class WorkspaceStore:
             )
             self._conn.commit()
 
+    # --- Session-attribution cursor (issue #39) ---
+
+    _EVENTS_CURSOR = "events"
+
+    def get_attribution_cursor(self) -> int:
+        """Last ``events.id`` attributed (0 if never run — first pass = full)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_event_id FROM attribution_cursors WHERE source = ?",
+                (self._EVENTS_CURSOR,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def set_attribution_cursor(self, last_event_id: int) -> None:
+        """Persist the events.id high-water mark. Call ONLY after the
+        attribution commit for every row ``<= last_event_id`` succeeded."""
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO attribution_cursors (source, last_event_id, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(source) DO UPDATE SET
+                       last_event_id = excluded.last_event_id,
+                       updated_at = excluded.updated_at""",
+                (self._EVENTS_CURSOR, int(last_event_id), _now()),
+            )
+            self._conn.commit()
+
     def record_touch(
         self,
         path: str,
@@ -528,6 +567,15 @@ class WorkspaceStore:
         git_repos_matched = 0
         git_repos_new = 0
 
+        # Resolve git repo roots BEFORE taking the lock: resolve_dir reads .git
+        # on disk, which can stall on cloud-offloaded folders (#39 — the
+        # rollup now also runs on the daemon's cycle while the dashboard serves).
+        git_rows = self._read_git_commits(github_db_path)
+        git_idents: dict[str, WorkspaceIdentity] = {}
+        for repo_path, *_ in git_rows:
+            if repo_path not in git_idents:
+                git_idents[repo_path] = resolve_dir(repo_path)
+
         with self._lock:
             conn = self._conn
 
@@ -547,35 +595,40 @@ class WorkspaceStore:
             ).fetchall():
                 _bump(wid, day, "fs", n, last)
 
-            # 3. Git signal — resolve each repo root to a workspace via the SAME
-            #    ladder (resolve_dir walks up to the repo's .git, so a repo root
-            #    and a deep session/fs path on that repo collide on one key →
-            #    one node, three signals). github.db is opened read-only; absent
-            #    or unreadable → git simply contributes nothing.
-            for repo_path, day, n, last in self._read_git_commits(github_db_path):
-                ident = resolve_dir(repo_path)
-                existed = conn.execute(
-                    "SELECT 1 FROM workspaces WHERE workspace_key = ?", (ident.key,)
-                ).fetchone()
-                wid = self._upsert_workspace_locked(ident, now)
-                if day is None:  # repo-seen marker only (no commits) — count match
-                    if existed:
-                        git_repos_matched += 1
-                    else:
-                        git_repos_new += 1
-                    continue
-                _bump(wid, day, "git", n, last)
+            try:
+                # 3. Git signal — each repo root maps to a workspace via the
+                #    SAME ladder (resolve_dir walks up to the repo's .git, so a
+                #    repo root and a deep session/fs path on that repo collide on
+                #    one key → one node, three signals). Resolved above, outside
+                #    the lock. github.db is opened read-only; absent or
+                #    unreadable → git simply contributes nothing.
+                for repo_path, day, n, last in git_rows:
+                    ident = git_idents[repo_path]
+                    existed = conn.execute(
+                        "SELECT 1 FROM workspaces WHERE workspace_key = ?", (ident.key,)
+                    ).fetchone()
+                    wid = self._upsert_workspace_locked(ident, now)
+                    if day is None:  # repo-seen marker only (no commits) — count match
+                        if existed:
+                            git_repos_matched += 1
+                        else:
+                            git_repos_new += 1
+                        continue
+                    _bump(wid, day, "git", n, last)
 
-            for (wid, day), cell in agg.items():
-                conn.execute(
-                    """INSERT OR REPLACE INTO workspace_rollup
-                           (workspace_id, day, session_touches, fs_touches,
-                            git_touches, last_activity, built_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (wid, day, cell["session"], cell["fs"], cell["git"],
-                     cell["last"] or None, now),
-                )
-            conn.commit()
+                for (wid, day), cell in agg.items():
+                    conn.execute(
+                        """INSERT OR REPLACE INTO workspace_rollup
+                               (workspace_id, day, session_touches, fs_touches,
+                                git_touches, last_activity, built_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (wid, day, cell["session"], cell["fs"], cell["git"],
+                         cell["last"] or None, now),
+                    )
+                conn.commit()
+            except BaseException:
+                conn.rollback()  # never leave a half-built rollup on the shared conn
+                raise
 
             multi_source_nodes = conn.execute(
                 """SELECT COUNT(*) FROM (
@@ -1161,89 +1214,96 @@ class WorkspaceStore:
                 work_exts.setdefault(wid, {})
                 work_exts[wid][_ext(fp)] = work_exts[wid].get(_ext(fp), 0) + 1
 
-            for wid, kind, root_path, dir_path in workspaces:
-                root = root_path if kind in ("git_remote", "git_root") else dir_path
-                w_touches = touches.get(wid, [])
+            # ONE transaction for every per-workspace DELETE/INSERT below, so a
+            # WAL reader (the dashboard, while the daemon refreshes — #39) sees
+            # the previous candidate set or the new one, never a half-built mix.
+            try:
+                for wid, kind, root_path, dir_path in workspaces:
+                    root = root_path if kind in ("git_remote", "git_root") else dir_path
+                    w_touches = touches.get(wid, [])
 
-                # --- Real clocks -------------------------------------------------
-                fs_last = max(
-                    (t for _, t in w_touches if t is not None), default=None
-                )
-                gl = git_last.get(wid)  # (datetime, sha) | None
-                git_ts = gl[0] if gl else None
-
-                sess_activity_last: datetime | None = None
-                close_ts: datetime | None = None
-                close_sid: str | None = None
-                for (sid, prov) in wsessions.get(wid, set()):
-                    act, close = sess_clock.get((sid, prov), (None, None))
-                    if act and (sess_activity_last is None or act > sess_activity_last):
-                        sess_activity_last = act
-                    if close and (close_ts is None or close > close_ts):
-                        close_ts, close_sid = close, sid
-
-                candidates_ts = [t for t in (fs_last, git_ts, sess_activity_last) if t]
-                if not candidates_ts:
-                    conn.execute("DELETE FROM delivery_candidates WHERE workspace_id=?", (wid,))
-                    continue
-                last_real = max(candidates_ts)
-
-                # --- Precondition: quiescence across REAL clocks -----------------
-                if (now - last_real).total_seconds() < quiet_window:
-                    # Still active (or a pause) — evict any stale candidate.
-                    conn.execute("DELETE FROM delivery_candidates WHERE workspace_id=?", (wid,))
-                    continue
-                quiescent += 1
-
-                # --- Second signal: what CLOSED the burst (within slack) ---------
-                fires: list[tuple[str, str | None]] = []
-                if git_ts and git_ts >= last_real - slack:
-                    fires.append(("git_commit", gl[1]))
-                if close_ts and close_ts >= last_real - slack:
-                    fires.append(("session_close", close_sid))
-
-                # root_artifact: a file AT the workspace root whose extension is
-                # outside the working set (the extensions of the normal source
-                # tree). Restricted to git workspaces: a "root" is only
-                # meaningful when there is a real tree BELOW it. For a path_hash
-                # node every directory is its own workspace, so root == dir_path
-                # and every touch is "at root" with an empty below-root set —
-                # two single-occurrence extensions (brief.pdf + logo.svg in a
-                # materials folder) would each read as an artifact and fabricate
-                # a delivery. Skip path_hash here (issue #22).
-                if root and kind in ("git_remote", "git_root"):
-                    ws = self._working_set_exts(wid, work_exts, w_touches, root)
-                    best_art: tuple[datetime, str] | None = None
-                    for path, t in w_touches:
-                        if t is None or os.path.dirname(path) != root:
-                            continue
-                        e = _ext(path)
-                        if not e or e in ws:
-                            continue
-                        if best_art is None or t > best_art[0]:
-                            best_art = (t, path)
-                    if best_art and best_art[0] >= last_real - slack:
-                        fires.append(("root_artifact", best_art[1]))
-
-                # Quiescence ALONE never emits.
-                conn.execute("DELETE FROM delivery_candidates WHERE workspace_id=?", (wid,))
-                if not fires:
-                    continue
-
-                q_since = last_real.isoformat()
-                quiet_hours = (now - last_real).total_seconds() / 3600.0
-                for signal, detail in fires:
-                    conn.execute(
-                        """INSERT OR REPLACE INTO delivery_candidates
-                               (workspace_id, signal, signal_detail,
-                                quiescent_since, confidence, detected_at)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (wid, signal, detail, q_since,
-                         _delivery_confidence(signal, quiet_hours), now_iso),
+                    # --- Real clocks -------------------------------------------------
+                    fs_last = max(
+                        (t for _, t in w_touches if t is not None), default=None
                     )
-                    by_signal[signal] += 1
-                    emitted += 1
-            conn.commit()
+                    gl = git_last.get(wid)  # (datetime, sha) | None
+                    git_ts = gl[0] if gl else None
+
+                    sess_activity_last: datetime | None = None
+                    close_ts: datetime | None = None
+                    close_sid: str | None = None
+                    for (sid, prov) in wsessions.get(wid, set()):
+                        act, close = sess_clock.get((sid, prov), (None, None))
+                        if act and (sess_activity_last is None or act > sess_activity_last):
+                            sess_activity_last = act
+                        if close and (close_ts is None or close > close_ts):
+                            close_ts, close_sid = close, sid
+
+                    candidates_ts = [t for t in (fs_last, git_ts, sess_activity_last) if t]
+                    if not candidates_ts:
+                        conn.execute("DELETE FROM delivery_candidates WHERE workspace_id=?", (wid,))
+                        continue
+                    last_real = max(candidates_ts)
+
+                    # --- Precondition: quiescence across REAL clocks -----------------
+                    if (now - last_real).total_seconds() < quiet_window:
+                        # Still active (or a pause) — evict any stale candidate.
+                        conn.execute("DELETE FROM delivery_candidates WHERE workspace_id=?", (wid,))
+                        continue
+                    quiescent += 1
+
+                    # --- Second signal: what CLOSED the burst (within slack) ---------
+                    fires: list[tuple[str, str | None]] = []
+                    if git_ts and git_ts >= last_real - slack:
+                        fires.append(("git_commit", gl[1]))
+                    if close_ts and close_ts >= last_real - slack:
+                        fires.append(("session_close", close_sid))
+
+                    # root_artifact: a file AT the workspace root whose extension is
+                    # outside the working set (the extensions of the normal source
+                    # tree). Restricted to git workspaces: a "root" is only
+                    # meaningful when there is a real tree BELOW it. For a path_hash
+                    # node every directory is its own workspace, so root == dir_path
+                    # and every touch is "at root" with an empty below-root set —
+                    # two single-occurrence extensions (brief.pdf + logo.svg in a
+                    # materials folder) would each read as an artifact and fabricate
+                    # a delivery. Skip path_hash here (issue #22).
+                    if root and kind in ("git_remote", "git_root"):
+                        ws = self._working_set_exts(wid, work_exts, w_touches, root)
+                        best_art: tuple[datetime, str] | None = None
+                        for path, t in w_touches:
+                            if t is None or os.path.dirname(path) != root:
+                                continue
+                            e = _ext(path)
+                            if not e or e in ws:
+                                continue
+                            if best_art is None or t > best_art[0]:
+                                best_art = (t, path)
+                        if best_art and best_art[0] >= last_real - slack:
+                            fires.append(("root_artifact", best_art[1]))
+
+                    # Quiescence ALONE never emits.
+                    conn.execute("DELETE FROM delivery_candidates WHERE workspace_id=?", (wid,))
+                    if not fires:
+                        continue
+
+                    q_since = last_real.isoformat()
+                    quiet_hours = (now - last_real).total_seconds() / 3600.0
+                    for signal, detail in fires:
+                        conn.execute(
+                            """INSERT OR REPLACE INTO delivery_candidates
+                                   (workspace_id, signal, signal_detail,
+                                    quiescent_since, confidence, detected_at)
+                               VALUES (?, ?, ?, ?, ?, ?)""",
+                            (wid, signal, detail, q_since,
+                             _delivery_confidence(signal, quiet_hours), now_iso),
+                        )
+                        by_signal[signal] += 1
+                        emitted += 1
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
         return {"candidates": emitted, "by_signal": by_signal, "quiescent_workspaces": quiescent}
 
@@ -1326,6 +1386,11 @@ class WorkspaceStore:
             src.close()
             return {}
         src.close()
+        # Resolve repo roots to workspace keys OUTSIDE the lock (disk I/O).
+        repo_keys: dict[str, str] = {}
+        for repo_path, _, _ in rows:
+            if repo_path and repo_path not in repo_keys:
+                repo_keys[repo_path] = resolve_dir(repo_path).key
         key_cache: dict[str, int | None] = {}
         with self._lock:
             for repo_path, sha, ts_raw in rows:
@@ -1333,9 +1398,9 @@ class WorkspaceStore:
                     continue
                 wid = key_cache.get(repo_path, ...)  # type: ignore[arg-type]
                 if wid is ...:
-                    ident = resolve_dir(repo_path)
                     row = self._conn.execute(
-                        "SELECT id FROM workspaces WHERE workspace_key = ?", (ident.key,)
+                        "SELECT id FROM workspaces WHERE workspace_key = ?",
+                        (repo_keys[repo_path],),
                     ).fetchone()
                     wid = row[0] if row else None
                     key_cache[repo_path] = wid
@@ -1372,51 +1437,95 @@ class WorkspaceStore:
 
     # --- Backfill (populate from already-persisted events, read-only) ---
 
-    def backfill_from_events(self, events_db_path: str | Path) -> dict[str, int]:
-        """Populate attributions from ``events.db`` — a read-only batch pass.
+    # Rows upserted per lock hold / commit. Bounds how long one attribution
+    # pass can hold self._lock (the watcher and the portfolio reads share it).
+    _ATTRIBUTION_CHUNK = 500
 
-        Reads only absolute file paths (``file_path LIKE '/%'``): non-absolute
-        values in ``events.file_path`` are overwhelmingly Bash command strings,
-        not paths, so attributing them would invent bogus workspaces. The count
-        of skipped non-absolute rows is reported (no silent truncation).
+    # Only absolute paths qualify: non-absolute ``events.file_path`` values are
+    # overwhelmingly Bash command strings, not paths (issue #20).
+    _ATTR_WHERE = (
+        "file_path LIKE '/%' AND session_id IS NOT NULL AND session_id != ''"
+    )
+    _SKIPPED_WHERE = (
+        "file_path IS NOT NULL AND file_path != '' AND file_path NOT LIKE '/%'"
+        " AND session_id IS NOT NULL AND session_id != ''"
+    )
 
-        ``events.db`` is opened ``mode=ro``; this method never writes to it.
+    @staticmethod
+    def _read_max_event_id(events_db_path: str | Path) -> int:
+        """``MAX(events.id)`` from events.db (read-only); 0 for an empty table."""
+        src = sqlite3.connect(f"file:{events_db_path}?mode=ro", uri=True, timeout=5)
+        try:
+            return src.execute("SELECT MAX(id) FROM events").fetchone()[0] or 0
+        finally:
+            src.close()
+
+    def _attribute_event_range(
+        self, events_db_path: str | Path, lo: int, hi: int
+    ) -> dict[str, int]:
+        """Attribute events with ``lo < id <= hi``.
+
+        Order is load-bearing (the #34 data-loss class): the caller reads
+        ``hi = MAX(id)`` FIRST and it bounds the scan, so a row inserted mid-pass
+        (id > hi) is left for the next cycle instead of being skipped by a
+        cursor that jumps past it. Directory resolution (``resolve_dir`` stats/reads ``.git`` on disk,
+        which can hang on cloud-offloaded folders) runs OUTSIDE ``self._lock``
+        and outside any transaction; the lock is held only for short, chunked
+        upsert+commit batches. Any failure rolls the open chunk back and
+        propagates — the caller must then NOT advance the cursor.
+
+        ``events.db`` is opened ``mode=ro``; this never writes to it.
         """
         uri = f"file:{events_db_path}?mode=ro"
         src = sqlite3.connect(uri, uri=True, timeout=5)
+        rng, params = "id > ? AND id <= ?", (lo, hi)
         try:
             rows = src.execute(
-                """SELECT DISTINCT session_id, provider, file_path, cwd
-                   FROM events
-                   WHERE file_path LIKE '/%' AND session_id IS NOT NULL AND session_id != ''"""
+                f"""SELECT DISTINCT session_id, provider, file_path, cwd
+                    FROM events WHERE {rng} AND {self._ATTR_WHERE}""",
+                params,
             ).fetchall()
             skipped = src.execute(
-                """SELECT COUNT(*) FROM (
-                       SELECT DISTINCT session_id, provider, file_path FROM events
-                       WHERE file_path IS NOT NULL AND file_path != ''
-                         AND file_path NOT LIKE '/%'
-                         AND session_id IS NOT NULL AND session_id != ''
-                   )"""
+                f"""SELECT COUNT(*) FROM (
+                        SELECT DISTINCT session_id, provider, file_path FROM events
+                        WHERE {rng} AND {self._SKIPPED_WHERE}
+                    )""",
+                params,
             ).fetchone()[0]
         finally:
             src.close()
 
-        now = _now()
+        # Resolve identities with NO lock held and no open transaction.
         dir_cache: dict[str, WorkspaceIdentity] = {}
+        resolved: list[tuple[str, str, str, WorkspaceIdentity]] = []
+        for session_id, provider, file_path, cwd in rows:
+            container = _containing_dir(file_path, cwd)
+            ident = dir_cache.get(container)
+            if ident is None:
+                ident = resolve_dir(container)
+                dir_cache[container] = ident
+            resolved.append((session_id, provider or "", file_path, ident))
+
+        now = _now()
         attributed = 0
+        for i in range(0, len(resolved), self._ATTRIBUTION_CHUNK):
+            chunk = resolved[i:i + self._ATTRIBUTION_CHUNK]
+            with self._lock:
+                try:
+                    for session_id, provider, file_path, ident in chunk:
+                        wid = self._upsert_workspace_locked(ident, now)
+                        self._record_attribution_locked(
+                            session_id, provider, file_path, wid, ident.kind, now
+                        )
+                    self._conn.commit()
+                except BaseException:
+                    # Never leave a half-written chunk open on the shared
+                    # connection — the next unrelated commit would persist it.
+                    self._conn.rollback()
+                    raise
+            attributed += len(chunk)
+
         with self._lock:
-            for session_id, provider, file_path, cwd in rows:
-                container = _containing_dir(file_path, cwd)
-                ident = dir_cache.get(container)
-                if ident is None:
-                    ident = resolve_dir(container)
-                    dir_cache[container] = ident
-                wid = self._upsert_workspace_locked(ident, now)
-                self._record_attribution_locked(
-                    session_id, provider or "", file_path, wid, ident.kind, now
-                )
-                attributed += 1
-            self._conn.commit()
             workspace_count = self._conn.execute(
                 "SELECT COUNT(*) FROM workspaces"
             ).fetchone()[0]
@@ -1426,6 +1535,62 @@ class WorkspaceStore:
             "workspaces": workspace_count,
             "directories": len(dir_cache),
             "skipped_non_absolute": skipped,
+        }
+
+    def backfill_from_events(self, events_db_path: str | Path) -> dict[str, int]:
+        """Populate attributions from ``events.db`` — a FULL read-only pass.
+
+        Ignores the attribution cursor (re-reads every event up to the current
+        ``MAX(id)``) and then sets ``cursor = hi``: this is the reset path the
+        CLI ``mool workspace backfill`` keeps, e.g. when rows behind the cursor
+        newly qualify for attribution. Idempotent — attributions upsert.
+
+        Reads only absolute file paths; the count of skipped non-absolute rows
+        is reported (no silent truncation). ``events.db`` is opened ``mode=ro``.
+        """
+        hi = self._read_max_event_id(events_db_path)
+        result = self._attribute_event_range(events_db_path, 0, hi)
+        self.set_attribution_cursor(hi)
+        result["cursor"] = hi
+        return result
+
+    def attribute_incremental(self, events_db_path: str | Path) -> dict[str, Any]:
+        """Attribute only events newer than the cursor (the daemon's pass, #39).
+
+        Reads ``hi = MAX(id)`` first; if ``hi < cursor`` events.db was reset or
+        replaced, so the cursor restarts at 0 (logged). Processes ``(cursor, hi]``
+        and persists ``cursor = hi`` ONLY after its commits succeeded — on any
+        exception the cursor stays put and the next call re-reads the range.
+        A missing events.db is not an error: nothing to attribute yet.
+        """
+        cursor = self.get_attribution_cursor()
+        empty = {
+            "attributed": 0, "directories": 0, "skipped_non_absolute": 0,
+            "cursor_from": cursor, "cursor_to": cursor, "reset": False,
+        }
+        if not os.path.exists(str(events_db_path)):
+            return empty
+
+        hi = self._read_max_event_id(events_db_path)  # FIRST — bounds the pass
+        reset = False
+        if hi < cursor:
+            _log.warning(
+                "events.db max id %d < attribution cursor %d — events.db was "
+                "reset or replaced; restarting attribution from 0", hi, cursor,
+            )
+            cursor, reset = 0, True
+        if hi == cursor and not reset:
+            return empty
+
+        result = self._attribute_event_range(events_db_path, cursor, hi)
+        self.set_attribution_cursor(hi)  # only reached if every commit succeeded
+        return {
+            "attributed": result["attributed"],
+            "directories": result["directories"],
+            "skipped_non_absolute": result["skipped_non_absolute"],
+            "cursor_from": cursor,
+            "cursor_to": hi,
+            "reset": reset,
         }
 
     # --- Read surface ---
@@ -1622,30 +1787,44 @@ class WorkspaceStore:
         for rp in git_roots:
             index_real_dir(rp, enc_index)
 
+        # classify() itself touches disk (resolve_dir / fs_decode walk real
+        # dirs), so every row is computed here, outside the lock too.
         now = _now()
         cat = Counter()
         via = Counter()
         role = Counter()
+        classified: list[tuple[int, Any]] = []
+        for wid, kind, remote_url, root_path, dir_path in ws_rows:
+            c = classify(
+                kind, remote_url, root_path, dir_path,
+                session_cwds=session_cwds, enc_index=enc_index, home=home,
+            )
+            classified.append((wid, c))
+            cat[c.category] += 1
+            via[c.resolved_via] += 1
+            role[c.role] += 1
+
         with self._lock:
             conn = self._conn
-            conn.execute("DELETE FROM workspace_classification")
-            for wid, kind, remote_url, root_path, dir_path in ws_rows:
-                c = classify(
-                    kind, remote_url, root_path, dir_path,
-                    session_cwds=session_cwds, enc_index=enc_index, home=home,
-                )
-                conn.execute(
+            # DELETE + reinsert in ONE transaction: a WAL reader sees the old
+            # classification or the new one, never an empty/partial table.
+            try:
+                conn.execute("DELETE FROM workspace_classification")
+                conn.executemany(
                     """INSERT INTO workspace_classification
                            (workspace_id, category, subtype, role, project_key,
                             project_label, resolved_via, classified_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (wid, c.category, c.subtype, c.role, c.project_key,
-                     c.project_label, c.resolved_via, now),
+                    [
+                        (wid, c.category, c.subtype, c.role, c.project_key,
+                         c.project_label, c.resolved_via, now)
+                        for wid, c in classified
+                    ],
                 )
-                cat[c.category] += 1
-                via[c.resolved_via] += 1
-                role[c.role] += 1
-            conn.commit()
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
             projects = conn.execute(
                 "SELECT COUNT(DISTINCT project_key) FROM workspace_classification "
                 "WHERE role IN ('project','collapse','nest') AND project_key IS NOT NULL"
