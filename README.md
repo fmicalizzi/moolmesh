@@ -286,33 +286,24 @@ Use `--dry-run` to preview changes without modifying any config files.
 
 ### Manual configuration
 
-If you prefer to configure manually, here are the two common setups:
-
-**From source** (requires [uv](https://docs.astral.sh/uv/)):
-
-```json
-{
-  "mcpServers": {
-    "moolmesh": {
-      "command": "uv",
-      "args": ["run", "/path/to/moolmesh/hub/mcp_server.py"]
-    }
-  }
-}
-```
-
-**From pipx/pip** (requires `pipx inject moolmesh mcp`):
+If you prefer to configure manually, point the client at the Python interpreter
+of the environment where MoolMesh (and `mcp`) is installed, and run the server as a
+module (requires `pipx inject moolmesh mcp` or `pip install mcp` in that environment):
 
 ```json
 {
   "mcpServers": {
     "moolmesh": {
       "command": "/path/to/pipx/venvs/moolmesh/bin/python",
-      "args": ["/path/to/pipx/venvs/moolmesh/lib/.../hub/mcp_server.py"]
+      "args": ["-m", "hub.mcp_server"]
     }
   }
 }
 ```
+
+On Windows the interpreter is `...\Scripts\python.exe`. Don't use
+`uv run /path/to/hub/mcp_server.py`: it runs the script in an isolated env without
+the `hub` package and fails with `No module named 'hub'`.
 
 ### Available tools
 

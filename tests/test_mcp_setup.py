@@ -2,12 +2,15 @@
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 from hub.cli import cmd_mcp_setup
+
+MODULE_ARGS = ["-m", "hub.mcp_server"]
 
 
 def _make_args(**kwargs):
@@ -48,15 +51,118 @@ class TestMcpSetupDetection:
         assert "not installed" in out.lower()
         assert "pip install mcp" in out or "pipx inject" in out
 
-    def test_uv_skips_mcp_check(self, capsys):
+    def test_uv_present_still_uses_module_form_and_checks_mcp(self, capsys):
         with patch("subprocess.run") as mock_run, \
              patch("shutil.which", return_value="/usr/bin/uv"):
             mock_run.return_value = MagicMock(returncode=0)
             cmd_mcp_setup(_make_args(target="json"))
 
         out = capsys.readouterr().out
-        assert "resolved by uv run" in out.lower()
-        assert "uv" in out
+        assert "resolved by uv run" not in out.lower()
+        # The `import mcp` check runs with this interpreter even when uv exists
+        mock_run.assert_any_call(
+            [sys.executable, "-c", "import mcp"],
+            capture_output=True, check=True, timeout=10,
+        )
+        server = _parse_printed_json(out)["mcpServers"]["moolmesh"]
+        assert server["command"] == sys.executable
+        assert server["args"] == MODULE_ARGS
+
+
+def _parse_printed_json(out: str) -> dict:
+    return json.loads(out[out.index("{"):out.rindex("}") + 1])
+
+
+class TestMcpSetupModuleCommand:
+    """#38 — every target gets `[sys.executable, "-m", "hub.mcp_server"]`."""
+
+    def test_json_target(self, capsys):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            cmd_mcp_setup(_make_args(target="json"))
+
+        out = capsys.readouterr().out
+        server = _parse_printed_json(out)["mcpServers"]["moolmesh"]
+        assert server["command"] == sys.executable
+        assert server["args"] == MODULE_ARGS
+        assert not any(a.endswith("mcp_server.py") for a in server["args"])
+        assert not any("uv" in a for a in server["args"])
+        assert f"Server:    {sys.executable} -m hub.mcp_server" in out
+
+    @pytest.mark.parametrize("target,rel", [
+        ("claude-desktop", ("Library", "Application Support", "Claude", "claude_desktop_config.json")),
+        ("cursor", (".cursor", "mcp.json")),
+    ])
+    def test_json_config_clients(self, tmp_path, target, rel):
+        config_path = tmp_path.joinpath(*rel)
+        config_path.parent.mkdir(parents=True)
+
+        with patch("subprocess.run") as mock_run, \
+             patch("platform.system", return_value="Darwin"), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            mock_run.return_value = MagicMock(returncode=0)
+            cmd_mcp_setup(_make_args(target=target))
+
+        server = json.loads(config_path.read_text())["mcpServers"]["moolmesh"]
+        assert server == {"command": sys.executable, "args": MODULE_ARGS}
+
+    def test_opencode(self, tmp_path):
+        config_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        config_path.parent.mkdir(parents=True)
+
+        with patch("subprocess.run") as mock_run, \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            mock_run.return_value = MagicMock(returncode=0)
+            cmd_mcp_setup(_make_args(target="opencode"))
+
+        block = json.loads(config_path.read_text())["mcp"]["moolmesh"]
+        assert block["command"] == [sys.executable] + MODULE_ARGS
+
+    def test_codex_fresh_config(self, tmp_path):
+        config_path = tmp_path / ".codex" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+
+        with patch("subprocess.run") as mock_run, \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            mock_run.return_value = MagicMock(returncode=0)
+            cmd_mcp_setup(_make_args(target="codex"))
+
+        content = config_path.read_text()
+        assert "[mcp_servers.moolmesh]" in content
+        assert f'command = "{sys.executable}"' in content
+        assert 'args = ["-m", "hub.mcp_server"]' in content
+
+    def test_claude_code(self, tmp_path):
+        with patch("subprocess.run") as mock_run, \
+             patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             patch("pathlib.Path.home", return_value=tmp_path):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            cmd_mcp_setup(_make_args(target="claude-code"))
+
+        add_calls = [c.args[0] for c in mock_run.call_args_list
+                     if c.args and c.args[0][1:3] == ["mcp", "add"]]
+        assert len(add_calls) == 1
+        assert add_calls[0][-3:] == [sys.executable] + MODULE_ARGS
+
+
+class TestMcpServerModuleSmoke:
+    def test_python_m_hub_mcp_server_imports_hub(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            [sys.executable, "-m", "hub.mcp_server"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=30, cwd=repo_root,
+        )
+        assert "No module named 'hub'" not in result.stderr
+        try:
+            import mcp  # noqa: F401
+        except ImportError:
+            assert result.returncode == 1
+            assert "mcp package not installed" in result.stderr
+        else:
+            # Starts, then exits cleanly on stdin EOF
+            assert result.returncode == 0, result.stderr
+            assert "MoolMesh MCP Server starting" in result.stderr
 
 
 class TestMcpSetupDesktop:
