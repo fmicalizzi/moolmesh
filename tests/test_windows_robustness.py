@@ -186,6 +186,11 @@ def test_mcp_message_distinguishes_not_installed_from_incompatible():
     assert "incompatible" in incompatible
     assert "mcp.server.fastmcp" in incompatible
     assert not_installed != incompatible
+    # #38: `uv run hub/mcp_server.py` fails with "No module named 'hub'"
+    for msg in (not_installed, incompatible, _mcp_unavailable_message(None)):
+        assert "uv run" not in msg
+    assert "mool mcp setup --install-deps" in not_installed
+    assert 'mcp>=1.2.0,<2' in incompatible
 
 
 def test_mcp_message_handles_none():
