@@ -1179,11 +1179,17 @@ def _mcp_unavailable_message(exc: ImportError | None) -> str:
     missing = getattr(exc, "name", None)
     if exc is not None and missing and missing != "mcp":
         return (
-            f"Error: el paquete 'mcp' está instalado pero es una versión "
-            f"incompatible (no se encontró '{missing}'). MoolMesh requiere "
-            f"mcp>=1.2.0,<2. Ejecutá:  uv run --with \"mcp<2\" hub/mcp_server.py"
+            f"Error: the 'mcp' package is installed but is an incompatible "
+            f"version ('{missing}' not found). MoolMesh requires mcp>=1.2.0,<2. "
+            f"Install a compatible version into moolmesh's environment:  "
+            f"pipx inject moolmesh \"mcp>=1.2.0,<2\"  "
+            f"(or: pip install \"mcp>=1.2.0,<2\")"
         )
-    return "Error: mcp package not installed. Run with: uv run hub/mcp_server.py"
+    return (
+        "Error: mcp package not installed. Install it into moolmesh's "
+        "environment:  mool mcp setup --install-deps  "
+        "(or: pipx inject moolmesh \"mcp>=1.2.0,<2\")"
+    )
 
 if _mcp is not None:
 
