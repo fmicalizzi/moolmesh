@@ -98,6 +98,11 @@ class HubConfig:
     # (preserva el comportamiento actual: el watcher igual sólo arranca si hay
     # workspace_roots marcados).
     filesystem_monitoring: bool = True
+    # Atribución sesiones→workspace agendada en el daemon (issue #39). Default
+    # True: el portfolio se mantiene vivo sin `mool workspace backfill` manual.
+    # INDEPENDIENTE de filesystem_monitoring (ése gatea sólo el watcher de
+    # carpetas); sólo lee events.db (mode=ro).
+    auto_attribution: bool = True
     # --- Jerarquía cliente/org del portfolio (issue #29, Unit 3) ---
     # Orgs reales del owner que son CLIENTES (agrupan sus proyectos en un nodo
     # cliente). Curable. Vacío → auto-seed en el read-layer SÓLO si se conoce la
@@ -143,6 +148,7 @@ def _serialize_toml(config: HubConfig) -> str:
     lines.append("[workspace]")
     lines.append(f'hide_project_names = {str(config.hide_project_names).lower()}')
     lines.append(f'filesystem_monitoring = {str(config.filesystem_monitoring).lower()}')
+    lines.append(f'auto_attribution = {str(config.auto_attribution).lower()}')
     # Jerarquía cliente/org (issue #29) — arrays/tabla inline; sólo se escriben
     # si tienen contenido, para no ensuciar configs que no usan la capa. Van
     # DENTRO de [workspace] (escalares/inline antes de cualquier array-de-tablas).
@@ -244,6 +250,8 @@ def load_config() -> HubConfig:
         config.hide_project_names = bool(ws.get("hide_project_names", False))
         # Ausente → True: un config viejo (sin la clave) mantiene el monitoreo on.
         config.filesystem_monitoring = bool(ws.get("filesystem_monitoring", True))
+        # Ausente → True (issue #39): configs viejos obtienen la atribución agendada.
+        config.auto_attribution = bool(ws.get("auto_attribution", True))
         # Jerarquía cliente/org (issue #29) — todas opcionales.
         config.client_orgs = [str(o) for o in ws.get("client_orgs", []) if str(o)]
         config.personal_orgs = [str(o) for o in ws.get("personal_orgs", []) if str(o)]

@@ -338,6 +338,38 @@ class TestWorkspaceRoots:
         assert config.filesystem_monitoring is True
         assert config.hide_project_names is True
 
+    def test_auto_attribution_roundtrip(self, temp_config_path):
+        """#39 flag serializes/parses next to the other [workspace] scalars and
+        the array-of-tables, independent of filesystem_monitoring."""
+        from hub.config import (
+            HubConfig, WorkspaceRoot, load_config, save_config,
+        )
+        assert load_config().auto_attribution is True  # no file → default on
+        save_config(HubConfig(
+            auto_attribution=False, filesystem_monitoring=True,
+            hide_project_names=True,
+            workspace_roots=[WorkspaceRoot(path="/x", max_depth=2)],
+        ))
+        loaded = load_config()
+        assert loaded.auto_attribution is False
+        assert loaded.filesystem_monitoring is True
+        assert loaded.hide_project_names is True
+        assert loaded.workspace_roots[0].path == "/x"
+        save_config(HubConfig(auto_attribution=True, filesystem_monitoring=False))
+        loaded = load_config()
+        assert loaded.auto_attribution is True
+        assert loaded.filesystem_monitoring is False
+
+    def test_auto_attribution_absent_key_defaults_on(self, temp_config_path):
+        """A config predating #39 gets scheduled attribution ON."""
+        from hub.config import load_config
+        temp_config_path.write_text(
+            "[workspace]\nfilesystem_monitoring = false\n", encoding="utf-8"
+        )
+        config = load_config()
+        assert config.auto_attribution is True
+        assert config.filesystem_monitoring is False
+
     def test_masked_label_stable_and_key_preserved(self):
         from hub.config import masked_label
         assert masked_label("github.com/o/r", False) == "github.com/o/r"
