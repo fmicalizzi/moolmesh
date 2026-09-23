@@ -1432,6 +1432,10 @@ def cmd_workspace_backfill(args: argparse.Namespace) -> None:
             f"rows (Bash command strings, not paths)."
         ))
     print(dim(
+        f"  Attribution cursor set to event id {result['cursor']} "
+        f"(the daemon continues incrementally from here)."
+    ))
+    print(dim(
         f"  Rollup: {rollup['rows']} day-rows across {rollup['workspaces']} "
         f"workspaces ({rollup['multi_source_nodes']} multi-signal)."
     ))
