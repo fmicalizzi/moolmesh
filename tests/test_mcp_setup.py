@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -129,8 +130,37 @@ class TestMcpSetupModuleCommand:
 
         content = config_path.read_text()
         assert "[mcp_servers.moolmesh]" in content
-        assert f'command = "{sys.executable}"' in content
-        assert 'args = ["-m", "hub.mcp_server"]' in content
+        entry = tomllib.loads(content)["mcp_servers"]["moolmesh"]
+        assert entry == {"command": sys.executable, "args": MODULE_ARGS}
+
+    @pytest.mark.parametrize("python", [
+        r"C:\Users\x\pipx\venvs\moolmesh\Scripts\python.exe",
+        "/home/x/.local/pipx/venvs/moolmesh/bin/python",
+    ])
+    def test_codex_toml_round_trips(self, tmp_path, python):
+        from hub.cli import _write_codex_mcp
+        config_path = tmp_path / "config.toml"
+        config_path.write_text('model = "o3"\n')
+        server_cmd = [python, "-m", "hub.mcp_server"]
+
+        _write_codex_mcp(config_path, server_cmd, _make_args(target="codex"))
+
+        data = tomllib.loads(config_path.read_text())
+        assert data["model"] == "o3"
+        entry = data["mcp_servers"]["moolmesh"]
+        assert entry["command"] == python
+        assert entry["args"] == MODULE_ARGS
+
+    def test_codex_dry_run_prints_valid_toml(self, capsys):
+        from hub.cli import _write_codex_mcp
+        python = r"C:\Users\x\pipx\venvs\moolmesh\Scripts\python.exe"
+        _write_codex_mcp(Path("unused.toml"), [python, "-m", "hub.mcp_server"],
+                         _make_args(target="codex", dry_run=True))
+
+        out = capsys.readouterr().out
+        block = out[out.index("[mcp_servers.moolmesh]"):]
+        entry = tomllib.loads(block)["mcp_servers"]["moolmesh"]
+        assert entry["command"] == python
 
     def test_claude_code(self, tmp_path):
         with patch("subprocess.run") as mock_run, \
