@@ -6,6 +6,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.19.1] — 2026-09-23
+
+Fix for `mool mcp setup`, which generated a server command that could not start.
+No new features, no new dependencies (`mcp` stays optional).
+
+### Fixed
+- **#38 — `mool mcp setup` generated a broken command.** When `uv` was on PATH the
+  generated server command was `uv run <abs>/hub/mcp_server.py`. That runs the loose
+  script in an ephemeral env without the `hub` package, so it failed with
+  `No module named 'hub'`, and MCP clients showed the server as `CONNECTION_CLOSED`.
+  Every target (claude-code, claude-desktop, cursor, qwen, opencode, codex, json) now
+  gets `[sys.executable, "-m", "hub.mcp_server"]`, the same pattern the daemon uses.
+  The `import mcp` check always runs against that interpreter.
+  **If you configured MCP with an earlier version, re-run `mool mcp setup`.** For
+  Codex, an existing `[mcp_servers.moolmesh]` entry is not rewritten: update it by
+  hand with the block that `mool mcp setup codex` prints.
+- **Misleading mcp-unavailable message.** The server's error no longer recommends
+  `uv run hub/mcp_server.py`. It now points to `mool mcp setup --install-deps` /
+  `pipx inject moolmesh "mcp>=1.2.0,<2"`, and both variants (not installed /
+  incompatible version) are in English.
+- **Invalid Codex TOML on Windows.** `mool mcp setup codex` wrote interpreter paths
+  like `C:\Users\…\python.exe` unescaped inside TOML basic strings (invalid `\U`
+  escapes). Values are now properly escaped, and the dry-run output is valid TOML too.
+- The Windows-incorrect `sys.prefix/bin/python` interpreter detection is replaced by
+  `sys.executable`.
+- README (en/es) manual MCP configuration now documents the module form.
+
+### Tests
+- Per-target assertions of the module form, a `python -m hub.mcp_server` smoke test,
+  and `tomllib` round-trips for Windows and POSIX Codex entries.
+- The 2 end-to-end MCP tests boot the server via `python -m hub.mcp_server` instead
+  of `uv run`. They still skip when `mcp` isn't importable (CI).
+
+---
+
 ## [1.19.0] — 2026-09-20
 
 Part B of the `/portfolio` UX redesign (#37): the "new space" on top of the
