@@ -639,19 +639,35 @@ def _write_opencode_mcp(config_path, oc_block: dict, args) -> None:
     print(dim("  Restart OpenCode to load the new server."))
 
 
+def _toml_str(s: str) -> str:
+    """Encode s as a TOML basic string (#38).
+
+    A JSON string literal is a valid TOML basic string here: backslashes and
+    quotes get escaped, so a Windows path is not read as invalid escapes.
+    ASCII-only output, so it's safe whatever encoding write_text uses.
+    """
+    import json
+    return json.dumps(s)
+
+
+def _codex_mcp_entry(server_cmd: list) -> str:
+    entry = f"[mcp_servers.moolmesh]\ncommand = {_toml_str(server_cmd[0])}\n"
+    if len(server_cmd) > 1:
+        args_str = ", ".join(_toml_str(a) for a in server_cmd[1:])
+        entry += f"args = [{args_str}]\n"
+    return entry
+
+
 def _write_codex_mcp(config_path, server_cmd: list, args) -> None:
     from hub.colors import green, yellow, dim
 
-    cmd_str = " ".join(f'"{c}"' if " " in c else c for c in server_cmd)
+    entry = _codex_mcp_entry(server_cmd)
+    shown = "".join(f"  {line}\n" for line in entry.splitlines())
 
     if getattr(args, "dry_run", False):
         print(f"  Config file: {config_path}")
         print(dim("  Would add:"))
-        print(f'\n  [mcp_servers.moolmesh]\n  command = "{server_cmd[0]}"')
-        if len(server_cmd) > 1:
-            args_str = ", ".join(f'"{a}"' for a in server_cmd[1:])
-            print(f"  args = [{args_str}]")
-        print()
+        print(f"\n{shown}")
         return
 
     content = config_path.read_text() if config_path.exists() else ""
@@ -660,19 +676,10 @@ def _write_codex_mcp(config_path, server_cmd: list, args) -> None:
     if already:
         print(yellow("  ⚠ 'moolmesh' already exists in Codex config."))
         print(dim("  Check ~/.codex/config.toml and update manually:"))
-        print(f'\n  [mcp_servers.moolmesh]\n  command = "{server_cmd[0]}"')
-        if len(server_cmd) > 1:
-            args_str = ", ".join(f'"{a}"' for a in server_cmd[1:])
-            print(f"  args = [{args_str}]")
-        print()
+        print(f"\n{shown}")
         return
 
-    entry = f'\n[mcp_servers.moolmesh]\ncommand = "{server_cmd[0]}"\n'
-    if len(server_cmd) > 1:
-        args_str = ", ".join(f'"{a}"' for a in server_cmd[1:])
-        entry += f"args = [{args_str}]\n"
-
-    config_path.write_text(content + entry)
+    config_path.write_text(content + "\n" + entry)
     print(green(f"  ✓ Written to {config_path}"))
     print(dim("  Restart Codex to load the new server."))
 
