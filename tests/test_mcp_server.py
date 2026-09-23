@@ -3,38 +3,39 @@
 import importlib.util
 import json
 import os
-import shutil
 import signal
 import sqlite3
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def _mcp_stack_available() -> bool:
     """Whether the optional MCP smoke-test stack can run at all.
 
-    These end-to-end tests boot the server via ``uv run`` (which resolves the
-    optional ``mcp`` dependency from the script's PEP 723 inline metadata). They
-    are integration smoke-tests of an *optional* stack — ``mcp`` is not a runtime
-    or dev dependency (zero-dep invariant) — so they must never gate a publish.
-    Skip when ``uv`` is absent (e.g. the CI runner) or ``mcp`` is not importable.
+    These end-to-end tests boot the server via ``python -m hub.mcp_server``
+    with the test interpreter — the same command ``mool mcp setup`` generates
+    (#38). They are integration smoke-tests of an *optional* stack — ``mcp`` is
+    not a runtime or dev dependency (zero-dep invariant) — so they must never
+    gate a publish. Skip when ``mcp`` is not importable (e.g. the CI runner).
     """
-    return (
-        shutil.which("uv") is not None
-        and importlib.util.find_spec("mcp") is not None
-    )
+    return importlib.util.find_spec("mcp") is not None
 
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:
-    """Kill the whole process group so ``uv``'s grandchild can't be orphaned.
+    """Kill the server's whole process group so nothing can be orphaned.
 
-    ``proc.kill()`` reaps only ``uv``; the actual MCP server it spawns is a
-    grandchild that inherits our stdout pipe. Left orphaned, it holds that pipe
-    open forever — which is exactly what hung CI's "Run tests" step for 6h. We
-    launch with ``start_new_session=True`` and SIGKILL the process group here.
+    The server is now a direct child (``python -m hub.mcp_server``), but we keep
+    the belt: when it was booted via ``uv run``, ``proc.kill()`` reaped only
+    ``uv`` and the orphaned grandchild held our stdout pipe open forever — which
+    is exactly what hung CI's "Run tests" step for 6h. We launch with
+    ``start_new_session=True`` and SIGKILL the process group here.
     """
     try:
         if hasattr(os, "killpg"):
@@ -352,7 +353,7 @@ class TestStdioTransport:
     def test_server_starts_and_responds_to_initialize(self):
         """Enviar un initialize JSON-RPC y verificar que responde con capabilities."""
         if not _mcp_stack_available():
-            pytest.skip("optional MCP stack unavailable (needs uv + mcp) — smoke-test")
+            pytest.skip("optional MCP stack unavailable (needs mcp) — smoke-test")
         init_msg = json.dumps({
             "jsonrpc": "2.0",
             "method": "initialize",
@@ -365,7 +366,8 @@ class TestStdioTransport:
         }) + "\n"
 
         proc = subprocess.Popen(
-            ["uv", "run", "hub/mcp_server.py"],
+            [sys.executable, "-m", "hub.mcp_server"],
+            cwd=_REPO_ROOT,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -383,14 +385,15 @@ class TestStdioTransport:
             assert "tools" in caps or "resources" in caps
         except subprocess.TimeoutExpired:
             _kill_process_tree(proc)
-            pytest.skip("uv run timed out — mcp package may not be cached yet")
+            pytest.skip("MCP server timed out responding to initialize")
 
     def test_server_stderr_has_startup_message(self):
         """Verificar que el server loguea a stderr, no a stdout."""
         if not _mcp_stack_available():
-            pytest.skip("optional MCP stack unavailable (needs uv + mcp) — smoke-test")
+            pytest.skip("optional MCP stack unavailable (needs mcp) — smoke-test")
         proc = subprocess.Popen(
-            ["uv", "run", "hub/mcp_server.py"],
+            [sys.executable, "-m", "hub.mcp_server"],
+            cwd=_REPO_ROOT,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -402,7 +405,7 @@ class TestStdioTransport:
             assert "MoolMesh" in stderr or "starting" in stderr.lower()
         except subprocess.TimeoutExpired:
             _kill_process_tree(proc)
-            pytest.skip("uv run timed out")
+            pytest.skip("MCP server timed out on stdin EOF")
 
 
 # ── Tests contra la DB real del usuario ──
