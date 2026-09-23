@@ -241,14 +241,30 @@ class DashboardServer:
         # (config.filesystem_monitoring, #27 — an apagable layer) AND at least one
         # root is marked. Gating ONLY folder monitoring: agents + GitHub + the
         # portfolio (incl. the outcome layer) stay ON regardless of this flag.
+        #
+        # WorkspaceAttributor — scheduled session→workspace attribution + portfolio
+        # refresh (issue #39). Gated by its OWN flag (config.auto_attribution),
+        # independent of folder monitoring. Reads events.db mode=ro only.
+        #
+        # Both share ONE WorkspaceStore (one lock, one connection), created only
+        # when at least one of them is enabled.
         self.workspace_store: Any | None = None
         self.workspace_watcher: Any | None = None
-        if config.filesystem_monitoring and config.workspace_roots:
+        self.workspace_attributor: Any | None = None
+        want_watcher = bool(config.filesystem_monitoring and config.workspace_roots)
+        want_attributor = bool(config.auto_attribution)
+        if want_watcher or want_attributor:
             from hub.cache.workspace_store import WorkspaceStore
-            from hub.watchers.workspace_watcher import WorkspaceWatcher
             self.workspace_store = WorkspaceStore()
+        if want_watcher:
+            from hub.watchers.workspace_watcher import WorkspaceWatcher
             self.workspace_watcher = WorkspaceWatcher(
                 self.workspace_store, config.workspace_roots
+            )
+        if want_attributor:
+            from hub.watchers.workspace_attributor import WorkspaceAttributor
+            self.workspace_attributor = WorkspaceAttributor(
+                self.workspace_store, self.event_store.db_path
             )
 
         # Load persisted events into tracker for stats
@@ -328,6 +344,14 @@ class DashboardServer:
         if self.workspace_watcher:
             self.workspace_watcher.start()
             print(f"  WorkspaceWatcher: observing {self.workspace_watcher.watched_count} marked root(s)")
+        # Start WorkspaceAttributor (issue #39) — first pass after a short delay.
+        if self.workspace_attributor:
+            self.workspace_attributor.start()
+            print(
+                "  WorkspaceAttributor: attributing sessions → workspaces every "
+                f"{int(self.workspace_attributor._interval)}s "
+                f"(first pass in {int(self.workspace_attributor._initial_delay)}s)"
+            )
 
         # Start SSE broadcaster (reads from sse_buffer, pushes to clients)
         threading.Thread(target=self._broadcast_sse, daemon=True).start()
@@ -371,6 +395,8 @@ class DashboardServer:
                 self.git_harvester.stop()
             if self.github_harvester:
                 self.github_harvester.stop()
+            if self.workspace_attributor:
+                self.workspace_attributor.stop()
             if self.git_store:
                 self.git_store.close()
             self.event_store.close()
@@ -529,10 +555,22 @@ class DashboardServer:
                         from hub.config import load_config
                         _cfg = load_config()
                         _roots = len(_cfg.workspace_roots)
+                        # Additive (#39): scheduled-attribution freshness, so a
+                        # stale portfolio is visible instead of silent. No
+                        # names/paths — only flags, an ISO time and an error TYPE.
+                        _attr = server_ref.workspace_attributor
                         self._serve_json({
                             "filesystem_monitoring": bool(_cfg.filesystem_monitoring),
                             "roots_count": _roots,
                             "active": bool(server_ref.workspace_watcher is not None),
+                            "auto_attribution": bool(_cfg.auto_attribution),
+                            "attribution_active": _attr is not None,
+                            "last_attribution_at": (
+                                _attr.last_attribution_at if _attr else None
+                            ),
+                            "last_attribution_error": (
+                                _attr.last_attribution_error if _attr else None
+                            ),
                         })
                     # --- API: Repos ---
                     case "/api/repos":
