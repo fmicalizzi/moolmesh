@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.19.1
+Last updated: September 2026 — v1.20.0
 
 ---
 
@@ -153,6 +153,15 @@ Part B of the `/portfolio` UX pass ([#37](https://github.com/fmicalizzi/moolmesh
 - **Top by activity / by delivery** — horizontal bars, one hue per measure + direct labels; the delivery chart keeps the tri-state honesty (hatched `sin repo` track, real-0 ≠ not-measurable) via the same `isMeasurable()` predicate as the Part-A column.
 - **Palette discipline** — the provider trio fails as a color-only identity channel (cyan↔purple ΔE 14.2, validated), so nothing distinguishes series by color alone.
 - **Consumes, doesn't change** — resolver/state/outcome (#27/#28/#29), SSE (read-on-load) and masking untouched; zero new dependencies. Follow-up **#36** (data-accuracy audit) remains open.
+
+### v1.20 — Live portfolio (scheduled attribution)
+
+The daemon keeps the portfolio current ([#39](https://github.com/fmicalizzi/moolmesh/issues/39)): no more manual `mool workspace backfill` to see new sessions and projects.
+
+- **Incremental session→workspace attribution** on the daemon cycle (every 5 min), driven by an `events.id` cursor in `workspace.db`. `MAX(id)` is read first and the cursor advances only after the commits succeed, so no rows are lost (the #34 lesson). `events.db` is still read `mode=ro`.
+- **Derived tables refreshed** (rollup → delivery candidates → classification) on new attributions or at least hourly, so fs/git-only activity also stays fresh.
+- **Toggle** `[workspace] auto_attribution` (default on), independent of `filesystem_monitoring`. **Freshness exposed** (`last_attribution_at` / `last_attribution_error`) in the monitoring API, so staleness is visible instead of silent.
+- **Hardening:** disk I/O moved outside the store lock and transactions (cloud-offloaded folders); classification and candidates written atomically for concurrent dashboard reads.
 
 ---
 

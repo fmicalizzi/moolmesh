@@ -6,6 +6,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.20.0] — 2026-09-23
+
+The portfolio now stays current on its own. The daemon attributes new sessions to
+workspaces incrementally and refreshes the derived portfolio tables, so
+`/portfolio` no longer drifts stale until someone runs `mool workspace backfill` by
+hand (#39). No new dependencies; `events.db` is still only read (`mode=ro`).
+
+### Added
+- **#39 — scheduled workspace attribution.** A new background `WorkspaceAttributor`
+  in the daemon/dashboard runs every 5 min (first pass 30 s after startup):
+  - **Incremental pass** over `events.id > cursor`. The cursor lives in a new
+    additive `attribution_cursors` table in `workspace.db`. `MAX(id)` is read first
+    and bounds the pass, and the cursor advances only after the attribution commits
+    succeed, so a row inserted mid-pass or a failed cycle is re-read, never skipped.
+    If `events.db` was reset (`MAX(id) < cursor`), attribution restarts from 0.
+  - **Portfolio refresh** (rollup → delivery candidates → classification) when the
+    pass attributed something, or at least hourly, since the rollup also folds
+    filesystem touches and git commits. A failed refresh is retried next cycle.
+  - **Toggle:** `[workspace] auto_attribution` (default `true`), independent of
+    `filesystem_monitoring`, which still gates only the folder watcher.
+  - **Freshness is visible:** `/api/workspace/monitoring` adds `auto_attribution`,
+    `attribution_active`, `last_attribution_at` and `last_attribution_error` (the
+    exception type only; full detail goes to `hub.log`, so no paths leak past
+    `hide_project_names`).
+
+### Changed
+- `mool workspace backfill` is still a full pass, and now also sets the attribution
+  cursor. It remains the manual reset path.
+- Disk I/O (`.git` lookups, directory walks) in attribution, rollup, the git-outcome
+  read and classification now runs **outside** the store lock and outside any open
+  transaction. Writes are short, chunked commits. This matters on cloud-offloaded
+  folders, where a slow `stat` could otherwise block the watcher and portfolio
+  reads that share the store.
+- Classification and delivery candidates are each written in a single transaction,
+  with rollback on error, so the dashboard never reads a half-rebuilt table while
+  the daemon refreshes.
+
+---
+
 ## [1.19.1] — 2026-09-23
 
 Fix for `mool mcp setup`, which generated a server command that could not start.
