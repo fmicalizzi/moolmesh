@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS workspaces (
 );
 
 -- M:N: session ↔ workspace, one edge per (session, provider, file_path).
+-- ``via`` (issue #40): 'file' = a file the session touched; 'cwd' = fallback
+-- for a session with NO file edges at all — one edge per distinct absolute cwd,
+-- file_path = the cwd itself. A session's cwd edges are deleted the moment it
+-- gains a file edge. Pre-#40 DBs get the column via migration 1.
 CREATE TABLE IF NOT EXISTS path_attributions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -56,6 +60,7 @@ CREATE TABLE IF NOT EXISTS path_attributions (
     workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     resolved_via TEXT NOT NULL,            -- the ladder rung used at resolution time
     first_seen TEXT NOT NULL,
+    via TEXT NOT NULL DEFAULT 'file',      -- 'file' | 'cwd' (#40)
     UNIQUE(session_id, provider, file_path)
 );
 CREATE INDEX IF NOT EXISTS idx_attr_workspace ON path_attributions(workspace_id);
@@ -124,6 +129,13 @@ CREATE TABLE IF NOT EXISTS attribution_cursors (
 -- prune fully-empty rows, re-run the rollup), NOT a blind full rebuild — a blind
 -- DELETE FROM would destroy the fs-per-day history that lives only here. Do not
 -- build a retraction mechanism to "fix" this; the durability is the point.
+--
+-- The ONE exception is session_touches (#40): it is a pure projection of
+-- path_attributions, whose edges can now disappear (a session's cwd-fallback
+-- edges are deleted when it gains file edges, and re-resolution can move an
+-- edge to another workspace). build_rollup therefore recomputes that column
+-- for EVERY row — zeroing it where no edge remains — and prunes rows left
+-- all-zero. fs_touches / git_touches are never retracted.
 CREATE TABLE IF NOT EXISTS workspace_rollup (
     workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     day TEXT NOT NULL,                     -- YYYY-MM-DD (substr of the ISO ts)
@@ -193,8 +205,25 @@ CREATE INDEX IF NOT EXISTS idx_classification_role ON workspace_classification(r
 """
 
 
+def _mig_1_attribution_via(conn: sqlite3.Connection) -> int:
+    """Add ``path_attributions.via`` (#40) to pre-existing DBs.
+
+    Fresh DBs get the column from ``_SCHEMA``; the ``PRAGMA table_info`` guard
+    makes this a no-op there. Existing rows are all file edges — the DEFAULT.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(path_attributions)")}
+    if "via" in columns:
+        return 0
+    conn.execute(
+        "ALTER TABLE path_attributions ADD COLUMN via TEXT NOT NULL DEFAULT 'file'"
+    )
+    return 1
+
+
 # Versioned, additive migrations — each runs exactly once (mirrors git_store).
-_MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = []
+_MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
+    (1, "attribution_via", _mig_1_attribution_via),
+]
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
@@ -372,16 +401,19 @@ class WorkspaceStore:
         workspace_id: int,
         resolved_via: str,
         now: str,
+        via: str = "file",
     ) -> None:
         """Record one session↔workspace edge. Idempotent and self-healing."""
         self._conn.execute(
             """INSERT INTO path_attributions
-                   (session_id, provider, file_path, workspace_id, resolved_via, first_seen)
-               VALUES (?, ?, ?, ?, ?, ?)
+                   (session_id, provider, file_path, workspace_id, resolved_via,
+                    first_seen, via)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(session_id, provider, file_path) DO UPDATE SET
                    workspace_id = excluded.workspace_id,
-                   resolved_via = excluded.resolved_via""",
-            (session_id, provider, file_path, workspace_id, resolved_via, now),
+                   resolved_via = excluded.resolved_via,
+                   via = excluded.via""",
+            (session_id, provider, file_path, workspace_id, resolved_via, now, via),
         )
 
     # --- Public write API ---
@@ -579,7 +611,9 @@ class WorkspaceStore:
         with self._lock:
             conn = self._conn
 
-            # 1. Session signal — one edge per (session, provider, file).
+            # 1. Session signal — one edge per (session, provider, file), or
+            #    per (session, provider, cwd) for cwd-fallback edges (#40):
+            #    both count the same.
             for wid, day, n, last in conn.execute(
                 """SELECT workspace_id, substr(first_seen, 1, 10) AS day,
                           COUNT(*) AS n, MAX(first_seen) AS last
@@ -625,6 +659,28 @@ class WorkspaceStore:
                         (wid, day, cell["session"], cell["fs"], cell["git"],
                          cell["last"] or None, now),
                     )
+
+                # session_touches is a projection of path_attributions (see
+                # the schema note): zero it on keys with no edge left, then
+                # prune rows that hold no signal at all (no fs history lost).
+                session_keys = {k for k, cell in agg.items() if cell["session"]}
+                stale = [
+                    (now, wid, day)
+                    for wid, day in conn.execute(
+                        "SELECT workspace_id, day FROM workspace_rollup"
+                        " WHERE session_touches > 0"
+                    ).fetchall()
+                    if (wid, day) not in session_keys
+                ]
+                conn.executemany(
+                    """UPDATE workspace_rollup SET session_touches = 0, built_at = ?
+                       WHERE workspace_id = ? AND day = ?""",
+                    stale,
+                )
+                conn.execute(
+                    """DELETE FROM workspace_rollup
+                       WHERE session_touches = 0 AND fs_touches = 0 AND git_touches = 0"""
+                )
                 conn.commit()
             except BaseException:
                 conn.rollback()  # never leave a half-built rollup on the shared conn
@@ -648,6 +704,7 @@ class WorkspaceStore:
             "rows": rows,
             "workspaces": nodes,
             "multi_source_nodes": multi_source_nodes,
+            "session_reconciled": len(stale),
             "git_repos_matched": git_repos_matched,
             "git_repos_new": git_repos_new,
         }
@@ -1207,11 +1264,14 @@ class WorkspaceStore:
 
             work_exts: dict[int, dict[str, int]] = {}
             wsessions: dict[int, set[tuple[str, str]]] = {}
-            for wid, sid, prov, fp in conn.execute(
-                "SELECT workspace_id, session_id, provider, file_path FROM path_attributions"
+            for wid, sid, prov, fp, via in conn.execute(
+                """SELECT workspace_id, session_id, provider, file_path, via
+                   FROM path_attributions"""
             ):
                 wsessions.setdefault(wid, set()).add((sid, prov or ""))
                 work_exts.setdefault(wid, {})
+                if via == "cwd":
+                    continue  # a directory, not a file — no extension signal
                 work_exts[wid][_ext(fp)] = work_exts[wid].get(_ext(fp), 0) + 1
 
             # ONE transaction for every per-workspace DELETE/INSERT below, so a
@@ -1460,6 +1520,33 @@ class WorkspaceStore:
         finally:
             src.close()
 
+    # cwd-fallback edges (#40): only for sessions with NO file edge anywhere in
+    # path_attributions. The existence check is repeated inside the INSERT so a
+    # file edge committed after the pre-check still wins (no mixed session).
+    _CWD_EDGE_SQL = """INSERT INTO path_attributions
+               (session_id, provider, file_path, workspace_id, resolved_via,
+                first_seen, via)
+           SELECT ?, ?, ?, ?, ?, ?, 'cwd'
+           WHERE NOT EXISTS (
+               SELECT 1 FROM path_attributions
+               WHERE session_id = ? AND provider = ? AND via = 'file')
+           ON CONFLICT(session_id, provider, file_path) DO UPDATE SET
+               workspace_id = excluded.workspace_id,
+               resolved_via = excluded.resolved_via"""
+
+    @staticmethod
+    def _cwd_qualifies(cwd: str | None, home: str) -> bool:
+        """An absolute cwd that is neither the filesystem root nor ``~``.
+
+        Uses the host's native ``os.path.isabs`` — the same notion
+        ``resolve_dir`` works with. Everything else (noise parents, harness
+        dirs) is left to the read-layer classification (#36).
+        """
+        if not cwd or not os.path.isabs(cwd):
+            return False
+        norm = os.path.normpath(cwd)
+        return norm != home and os.path.dirname(norm) != norm
+
     def _attribute_event_range(
         self, events_db_path: str | Path, lo: int, hi: int
     ) -> dict[str, int]:
@@ -1473,6 +1560,16 @@ class WorkspaceStore:
         and outside any transaction; the lock is held only for short, chunked
         upsert+commit batches. Any failure rolls the open chunk back and
         propagates — the caller must then NOT advance the cursor.
+
+        Two passes over the range:
+
+        1. File edges (``via='file'``) from absolute ``file_path`` values. Each
+           chunk first deletes the cwd edges of its sessions, in the same
+           transaction — a session never counts both ways.
+        2. cwd fallback (#40, every provider): each ``(session, provider)`` in
+           the range with no file edge anywhere in the table gets one
+           ``via='cwd'`` edge per distinct qualifying cwd of its events in the
+           range, resolved on the directory ITSELF (``file_path`` = the cwd).
 
         ``events.db`` is opened ``mode=ro``; this never writes to it.
         """
@@ -1492,6 +1589,12 @@ class WorkspaceStore:
                     )""",
                 params,
             ).fetchone()[0]
+            cwd_rows = src.execute(
+                f"""SELECT DISTINCT session_id, provider, cwd FROM events
+                    WHERE {rng} AND session_id IS NOT NULL AND session_id != ''
+                      AND cwd IS NOT NULL AND cwd != ''""",
+                params,
+            ).fetchall()
         finally:
             src.close()
 
@@ -1512,6 +1615,12 @@ class WorkspaceStore:
             chunk = resolved[i:i + self._ATTRIBUTION_CHUNK]
             with self._lock:
                 try:
+                    for session_id, provider in {(r[0], r[1]) for r in chunk}:
+                        self._conn.execute(
+                            """DELETE FROM path_attributions
+                               WHERE session_id = ? AND provider = ? AND via = 'cwd'""",
+                            (session_id, provider),
+                        )
                     for session_id, provider, file_path, ident in chunk:
                         wid = self._upsert_workspace_locked(ident, now)
                         self._record_attribution_locked(
@@ -1525,6 +1634,10 @@ class WorkspaceStore:
                     raise
             attributed += len(chunk)
 
+        cwd_attributed = self._attribute_cwd_fallback(
+            cwd_rows, {(r[0], r[1]) for r in resolved}, dir_cache, now
+        )
+
         with self._lock:
             workspace_count = self._conn.execute(
                 "SELECT COUNT(*) FROM workspaces"
@@ -1532,10 +1645,85 @@ class WorkspaceStore:
 
         return {
             "attributed": attributed,
+            "cwd_attributed": cwd_attributed,
             "workspaces": workspace_count,
             "directories": len(dir_cache),
             "skipped_non_absolute": skipped,
         }
+
+    def _attribute_cwd_fallback(
+        self,
+        cwd_rows: list[tuple[str, str | None, str]],
+        file_sessions: set[tuple[str, str]],
+        dir_cache: dict[str, WorkspaceIdentity],
+        now: str,
+    ) -> int:
+        """Pass 2 of :meth:`_attribute_event_range` — the ``via='cwd'`` edges.
+
+        Same discipline as the file pass: the has-file-edge pre-check is one
+        short lock hold, ``resolve_dir`` runs with no lock, and inserts commit
+        in rolled-back-on-failure chunks. Returns the edges written.
+        """
+        home = os.path.normpath(os.path.expanduser("~"))
+        wanted: dict[tuple[str, str], list[str]] = {}
+        for session_id, provider, cwd in cwd_rows:
+            key = (session_id, provider or "")
+            if key in file_sessions or not self._cwd_qualifies(cwd, home):
+                continue
+            norm = os.path.normpath(cwd)
+            cwds = wanted.setdefault(key, [])
+            if norm not in cwds:
+                cwds.append(norm)
+        if not wanted:
+            return 0
+
+        with self._lock:
+            for key in list(wanted):
+                if self._conn.execute(
+                    """SELECT 1 FROM path_attributions
+                       WHERE session_id = ? AND provider = ? AND via = 'file'
+                       LIMIT 1""",
+                    key,
+                ).fetchone():
+                    del wanted[key]
+
+        edges: list[tuple[str, str, str, WorkspaceIdentity]] = []
+        for (session_id, provider), cwds in wanted.items():
+            for cwd in cwds:
+                ident = dir_cache.get(cwd)
+                if ident is None:
+                    ident = resolve_dir(cwd)  # the directory itself, not its parent
+                    dir_cache[cwd] = ident
+                edges.append((session_id, provider, cwd, ident))
+
+        written = 0
+        for i in range(0, len(edges), self._ATTRIBUTION_CHUNK):
+            chunk = edges[i:i + self._ATTRIBUTION_CHUNK]
+            with self._lock:
+                try:
+                    for session_id, provider, cwd, ident in chunk:
+                        # Re-check in-transaction before minting a workspace
+                        # row, so a session that just gained a file edge
+                        # leaves no orphan workspace behind.
+                        if self._conn.execute(
+                            """SELECT 1 FROM path_attributions
+                               WHERE session_id = ? AND provider = ? AND via = 'file'
+                               LIMIT 1""",
+                            (session_id, provider),
+                        ).fetchone():
+                            continue
+                        wid = self._upsert_workspace_locked(ident, now)
+                        cur = self._conn.execute(
+                            self._CWD_EDGE_SQL,
+                            (session_id, provider, cwd, wid, ident.kind, now,
+                             session_id, provider),
+                        )
+                        written += cur.rowcount
+                    self._conn.commit()
+                except BaseException:
+                    self._conn.rollback()
+                    raise
+        return written
 
     def backfill_from_events(self, events_db_path: str | Path) -> dict[str, int]:
         """Populate attributions from ``events.db`` — a FULL read-only pass.
@@ -1565,7 +1753,8 @@ class WorkspaceStore:
         """
         cursor = self.get_attribution_cursor()
         empty = {
-            "attributed": 0, "directories": 0, "skipped_non_absolute": 0,
+            "attributed": 0, "cwd_attributed": 0, "directories": 0,
+            "skipped_non_absolute": 0,
             "cursor_from": cursor, "cursor_to": cursor, "reset": False,
         }
         if not os.path.exists(str(events_db_path)):
@@ -1586,6 +1775,7 @@ class WorkspaceStore:
         self.set_attribution_cursor(hi)  # only reached if every commit succeeded
         return {
             "attributed": result["attributed"],
+            "cwd_attributed": result["cwd_attributed"],
             "directories": result["directories"],
             "skipped_non_absolute": result["skipped_non_absolute"],
             "cursor_from": cursor,
