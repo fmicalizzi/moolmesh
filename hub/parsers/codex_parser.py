@@ -13,8 +13,10 @@ from hub.parsers.base import BaseParser
 class CodexParser(BaseParser):
 
     def __init__(self):
-        # Session context propagated from session_meta to all subsequent entries
-        self._session_ctx: dict[str, str] = {}
+        # Session context propagated from session_meta to all subsequent
+        # entries, keyed per file: one watcher parser tails many rollouts, and
+        # a chunk read from offset > 0 carries no session_meta of its own.
+        self._session_ctx: dict[str, dict[str, str]] = {}
 
     def parse_file(self, path: Path) -> list[CodexEntry]:
         # Use a local context — thread-safe, no shared state between calls
@@ -36,7 +38,12 @@ class CodexParser(BaseParser):
         return entries
 
     def parse_incremental(self, path: Path, offset: int) -> tuple[list[CodexEntry], int]:
-        # NOTE: _session_ctx persists between calls (for live watcher)
+        # NOTE: the per-file context persists between calls (for live watcher)
+        ctx = self._session_ctx.setdefault(str(path), {})
+        if offset > 0 and not ctx:
+            # Resuming mid-file (daemon restart): session_meta was consumed
+            # in an earlier run, so re-seed from the file's first line.
+            self._seed_session_ctx(path, ctx)
         entries: list[CodexEntry] = []
         with open(path, "rb") as f:
             f.seek(0, 2)
@@ -63,16 +70,26 @@ class CodexParser(BaseParser):
                 raw = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            entry = self._parse_line(raw, ctx=self._session_ctx)
+            entry = self._parse_line(raw, ctx=ctx)
             if entry is not None:
-                self._apply_session_ctx(entry, ctx=self._session_ctx)
+                self._apply_session_ctx(entry, ctx=ctx)
                 entries.append(entry)
         return entries, new_offset
 
-    def _apply_session_ctx(self, entry: CodexEntry, ctx: dict[str, str] | None = None) -> None:
+    def _seed_session_ctx(self, path: Path, ctx: dict[str, str]) -> None:
+        """Fill ``ctx`` from the rollout's first line (``session_meta``, per ``can_parse``)."""
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                raw = json.loads(f.readline())
+        except (OSError, json.JSONDecodeError):
+            return
+        if isinstance(raw, dict) and raw.get("type") == "session_meta":
+            entry = self._parse_line(raw, ctx=ctx)
+            if entry is not None:
+                self._apply_session_ctx(entry, ctx=ctx)
+
+    def _apply_session_ctx(self, entry: CodexEntry, ctx: dict[str, str]) -> None:
         """Store context from session_meta, propagate to all other entries."""
-        if ctx is None:
-            ctx = self._session_ctx
         if entry.event_type == "session_meta":
             ctx.update({
                 "session_id": entry.session_id,

@@ -420,3 +420,44 @@ class TestCodexParserEventMsgSubtypes:
             "payload": {"type": "thread_name_updated"}
         })
         assert entry is None
+
+
+class TestCodexParserSessionContextPerFile:
+    """One watcher parser tails many rollouts: context must not leak (#40)."""
+
+    @staticmethod
+    def _write(path: Path, session_id: str, cwd: str) -> None:
+        path.write_text(
+            json.dumps({"type": "session_meta", "timestamp": "2026-01-01",
+                        "payload": {"id": session_id, "cwd": cwd}}) + "\n"
+            + json.dumps({"type": "event_msg", "timestamp": "2026-01-01",
+                          "payload": {"content": f"hello {session_id}"}}) + "\n"
+        )
+
+    @staticmethod
+    def _append(path: Path, text: str) -> None:
+        with open(path, "a") as f:
+            f.write(json.dumps({"type": "event_msg", "timestamp": "2026-01-02",
+                                "payload": {"content": text}}) + "\n")
+
+    def test_interleaved_files_keep_their_own_context(self, tmp_path):
+        parser = CodexParser()
+        a, b = tmp_path / "rollout-a.jsonl", tmp_path / "rollout-b.jsonl"
+        self._write(a, "sess-a", "/work/a")
+        self._write(b, "sess-b", "/work/b")
+        _, off_a = parser.parse_incremental(a, 0)
+        parser.parse_incremental(b, 0)  # b's meta is now the most recent parsed
+        self._append(a, "more a")
+        entries, _ = parser.parse_incremental(a, off_a)
+        assert [(e.session_id, e.cwd) for e in entries] == [("sess-a", "/work/a")]
+
+    def test_resume_mid_file_seeds_context_from_first_line(self, tmp_path):
+        a = tmp_path / "rollout-a.jsonl"
+        self._write(a, "sess-a", "/work/a")
+        _, off_a = CodexParser().parse_incremental(a, 0)
+        self._append(a, "after restart")
+        # Fresh parser == daemon restart: offset comes from the store.
+        entries, _ = CodexParser().parse_incremental(a, off_a)
+        assert len(entries) == 1
+        assert entries[0].session_id == "sess-a"
+        assert entries[0].cwd == "/work/a"
