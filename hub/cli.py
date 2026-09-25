@@ -1426,6 +1426,11 @@ def cmd_workspace_backfill(args: argparse.Namespace) -> None:
         f"across {result['workspaces']} workspaces "
         f"({result['directories']} directories resolved)."
     ))
+    if result["cwd_attributed"]:
+        print(dim(
+            f"  {result['cwd_attributed']} cwd-fallback edges for sessions "
+            f"with no absolute file path (attributed by working directory)."
+        ))
     if result["skipped_non_absolute"]:
         print(dim(
             f"  Skipped {result['skipped_non_absolute']} non-absolute file_path "
