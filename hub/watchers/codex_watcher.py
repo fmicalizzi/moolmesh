@@ -53,8 +53,8 @@ class CodexWatcher(BaseHarvester):
         seen_sessions: set[str] = set()
         for entry in entries:
             project = self._file_projects.get(path, "codex-sessions")
-            event = self._adapter.to_event(entry, project)
-            if event:
+            # to_events: one Codex call can touch several directories (#40).
+            for event in self._adapter.to_events(entry, project):
                 events.append(event.to_dict())
             if entry.session_id and entry.session_id not in seen_sessions:
                 seen_sessions.add(entry.session_id)
