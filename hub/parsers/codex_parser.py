@@ -294,7 +294,27 @@ class CodexParser(BaseParser):
                     raw=raw,
                 )
 
-            case "function_call_output":
+            case "custom_tool_call":
+                # Freeform tools (``exec`` = JavaScript driving tools.*,
+                # ``apply_patch`` = raw patch). The raw input rides in
+                # ``arguments`` so the call pairs with its output by call_id.
+                raw_input = payload.get("input", "")
+                if not isinstance(raw_input, str):
+                    raw_input = json.dumps(raw_input, ensure_ascii=False)
+                fc = CodexFunctionCall(
+                    call_id=payload.get("call_id", ""),
+                    name=payload.get("name", ""),
+                    arguments=raw_input,
+                )
+                return CodexEntry(
+                    event_type="response_item",
+                    timestamp=timestamp,
+                    payload_type=payload_type,
+                    function_call=fc,
+                    raw=raw,
+                )
+
+            case "function_call_output" | "custom_tool_call_output":
                 raw_output = payload.get("output", "")
                 if isinstance(raw_output, list):
                     raw_output = "\n".join(

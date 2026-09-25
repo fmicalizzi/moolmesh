@@ -10,7 +10,7 @@ from typing import Any
 class CodexFunctionCall:
     call_id: str = ""
     name: str = ""
-    arguments: str = ""  # JSON string
+    arguments: str = ""  # JSON string (function_call) or raw input (custom_tool_call)
 
 
 @dataclass(slots=True)
@@ -34,7 +34,7 @@ class CodexEntry:
     source: str = ""
 
     # response_item fields
-    payload_type: str = ""  # "message", "function_call", "function_call_output", "reasoning"
+    payload_type: str = ""  # "message", "function_call", "custom_tool_call", "*_output", "reasoning"
     role: str = ""  # "user", "assistant", "developer"
     text: str = ""  # extracted text content
     function_call: CodexFunctionCall | None = None
