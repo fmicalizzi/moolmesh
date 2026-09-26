@@ -136,6 +136,12 @@
   .fs-mon .dot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; }
   .fs-mon.on .dot { background:var(--green); } .fs-mon.off .dot { background:var(--muted); }
   .fs-mon b { color:var(--text); } .fs-mon code { color:var(--accent); }
+  /* Attribution freshness (#43) — sibling line of .fs-mon. Dot + text, never
+     color alone; warn uses the status palette (same as .st-estancado). */
+  .fs-mon.pending .dot { background:var(--accent); }
+  .fs-mon.warn { border-color:#db6d2855; }
+  .fs-mon.warn .dot { background:#db6d28; }
+  .fs-mon.warn b { color:#db6d28; }
   /* --- Executive summary: KPI tiles + charts (#37, zero-dep, hand-rolled) ---
      Palette discipline: the provider trio (cyan/purple/yellow) FAILS as a
      color-only identity channel (ΔE 14.2 cyan↔purple, below the 15 floor), so
@@ -228,6 +234,7 @@
     </div>
   </div>
   <div class="fs-mon" id="fs-mon"></div>
+  <div class="fs-mon" id="attr-fresh" aria-live="polite"></div>
   <div class="prod" id="prod-card">
     <div class="prod-top">
       <h3 title="Sesiones fechadas por ingesta (MAX created_at). Los totales son de la ventana elegida; una sesión que tocó varios proyectos cuenta en cada uno, así que no son aditivos entre filas.">Producción por proyecto en el tiempo — esfuerzo (sesiones), no duración</h3>
@@ -777,7 +784,60 @@ async function loadMonitoring(){
       how = ` — activá con <code>mool workspace root add &lt;ruta&gt;</code>`;
     }
     el.innerHTML = `<span class="dot"></span><span>${msg}${how}. Capa opcional: agentes, GitHub y el portfolio funcionan igual.</span>`;
-  } catch(e){ el.innerHTML=''; }
+    renderFreshness(m);
+  } catch(e){
+    el.innerHTML='';
+    renderFreshness(null);
+  }
+}
+
+// Attribution freshness (#43): "stale shouldn't be silent". Pure: (monitoring
+// payload, now in ms) → {cls, html}. The age is computed against the BROWSER
+// clock; the server only reports its last cycle time, interval and error TYPE
+// (never names/paths — hide_project_names is safe by construction).
+// Precedence: fetch failed → cycle error → off by config → configured but not
+// running (config edited, daemon not restarted) → first cycle pending → stale
+// (> 2× interval + grace, the grace absorbs a long refresh) → fresh.
+const FRESH_GRACE_S = 60;
+function agoStr(sec){
+  if (sec < 60) return 'hace menos de 1 min';
+  if (sec < 3600) return `hace ${Math.floor(sec/60)} min`;
+  if (sec < 86400) return `hace ${Math.floor(sec/3600)} h`;
+  return ageStr(sec/86400);
+}
+function parseIsoMs(iso){
+  // Python isoformat() carries microseconds; trim to ms so every engine parses it.
+  const ms = Date.parse(String(iso).replace(/(\.\d{3})\d+/, '$1'));
+  return Number.isNaN(ms) ? null : ms;
+}
+function freshnessState(m, nowMs){
+  if (!m) return { cls:'warn', html:'No se pudo consultar la frescura del portfolio — ¿está corriendo el daemon?' };
+  const atMs = m.last_attribution_at ? parseIsoMs(m.last_attribution_at) : null;
+  const age = atMs == null ? null : Math.max(0, (nowMs - atMs) / 1000);
+  if (m.attribution_active && m.last_attribution_error){
+    const last = age == null ? '' : ` · última actualización ${agoStr(age)}`;
+    return { cls:'warn', html:`Portfolio <b>con error</b> en la última actualización (<code>${esc(m.last_attribution_error)}</code>) — revisá <code>~/.moolmesh/hub.log</code>${last}` };
+  }
+  if (!m.auto_attribution){
+    return { cls:'off', html:'Actualización automática <b>apagada</b> — activá <code>auto_attribution = true</code> en <code>[workspace]</code> o corré <code>mool workspace backfill</code>' };
+  }
+  if (!m.attribution_active){
+    return { cls:'warn', html:'Actualización automática <b>activada pero sin correr</b> — reiniciá el daemon (<code>mool daemon restart</code>) para aplicar la config' };
+  }
+  if (age == null){
+    return { cls:'pending', html:'<b>Primera actualización en curso…</b>' };
+  }
+  const interval = Number(m.attribution_interval_s) || 0;
+  if (interval > 0 && age > 2 * interval + FRESH_GRACE_S){
+    return { cls:'warn', html:`Portfolio <b>desactualizado</b> — última actualización ${agoStr(age)}` };
+  }
+  return { cls:'on', html:`Portfolio actualizado <b>${agoStr(age)}</b>` };
+}
+function renderFreshness(m){
+  const el = document.getElementById('attr-fresh');
+  const st = freshnessState(m, Date.now());
+  el.className = `fs-mon ${st.cls}`;
+  el.innerHTML = `<span class="dot"></span><span>${st.html}</span>`;
 }
 
 initProdToggle();
@@ -785,6 +845,9 @@ loadProduction(prodDays);
 loadPortfolio();
 loadDelivery();
 loadMonitoring();
+// Re-fetch ONLY the small monitoring endpoint (no SSE, no portfolio reload) so
+// "hace X" and the stale/error states stay honest while the page is open.
+setInterval(loadMonitoring, 60000);
 </script>
 </body>
 </html>

@@ -604,6 +604,19 @@ class TestMonitoringMeta:
         assert data["attribution_active"] is True
         assert data["last_attribution_at"] == "2026-09-23T10:00:00+00:00"
         assert data["last_attribution_error"] is None
+        # Additive #43 field: the attributor's real cycle.
+        assert data["attribution_interval_s"] == WorkspaceAttributor.INTERVAL
+
+    def test_interval_reflects_running_attributor(self, server_env):
+        srv = server_env(auto_attribution=True, filesystem_monitoring=False)
+        srv.workspace_attributor._interval = 42.0
+        httpd, port = _serve(srv)
+        try:
+            data = _get(port, "/api/workspace/monitoring")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        assert data["attribution_interval_s"] == 42.0
 
     def test_fields_when_disabled(self, server_env):
         srv = server_env(auto_attribution=False)
@@ -617,3 +630,4 @@ class TestMonitoringMeta:
         assert data["attribution_active"] is False
         assert data["last_attribution_at"] is None
         assert data["last_attribution_error"] is None
+        assert data["attribution_interval_s"] is None
