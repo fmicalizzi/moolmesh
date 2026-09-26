@@ -389,18 +389,26 @@ class DashboardServer:
             server.serve_forever()
         except KeyboardInterrupt:
             print("\nShutting down...")
-            for _, watcher in self.watchers:
-                watcher.stop()
-            if self.git_harvester:
-                self.git_harvester.stop()
-            if self.github_harvester:
-                self.github_harvester.stop()
-            if self.workspace_attributor:
-                self.workspace_attributor.stop()
-            if self.git_store:
-                self.git_store.close()
-            self.event_store.close()
-            server.shutdown()
+            self._shutdown(server)
+
+    def _shutdown(self, server) -> None:
+        """Stop every background thread, then close the stores they write to."""
+        for _, watcher in self.watchers:
+            watcher.stop()
+        if self.git_harvester:
+            self.git_harvester.stop()
+        if self.github_harvester:
+            self.github_harvester.stop()
+        # Stop (bounded join) before any store closes, so an in-flight
+        # filesystem scan is not cut mid-write (#44).
+        if self.workspace_watcher:
+            self.workspace_watcher.stop()
+        if self.workspace_attributor:
+            self.workspace_attributor.stop()
+        if self.git_store:
+            self.git_store.close()
+        self.event_store.close()
+        server.shutdown()
 
     def _broadcast_sse(self) -> None:
         """Read events from sse_buffer and broadcast to connected SSE clients.

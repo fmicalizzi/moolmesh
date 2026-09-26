@@ -532,6 +532,45 @@ class TestServerWiring:
         assert srv.workspace_watcher._store is srv.workspace_store
         assert srv.workspace_attributor._store is srv.workspace_store
 
+    def test_shutdown_stops_workspace_threads_before_closing_stores(
+        self, tmp_path, server_env
+    ):
+        """#44: the watcher was never stopped on shutdown — an in-flight scan
+        could be cut mid-write. Both workspace threads stop before any close."""
+        from unittest import mock
+        from hub.config import WorkspaceRoot
+        srv = server_env(
+            auto_attribution=True, filesystem_monitoring=True,
+            workspace_roots=[WorkspaceRoot(path=str(tmp_path), max_depth=1)],
+        )
+        calls = mock.Mock()
+        srv.workspace_watcher = calls.workspace_watcher
+        srv.workspace_attributor = calls.workspace_attributor
+        srv.git_store = calls.git_store
+        srv.event_store = calls.event_store
+        srv.watchers = []
+
+        srv._shutdown(calls.httpd)
+
+        names = [c[0] for c in calls.mock_calls]
+        assert names == [
+            "workspace_watcher.stop",
+            "workspace_attributor.stop",
+            "git_store.close",
+            "event_store.close",
+            "httpd.shutdown",
+        ]
+
+    def test_shutdown_without_workspace_threads(self, server_env):
+        from unittest import mock
+        srv = server_env(auto_attribution=False)
+        assert srv.workspace_watcher is None and srv.workspace_attributor is None
+        srv.event_store = mock.Mock()
+        httpd = mock.Mock()
+        srv._shutdown(httpd)
+        srv.event_store.close.assert_called_once()
+        httpd.shutdown.assert_called_once()
+
 
 def _serve(srv):
     import http.server
