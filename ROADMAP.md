@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.22.0
+Last updated: September 2026 — v1.23.0
 
 ---
 
@@ -176,6 +176,16 @@ Codex work becomes visible ([#40](https://github.com/fmicalizzi/moolmesh/issues/
 
 - **Freshness indicator** in `/portfolio` ([#43](https://github.com/fmicalizzi/moolmesh/issues/43)): "actualizado hace X", with warnings for a stale portfolio (> 2× the attribution interval), a failed cycle (error type only), auto-attribution off, or a config change not yet applied. It re-fetches only the monitoring endpoint every 60 s and never relies on color alone.
 - **Test isolation** ([#44](https://github.com/fmicalizzi/moolmesh/issues/44)): the suite runs against a throwaway home set before any import, and a guard aborts if a path escapes it. Real-data tests are opt-in and read-only. The folder watcher is stopped cleanly on shutdown.
+
+### v1.23 — Full history ingestion
+
+Everything you did before installing MoolMesh, or while the daemon was down, becomes visible ([#45](https://github.com/fmicalizzi/moolmesh/issues/45)).
+
+- **`mool backfill`** imports all Claude / Codex / Qwen history outside the live window. It's resumable, idempotent, batched, has `--dry-run` / `--since` / `--provider`, and is safe alongside the daemon.
+- **Daemon catch-up** after downtime (bounded, no SSE flood), tracked in a new `watcher_state` table.
+- **`--reparse codex`** re-ingests pre-v1.21 Codex sessions with the current parser. It needs `--yes`, backs up first and runs one transaction per session.
+- **Cloud-only placeholders** (iCloud/FileProvider `SF_DATALESS`, Windows recall attributes, `.icloud`) are detected and skipped without triggering a download.
+- **History stays out of "recent":** an `events.historical` flag with a partial index keeps the live feed, startup stats and SSE replay live-only.
 
 ---
 

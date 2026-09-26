@@ -6,6 +6,67 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.23.0] — 2026-09-26
+
+MoolMesh can now ingest your **whole** session history (#45). Until now, the Claude,
+Codex and Qwen watchers only read files modified in the last 12 h, and
+`mool backfill` did nothing, so anything older than the install, or from while the
+daemon was down, was never seen. OpenCode and Cursor were not affected, since they
+read a whole SQLite database. No new dependencies; the live hot path and SSE are
+unchanged.
+
+### Upgrade notes
+- **Run `mool backfill` once** to import history (`--dry-run` first to see what it
+  would do). It's resumable (Ctrl-C and re-run continues), idempotent, and only
+  touches files **older than the daemon's 12 h live window**, so it can run while the
+  daemon is up. The daemon then attributes the new rows to workspaces on its own,
+  dated by their real event time (v1.21), so the portfolio extends back in time.
+  Measured on a real history: Claude 402 → 747 sessions, Qwen 0 → 61, Codex 27 → 66.
+  Most Codex rollout files are internal zero-token exec threads, filtered by design.
+  events.db grew from ~199 MB to ~314 MB.
+- **Optional: `mool backfill --reparse codex --yes`** re-ingests Codex sessions
+  stored before v1.21 with the current parser, so they gain file-level workspace
+  attribution. Measured: sessions with an absolute file path went from 0 to 14. It
+  simulates unless `--yes` is given, and it writes a full backup of events.db to
+  `~/.moolmesh/backups/` before the first deletion. The backup is not removed
+  automatically; delete it once you're happy.
+
+### Added
+- **#45 — `mool backfill` (real).** `mool backfill [--provider claude|codex|qwen|all]
+  [--since YYYY-MM-DD] [--dry-run] [--limit N] [--verbose]` runs the same
+  parse/store path as the live watchers, in 500-event transactions, with offsets
+  saved so a cut resumes cleanly. It prints a per-provider summary: seen /
+  processed / up to date / in the live window / skipped (cloud, error, empty) /
+  events / sessions.
+- **#45 — daemon catch-up.** A new `watcher_state` table records each watcher's
+  last cycle. After a downtime longer than the live window, the daemon drains the
+  files modified in between (capped at 30 days) in small batches on the watcher
+  thread, without pushing that history to SSE.
+- **#45 — `mool backfill --reparse codex`.** A per-session transaction deletes
+  that session's Codex events (and their full text) and re-ingests the rollout from
+  offset 0. It requires `--yes`, backs up first, and a group that fails rolls back.
+- **#45 — cloud-only placeholder detection.** A file or directory that is only in
+  the cloud is skipped and reported without opening it, so no download is
+  triggered. That covers macOS `SF_DATALESS` (iCloud Drive / FileProvider sync
+  apps), Windows recall/offline attributes, and legacy `.icloud` stubs.
+
+### Fixed
+- **Backfilled history no longer shows up as "recent".** Rows from non-live paths
+  (backfill, catch-up, re-parse) are marked `events.historical = 1` (additive
+  migration, with a partial index). The recent feed (`/api/recent`), startup
+  stats, the SSE replay on reconnect, MCP `get_recent_events` and
+  `mool query events` only show live rows. Analytics and per-session views still
+  include history. Existing rows are all live (0).
+- Sessions ingested in one pass now get correct `event_count` / `last_event_at`.
+
+### Known follow-ups
+Fingerprint collision loses events for files sharing their first KB (#50, high);
+discovery opens provider databases read-write (#51); live-watcher robustness,
+whole-file reads, a full-text size cap, symlinked `~/.codex`, cloud detection on
+live paths, backup pruning, and MCP `search_events` ordering (#52).
+
+---
+
 ## [1.22.0] — 2026-09-26
 
 `/portfolio` now shows how fresh it is (#43), and the test suite can no longer touch
