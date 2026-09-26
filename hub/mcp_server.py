@@ -66,9 +66,10 @@ def _get_schema() -> str:
     model TEXT,                  -- claude-opus-4-6, gpt-5, qwen-coder, etc.
     cwd TEXT,                    -- working directory
     fingerprint TEXT,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    historical INTEGER NOT NULL DEFAULT 0  -- 1 = ingerido por backfill/catch-up/re-parseo (no en vivo)
 );
-Índices: timestamp, provider, project, session_id, fingerprint (unique partial).
+Índices: timestamp, provider, project, session_id, fingerprint (unique partial), id WHERE historical = 0.
 """
 
 
@@ -99,8 +100,12 @@ def _get_recent_events(db_path: str, limit: int = 50, offset: int = 0) -> list[d
     limit = min(limit, 500)
     offset = max(offset, 0)
     conn = _connect(db_path)
+    # Skip history ingested by backfill/catch-up/re-parse (#45): new ids, old
+    # timestamps. Guarded — an events.db not yet migrated has no such column.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
+    live = "WHERE historical = 0 " if "historical" in cols else ""
     rows = conn.execute(
-        "SELECT * FROM events ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)
+        f"SELECT * FROM events {live}ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)
     ).fetchall()
     conn.close()
     return _rows_to_dicts(reversed(rows))

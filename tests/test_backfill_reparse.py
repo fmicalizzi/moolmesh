@@ -173,11 +173,11 @@ class TestReparse:
         real = es._insert_event_row
         n = {"calls": 0}
 
-        def failing(conn, e, now):
+        def failing(conn, e, now, **kw):
             n["calls"] += 1
             if n["calls"] == 2:
                 raise exc
-            return real(conn, e, now)
+            return real(conn, e, now, **kw)
 
         monkeypatch.setattr(es, "_insert_event_row", failing)
         rep = _reparse(env, store, dry_run=False, yes=True)

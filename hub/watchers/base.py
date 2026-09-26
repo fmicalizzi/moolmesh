@@ -311,7 +311,7 @@ class BaseHarvester(ABC):
             t0 = time.monotonic()
             stored = self._store.store_with_offset(
                 chunk, fingerprint if last else "", self.provider_name,
-                str(path), new_offset,
+                str(path), new_offset, historical=True,
             )
             self.max_history_txn_seconds = max(
                 self.max_history_txn_seconds, time.monotonic() - t0
