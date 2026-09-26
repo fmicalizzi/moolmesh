@@ -579,6 +579,11 @@ class DashboardServer:
                             "last_attribution_error": (
                                 _attr.last_attribution_error if _attr else None
                             ),
+                            # Additive (#43): the real cycle, so the UI can
+                            # flag a stale portfolio (> 2× interval).
+                            "attribution_interval_s": (
+                                _attr._interval if _attr else None
+                            ),
                         })
                     # --- API: Repos ---
                     case "/api/repos":
