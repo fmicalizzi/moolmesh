@@ -108,6 +108,34 @@ def _compute_fingerprint(event_dict: dict[str, Any]) -> str:
     return hashlib.md5(key.encode()).hexdigest()
 
 
+def _insert_event_row(conn: sqlite3.Connection, e: dict[str, Any], now: float) -> int:
+    """INSERT OR IGNORE one event (+ its full text); 1 if inserted, else 0."""
+    tokens = e.get("tokens")
+    cursor = conn.execute(
+        """INSERT OR IGNORE INTO events
+           (provider, project, event_type, timestamp, summary,
+            session_id, tokens_json, tool_name, file_path, model, cwd,
+            fingerprint, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            e.get("provider", ""), e.get("project", ""), e.get("event_type", ""),
+            e.get("timestamp", ""), e.get("summary", ""), e.get("session_id"),
+            json.dumps(tokens) if tokens else None, e.get("tool_name"),
+            e.get("file_path"), e.get("model"), e.get("cwd"),
+            _compute_fingerprint(e), now,
+        ),
+    )
+    if cursor.rowcount <= 0:
+        return 0
+    full_text = e.get("full_text")
+    if full_text and cursor.lastrowid:
+        conn.execute(
+            "INSERT OR IGNORE INTO event_content (event_id, full_text) VALUES (?, ?)",
+            (cursor.lastrowid, full_text),
+        )
+    return 1
+
+
 class EventStore:
     """Thread-safe SQLite event persistence."""
 
@@ -1150,6 +1178,58 @@ class EventStore:
                 conn.execute("ROLLBACK")
                 raise
         return result_events
+
+    def replace_session_events(
+        self,
+        provider: str,
+        session_ids: list[str],
+        events: list[dict],
+        file_offsets: list[tuple[str, str, int]],
+    ) -> int:
+        """Atomically swap a group of sessions' events for a fresh parse (#45).
+
+        In ONE transaction: delete the sessions' events and their dependent
+        ``event_content`` rows, reset the offsets of their files, insert the
+        re-parsed events (``INSERT OR IGNORE``, first fingerprint wins) and
+        store the new offsets ``(fingerprint, file_path, offset)``. Any failure
+        — including KeyboardInterrupt — rolls the whole group back. Returns the
+        number of events inserted. ``sessions`` metadata is untouched here (the
+        caller refreshes its stats after commit).
+        """
+        import time
+        now = time.time()
+        marks = ",".join("?" * len(session_ids))
+        inserted = 0
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    f"""DELETE FROM event_content WHERE event_id IN (
+                            SELECT id FROM events
+                            WHERE provider = ? AND session_id IN ({marks}))""",
+                    [provider, *session_ids],
+                )
+                conn.execute(
+                    f"DELETE FROM events WHERE provider = ? AND session_id IN ({marks})",
+                    [provider, *session_ids],
+                )
+                for fp, _path, _off in file_offsets:
+                    conn.execute("DELETE FROM file_registry WHERE fingerprint = ?", (fp,))
+                for e in events:
+                    inserted += _insert_event_row(conn, e, now)
+                for fp, path, off in file_offsets:
+                    conn.execute(
+                        """INSERT INTO file_registry
+                               (fingerprint, provider, file_path, last_offset, updated_at)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (fp, provider, str(path), off, now),
+                    )
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return inserted
 
     def link_sessions(
         self,
