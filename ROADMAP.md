@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.20.0
+Last updated: September 2026 — v1.21.0
 
 ---
 
@@ -162,6 +162,15 @@ The daemon keeps the portfolio current ([#39](https://github.com/fmicalizzi/mool
 - **Derived tables refreshed** (rollup → delivery candidates → classification) on new attributions or at least hourly, so fs/git-only activity also stays fresh.
 - **Toggle** `[workspace] auto_attribution` (default on), independent of `filesystem_monitoring`. **Freshness exposed** (`last_attribution_at` / `last_attribution_error`) in the monitoring API, so staleness is visible instead of silent.
 - **Hardening:** disk I/O moved outside the store lock and transactions (cloud-offloaded folders); classification and candidates written atomically for concurrent dashboard reads.
+
+### v1.21 — Codex in the portfolio + event-time dating
+
+Codex work becomes visible ([#40](https://github.com/fmicalizzi/moolmesh/issues/40)) and session activity is dated by when it happened ([#42](https://github.com/fmicalizzi/moolmesh/issues/42)). Shipped together so history is re-derived once, correctly.
+
+- **Codex parser** reads the current `custom_tool_call` format (`exec` JS / `apply_patch`). Touched files are extracted by regex (no JS eval), resolved against `workdir`, and stored untruncated. The per-file session context is fixed.
+- **cwd fallback** for any provider: sessions with no file path are attributed to their working directory (`via='cwd'`), and those edges are replaced once a real file edge appears.
+- **Event-time dating:** `path_attributions.event_ts` (earliest event, mixed formats parsed to UTC). The rollup buckets sessions by that UTC day. A one-time migration resets the cursor so the daemon re-derives the history automatically, and the one-day backfill spike spreads back over the real days.
+- **Rollup reconcile:** session counts are recomputed from edges (fs/git history untouched), removing an old double count.
 
 ---
 
