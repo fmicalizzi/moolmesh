@@ -16,7 +16,7 @@ import hub.cache.workspace_store as store_mod
 from hub.cache.workspace_store import WorkspaceStore
 from hub.correlation.workspace_resolver import resolve_dir
 from tests.test_workspace_attribution import _add_event, _count, _make_events_db
-from tests.test_workspace_store import _mkrepo
+from tests.test_workspace_store import _future, _mkrepo
 
 
 def _edges(store: WorkspaceStore) -> set[tuple]:
@@ -330,19 +330,188 @@ class TestViaMigration:
 
 
 class TestDeliveryWorkingSet:
-    def test_cwd_edges_add_no_extension_signal(self, env):
-        s, events, site, *_ = env
-        dotted = site / "release.v2"
-        dotted.mkdir()
-        _cwd_event(events, "cx1", str(dotted))
+    def test_cwd_edges_add_no_extension_signal(self, env, monkeypatch):
+        """A cwd edge's file_path is a DIRECTORY: ``site/release.v2`` must not
+        count as a ``.v2`` file. If it did, it would push ``.v2`` to 2
+        occurrences — into the working set — and the singleton ``notes.v2``
+        dropped at the repo root would stop reading as a root_artifact."""
+        s, events, site, _, _, tmp = env
+        (site / "release.v2").mkdir()
+        _cwd_event(events, "cx1", str(site / "release.v2"))
         s.attribute_incremental(events)
-        seen = {}
+        assert {e[3] for e in _edges(s)} == {"cwd"}
+        # Real clocks: a normal tree below the root + a new file AT the root.
+        s.record_touch(str(site / "src" / "a.py"), 1_700_000_000.0,
+                       resolve_dir(str(site / "src")))
+        s.record_touch(str(site / "notes.v2"), 1_700_000_100.0,
+                       resolve_dir(str(site)))
+
+        seen: list[dict[str, int]] = []
         real = WorkspaceStore._working_set_exts
 
         def spy(wid, work_exts, touches, root):
-            seen.update({w: dict(e) for w, e in work_exts.items()})
+            seen.append(dict(work_exts.get(wid, {})))
             return real(wid, work_exts, touches, root)
 
-        s._working_set_exts = spy
-        s.detect_delivery_candidates()
-        assert all(".v2" not in exts for exts in seen.values())
+        # Invoked as ``self._working_set_exts(...)`` (a staticmethod), so an
+        # instance attribute shadows it.
+        monkeypatch.setattr(s, "_working_set_exts", spy)
+        r = s.detect_delivery_candidates(
+            events_db_path=events, github_db_path=tmp / "absent-github.db",
+            now=_future())
+        assert seen, "the working-set computation was never reached"
+        assert all(".v2" not in exts for exts in seen)
+        assert r["by_signal"]["root_artifact"] == 1
+        (cand,) = [c for c in s.get_delivery_candidates()
+                   if c["signal"] == "root_artifact"]
+        assert cand["signal_detail"].endswith("notes.v2")
+
+
+class TestRollupDurability:
+    """build_rollup may only zero session_touches and prune all-zero rows:
+    fs_touches / git_touches history is never modified or deleted."""
+
+    def test_fs_git_history_untouched_session_zeroed_all_zero_pruned(self, env):
+        s, _, _, _, plain, tmp = env
+        wid = s.upsert_workspace(resolve_dir(str(plain)))
+        rows = [  # (day, session, fs, git) — no session edge on any day
+            ("2020-01-01", 0, 3, 0),   # fs history only
+            ("2020-01-02", 0, 0, 2),   # git history only
+            ("2020-01-03", 5, 1, 0),   # stale session + fs → session zeroed
+            ("2020-01-04", 7, 0, 4),   # stale session + git → session zeroed
+            ("2020-01-05", 9, 0, 0),   # stale session only → pruned
+            ("2020-01-06", 0, 0, 0),   # already empty → pruned
+        ]
+        with s._lock:
+            s._conn.executemany(
+                """INSERT INTO workspace_rollup
+                   (workspace_id, day, session_touches, fs_touches, git_touches,
+                    last_activity, built_at) VALUES (?, ?, ?, ?, ?, ?, 'x')""",
+                [(wid, d, se, fs, g, d + "T00:00:00") for d, se, fs, g in rows],
+            )
+            s._conn.commit()
+
+        r = s.build_rollup(tmp / "absent-github.db")
+        assert r["session_reconciled"] == 3
+
+        with s._lock:
+            after = s._conn.execute(
+                """SELECT day, session_touches, fs_touches, git_touches
+                   FROM workspace_rollup ORDER BY day"""
+            ).fetchall()
+        assert after == [
+            ("2020-01-01", 0, 3, 0),
+            ("2020-01-02", 0, 0, 2),
+            ("2020-01-03", 0, 1, 0),
+            ("2020-01-04", 0, 0, 4),
+        ]
+        # Idempotent: a second build changes nothing.
+        assert s.build_rollup(tmp / "absent-github.db")["session_reconciled"] == 0
+
+
+def _attr_rows(store: WorkspaceStore) -> set[tuple]:
+    """path_attributions without ids/first_seen, joined to the workspace key."""
+    with store._lock:
+        return set(store._conn.execute(
+            """SELECT a.session_id, a.provider, a.file_path, a.via, a.resolved_via,
+                      w.workspace_key
+               FROM path_attributions a JOIN workspaces w ON w.id = a.workspace_id"""
+        ).fetchall())
+
+
+def _session_rollup(store: WorkspaceStore, by_day: bool = True) -> dict:
+    with store._lock:
+        rows = store._conn.execute(
+            """SELECT w.workspace_key, r.day, r.session_touches
+               FROM workspace_rollup r JOIN workspaces w ON w.id = r.workspace_id
+               WHERE r.session_touches > 0"""
+        ).fetchall()
+    out: dict = {}
+    for key, day, n in rows:
+        k = (key, day) if by_day else key
+        out[k] = out.get(k, 0) + n
+    return out
+
+
+class TestReplayMatchesFullPass:
+    """``attribute_incremental`` window by window (MAX(id) moving between
+    passes, a rollup after each) must converge on the same state as ONE
+    ``backfill_from_events`` into a clean store — including sessions that sit
+    on a cwd edge for several windows before gaining file edges."""
+
+    @staticmethod
+    def _windows(site, other, plain):
+        docs = site / "docs"
+        return [
+            [  # w1: A/C/D prompt-only (cwd edges), B edits files
+                ("A", "codex", None, str(site)),
+                ("B", "claude", str(site / "a.py"), str(site)),
+                ("C", "codex", None, str(site)),
+            ],
+            [  # w2: A moves cwd, B has a cwd-only row, C/D more cwd
+                ("A", "codex", None, str(other)),
+                ("B", "claude", None, str(other)),
+                ("C", "codex", None, str(plain)),
+                ("D", "opencode", None, str(site)),
+            ],
+            [  # w3: A and D gain file edges in other workspaces
+                ("A", "codex", str(plain / "x.md"), str(site)),
+                ("D", "opencode", str(other / "b.md"), str(site)),
+                ("D", "opencode", str(docs / "c.md"), str(site)),
+            ],
+            [  # w4: A is back to cwd-only rows — must stay file-only
+                ("A", "codex", None, str(site)),
+                ("C", "codex", None, str(other)),
+            ],
+        ]
+
+    def _replay(self, s, events, windows, gh, days, monkeypatch):
+        for rows, day in zip(windows, days):
+            monkeypatch.setattr(store_mod, "_now", lambda d=day: f"{d}T10:00:00+00:00")
+            for sid, prov, fp, cwd in rows:
+                _add_event(events, sid, fp, cwd=cwd, provider=prov)
+            s.attribute_incremental(events)
+            s.build_rollup(gh)
+
+    def _full(self, tmp, events, gh, day, monkeypatch):
+        monkeypatch.setattr(store_mod, "_now", lambda: f"{day}T10:00:00+00:00")
+        full = WorkspaceStore(tmp / "full.db")
+        full.backfill_from_events(events)
+        full.build_rollup(gh)
+        return full
+
+    def test_same_day_replay_equals_full_pass_exactly(self, env, monkeypatch):
+        s, events, site, other, plain, tmp = env
+        gh = tmp / "absent-github.db"
+        windows = self._windows(site, other, plain)
+        self._replay(s, events, windows, gh, ["2026-09-20"] * 4, monkeypatch)
+        full = self._full(tmp, events, gh, "2026-09-20", monkeypatch)
+        try:
+            assert _attr_rows(s) == _attr_rows(full)
+            assert _session_rollup(s) == _session_rollup(full)
+        finally:
+            full.close()
+        # Sanity on the scenario itself.
+        vias = {(r[0], r[3]) for r in _attr_rows(s)}
+        assert vias == {("A", "file"), ("B", "file"), ("C", "cwd"), ("D", "file")}
+
+    def test_multi_day_replay_differs_only_in_first_seen_day(self, env, monkeypatch):
+        """By design (#42): ``first_seen`` — hence the rollup ``day`` — is the
+        attribution pass's clock, not the event's. A replay spread over 4 days
+        dates each edge on the day its window ran; a later full pass dates all
+        of them on its own day. Edges and per-workspace totals must still match;
+        only the day buckets differ."""
+        s, events, site, other, plain, tmp = env
+        gh = tmp / "absent-github.db"
+        windows = self._windows(site, other, plain)
+        days = ["2026-09-20", "2026-09-21", "2026-09-22", "2026-09-23"]
+        self._replay(s, events, windows, gh, days, monkeypatch)
+        full = self._full(tmp, events, gh, "2026-09-23", monkeypatch)
+        try:
+            assert _attr_rows(s) == _attr_rows(full)
+            assert (_session_rollup(s, by_day=False)
+                    == _session_rollup(full, by_day=False))
+            assert {d for _, d in _session_rollup(full)} == {"2026-09-23"}
+            assert len({d for _, d in _session_rollup(s)}) > 1
+        finally:
+            full.close()
