@@ -409,13 +409,39 @@ class TestStdioTransport:
 
 
 # ── Tests contra la DB real del usuario ──
+#
+# Opt-in only (#44): the suite runs under a throwaway HOME (tests/conftest.py),
+# so the real events.db is resolved from the home captured BEFORE that override.
+# The helpers below open it through mcp_server._connect, which is mode=ro.
+# Under a temp HOME the captured home is that temp dir, so this only finds data
+# when the suite is launched with the developer's real HOME.
 
-REAL_DB = os.path.expanduser("~/.moolmesh/events.db")
+REAL_DATA_OPT_IN = os.environ.get("MOOLMESH_REAL_DATA_TESTS") == "1"
+REAL_DB = os.path.join(
+    os.environ.get("MOOLMESH_TEST_REAL_HOME", os.path.expanduser("~")),
+    ".moolmesh", "events.db",
+)
 
 
-@pytest.mark.skipif(not os.path.exists(REAL_DB), reason="No real events.db")
+@pytest.mark.skipif(
+    not REAL_DATA_OPT_IN,
+    reason="real-data tests are opt-in: set MOOLMESH_REAL_DATA_TESTS=1",
+)
+@pytest.mark.skipif(
+    REAL_DATA_OPT_IN and not os.path.exists(REAL_DB),
+    reason="MOOLMESH_REAL_DATA_TESTS=1 but no real events.db",
+)
 class TestRealDatabase:
     """Tests contra la DB real — validan que las queries funcionan con 105K+ eventos."""
+
+    def test_real_db_is_opened_read_only(self):
+        from hub.mcp_server import _connect
+        conn = _connect(REAL_DB)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                conn.execute("CREATE TABLE _moolmesh_ro_probe (x)")
+        finally:
+            conn.close()
 
     def test_recent_events_returns_data(self):
         from hub.mcp_server import _get_recent_events

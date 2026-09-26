@@ -1,5 +1,36 @@
 """Shared fixtures for tests."""
 
+# ── Home isolation (#44) — MUST run before anything imports the `hub` package ──
+#
+# Several modules derive ~/.moolmesh paths AT IMPORT TIME (config.CONFIG_DIR,
+# log.LOG_DIR, daemon.CONFIG_DIR, the stores' DEFAULT_DB_PATH, mcp_server's DB
+# constants), and DashboardServer() opens the default stores. A suite run with
+# the developer's real HOME therefore opened — and migrated — the real
+# ~/.moolmesh/*.db. Point HOME (and USERPROFILE, which Path.home() and
+# expanduser use on Windows) at a throwaway directory before the first `hub`
+# import, so every import-time and runtime home lookup lands there.
+#
+# Tests that read real data on purpose are opt-in (MOOLMESH_REAL_DATA_TESTS=1)
+# and get the captured real home via MOOLMESH_TEST_REAL_HOME — read-only.
+import atexit
+import os
+import shutil
+import sys
+import tempfile
+
+if any(m == "hub" or m.startswith("hub.") for m in sys.modules):
+    raise RuntimeError(
+        "tests/conftest.py: the `hub` package was imported before the home "
+        "override — tests would touch the real ~/.moolmesh. Import order broke."
+    )
+
+REAL_HOME = os.path.expanduser("~")
+TEST_HOME = tempfile.mkdtemp(prefix="moolmesh-test-home-")
+os.environ["MOOLMESH_TEST_REAL_HOME"] = REAL_HOME
+os.environ["HOME"] = TEST_HOME
+os.environ["USERPROFILE"] = TEST_HOME
+atexit.register(shutil.rmtree, TEST_HOME, ignore_errors=True)
+
 import logging
 import signal
 from pathlib import Path
@@ -7,6 +38,47 @@ from pathlib import Path
 import pytest
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def _home_derived_paths() -> dict[str, str]:
+    """Every import-time ~/.moolmesh path the package computes."""
+    from hub import config, daemon, log, mcp_server
+    from hub.cache import event_store, git_store, workspace_store
+
+    return {
+        "config.CONFIG_DIR": str(config.CONFIG_DIR),
+        "log.LOG_DIR": str(log.LOG_DIR),
+        "daemon.CONFIG_DIR": str(daemon.CONFIG_DIR),
+        "event_store.DEFAULT_DB_PATH": str(event_store.DEFAULT_DB_PATH),
+        "GitStore.DEFAULT_DB_PATH": str(git_store.GitStore.DEFAULT_DB_PATH),
+        "WorkspaceStore.DEFAULT_DB_PATH": str(
+            workspace_store.WorkspaceStore.DEFAULT_DB_PATH
+        ),
+        "mcp_server.EVENTS_DB": mcp_server.EVENTS_DB,
+        "mcp_server.GITHUB_DB": mcp_server.GITHUB_DB,
+        "mcp_server.WORKSPACE_DB": mcp_server.WORKSPACE_DB,
+    }
+
+
+def _outside_test_home() -> dict[str, str]:
+    root = os.path.realpath(TEST_HOME)
+    return {
+        name: path
+        for name, path in _home_derived_paths().items()
+        if os.path.commonpath([root, os.path.realpath(path)]) != root
+    }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_isolated_home():
+    """Fail the whole run if any store/config/log path escaped the temp home."""
+    leaked = _outside_test_home()
+    if leaked:
+        pytest.exit(
+            f"home isolation broken — paths outside {TEST_HOME}: {leaked}",
+            returncode=3,
+        )
+    yield
 
 # Silenciar logging durante tests para no contaminar pytest output
 logging.getLogger("hub").addHandler(logging.NullHandler())
