@@ -329,9 +329,57 @@ def _print_backfill_report(report, verbose: bool) -> None:
     print()
 
 
+def cmd_backfill_reparse(args: argparse.Namespace) -> None:
+    """``mool backfill --reparse codex``: re-ingest stored Codex sessions (#45)."""
+    from hub.backfill import ReparseReport, run_reparse_codex
+    from hub.cache.event_store import DEFAULT_DB_PATH, EventStore
+
+    real = args.yes and not args.dry_run
+    store = EventStore() if real else None
+    report = ReparseReport()
+    try:
+        run_reparse_codex(store, dry_run=not real, yes=args.yes,
+                          db_path=DEFAULT_DB_PATH, report=report)
+    finally:
+        if store is not None:
+            store.close()
+
+    title = "Re-parseo de Codex" + ("" if real else " (simulación, no escribe)")
+    print(f"\n  {bold(title)} — {report.elapsed:.1f}s")
+    print(f"  {'─' * 66}")
+    print(f"    sesiones de Codex guardadas:  {report.stored_sessions:>7,}")
+    print(f"    a re-parsear:                 {report.sessions:>7,}   "
+          f"({report.groups:,} grupos de rollouts)")
+    print(f"    eventos a borrar:             {report.events_to_delete:>7,}")
+    print(f"    eventos a insertar:           {report.events_to_insert:>7,}")
+    if real:
+        print(f"    eventos insertados:           {report.events_inserted:>7,}")
+    print(f"    ya al día:                    {report.up_to_date:>7,}")
+    print(f"    sin rollout en disco:         {report.no_rollout:>7,}   (no se tocan)")
+    print(f"    en ventana del daemon:        {report.in_window:>7,}   (no se tocan)")
+    if report.skipped_cloud:
+        print(yellow(f"    rollouts en la nube:          {report.skipped_cloud:>7,}   (no se tocan)"))
+    if report.failed:
+        print(red(f"    grupos revertidos por error:  {report.failed:>7,}   (ver log)"))
+    if report.backup_path:
+        print(green(f"  Backup previo de events.db: {report.backup_path}"))
+    if report.needs_yes:
+        print(yellow("  Para ejecutarlo: mool backfill --reparse codex --yes "
+                     "(se hace un backup de events.db antes de borrar)."))
+    if report.interrupted:
+        print(yellow("  Interrumpido: el grupo en curso se revirtió; volvé a correr."))
+    print()
+    if report.interrupted:
+        sys.exit(130)
+
+
 def cmd_backfill(args: argparse.Namespace) -> None:
     from hub.backfill import FILE_PROVIDERS, run_backfill
     from hub.cache.event_store import DEFAULT_DB_PATH, EventStore
+
+    if getattr(args, "reparse", None):
+        cmd_backfill_reparse(args)
+        return
 
     providers = FILE_PROVIDERS if args.provider in (None, "all") else (args.provider,)
     since = _parse_since(args.since)
@@ -908,6 +956,10 @@ def main() -> None:
                     help="Process at most N files with new data, then stop (re-run continues)")
     bf.add_argument("--verbose", action="store_true",
                     help="List processed/skipped files (masked under hide_project_names)")
+    bf.add_argument("--reparse", choices=["codex"],
+                    help="Re-ingest stored sessions with the current parser (backs up events.db)")
+    bf.add_argument("--yes", action="store_true",
+                    help="Confirm --reparse (without it, --reparse only simulates)")
     bf.add_argument("--full", action="store_true", help=argparse.SUPPRESS)  # legacy no-op
 
     # repo (con sub-subcommands)
