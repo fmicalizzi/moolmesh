@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,8 +46,13 @@ class ProjectDiscovery:
         qwen_base: Path | None = None,
         opencode_base: Path | None = None,
         cursor_base: Path | None = None,
+        skip_dir: Callable[[Path], bool] | None = None,
     ):
         home = Path.home()
+        # Asked before listing any directory; True = don't list it. Used by the
+        # history walks (backfill / catch-up, #45) to avoid listing cloud-only
+        # directories — listing one triggers its download. None = list all.
+        self._skip_dir = skip_dir
         self.claude_base = claude_base or home / ".claude" / "projects"
         self.codex_base = codex_base or home / ".codex"
         self.qwen_base = qwen_base or home / ".qwen" / "projects"
@@ -54,6 +60,9 @@ class ProjectDiscovery:
             home / ".local" / "share" / "opencode" / "opencode.db"
         )
         self.cursor_base = cursor_base or default_cursor_base()
+
+    def _skip(self, path: Path) -> bool:
+        return self._skip_dir is not None and self._skip_dir(path)
 
     # ── Public API ──────────────────────────────────────────────
 
@@ -68,11 +77,13 @@ class ProjectDiscovery:
 
     def discover_claude(self) -> list[DiscoveredProject]:
         projects: list[DiscoveredProject] = []
-        if not self.claude_base.is_dir():
+        if not self.claude_base.is_dir() or self._skip(self.claude_base):
             return projects
 
         for project_dir in sorted(self.claude_base.iterdir()):
             if not project_dir.is_dir() or project_dir.name.startswith("."):
+                continue
+            if self._skip(project_dir):
                 continue
             encoded = project_dir.name
             decoded = self.decode_project_path(encoded)
@@ -84,7 +95,7 @@ class ProjectDiscovery:
             for item in project_dir.iterdir():
                 if item.is_file() and item.suffix == ".jsonl":
                     session_files.append(item)
-                elif item.is_dir():
+                elif item.is_dir() and not self._skip(item):
                     # Session directory — may contain JSONL and subagents/
                     for sub_item in item.iterdir():
                         if sub_item.is_file() and sub_item.suffix == ".jsonl":
@@ -112,7 +123,7 @@ class ProjectDiscovery:
         """
         projects: list[DiscoveredProject] = []
         sessions_dir = self.codex_base / "sessions"
-        if not sessions_dir.is_dir():
+        if not sessions_dir.is_dir() or self._skip(sessions_dir):
             return projects
 
         # Build rollout_path -> cwd mapping from SQLite
@@ -144,6 +155,9 @@ class ProjectDiscovery:
         all_rollouts: list[Path] = []
         all_on_disk: list[Path] = []
         for root, _dirs, files in os.walk(sessions_dir):
+            if self._skip_dir is not None:
+                # Prune in place so os.walk never lists a skipped directory.
+                _dirs[:] = [d for d in _dirs if not self._skip(Path(root) / d)]
             for f in files:
                 if f.startswith("rollout-") and f.endswith(".jsonl"):
                     full = Path(root) / f
@@ -195,7 +209,7 @@ class ProjectDiscovery:
 
     def discover_qwen(self) -> list[DiscoveredProject]:
         projects: list[DiscoveredProject] = []
-        if not self.qwen_base.is_dir():
+        if not self.qwen_base.is_dir() or self._skip(self.qwen_base):
             return projects
 
         for project_dir in sorted(self.qwen_base.iterdir()):
@@ -207,7 +221,7 @@ class ProjectDiscovery:
 
             chats_dir = project_dir / "chats"
             session_files: list[Path] = []
-            if chats_dir.is_dir():
+            if chats_dir.is_dir() and not self._skip(chats_dir):
                 session_files = sorted(
                     p for p in chats_dir.iterdir()
                     if p.is_file() and p.suffix == ".jsonl"
