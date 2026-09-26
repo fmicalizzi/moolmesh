@@ -303,9 +303,9 @@ class DashboardServer:
     def start(self) -> None:
         """Start harvesters and HTTP server.
 
-        No gap_fill, no backfill, no second pass. The harvester's first cycle
-        reads from the last SQLite offset (or 0 for new files), which IS the
-        backfill. No race conditions possible — each file has one reader.
+        Each harvester reads its live window from the last SQLite offset (or 0
+        for new files) and, after an outage, catches up on files missed while
+        the daemon was down (#45). Older history is ``mool backfill``'s job.
         """
         # Ensure logging is initialized (idempotent if already called from CLI)
         from hub.log import setup

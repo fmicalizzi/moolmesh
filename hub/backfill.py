@@ -81,6 +81,24 @@ class BackfillReport:
     interrupted: bool = False
 
 
+class EventsDbUnreadable(RuntimeError):
+    """events.db exists but could not be opened read-only."""
+
+
+def _open_ro(db_path: Path) -> sqlite3.Connection:
+    """Read-only connection to an existing events.db, or EventsDbUnreadable.
+
+    Failing loudly matters: a silently empty view would make a dry-run report
+    every file as pending and a re-parse find nothing to compare.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        return conn
+    except sqlite3.Error as exc:
+        raise EventsDbUnreadable(f"{db_path}: {exc}") from exc
+
+
 class _ReadOnlyOffsets:
     """Offset lookups for ``--dry-run`` without opening events.db for writing.
 
@@ -91,10 +109,12 @@ class _ReadOnlyOffsets:
     def __init__(self, db_path: Path):
         self._conn: sqlite3.Connection | None = None
         if db_path.exists():
-            try:
-                self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-                self._conn.execute("SELECT 1 FROM file_registry LIMIT 1")
-            except sqlite3.Error:
+            self._conn = _open_ro(db_path)
+            has_registry = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_registry'"
+            ).fetchone()
+            if not has_registry:  # a DB no watcher has written to yet
+                self._conn.close()
                 self._conn = None
 
     def get_offset(self, fingerprint: str) -> int | None:
@@ -321,6 +341,7 @@ class ReparseReport:
     up_to_date: int = 0            # sessions whose rows already match a re-parse
     no_rollout: int = 0            # stored sessions with no rollout on disk
     in_window: int = 0             # sessions with a rollout the daemon is live-reading
+    unreadable: int = 0            # sessions with a rollout that failed to stat/read
     skipped_cloud: int = 0
     failed: int = 0                # groups rolled back after an error
     backup_path: str = ""
@@ -431,7 +452,7 @@ def run_reparse_codex(
         report.elapsed = time.monotonic() - t0
         return report
 
-    ro = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    ro = _open_ro(db_path)
     try:
         stored = {r[0] for r in ro.execute(
             "SELECT DISTINCT session_id FROM events "
@@ -494,7 +515,9 @@ def run_reparse_codex(
             reasons = {blocked.get(f"f:{f}") for f in comp["files"]} - {None}
             if "cloud" in reasons:
                 report.skipped_cloud += len(hit)
-            elif "window" in reasons or "error" in reasons:
+            elif "error" in reasons:
+                report.unreadable += len(hit)
+            elif "window" in reasons:
                 report.in_window += len(hit)
             else:
                 targets.append(comp)
