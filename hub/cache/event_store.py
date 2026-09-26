@@ -569,12 +569,15 @@ class EventStore:
                             WHERE e.session_id = s.id AND e.provider = s.provider) AS event_count,
                            s.is_active, s.initial_prompt, s.metadata_json,
                            s.ended_at,
-                           s.ended_reason,
-                           (SELECT strftime('%Y-%m-%dT%H:%M:%SZ', MAX(e.created_at), 'unixepoch')
-                            FROM events e
-                            WHERE e.session_id = s.id AND e.provider = s.provider) AS last_activity_at
+                           s.ended_reason
                     FROM sessions s WHERE s.id = ?
                 """, (session_id,)).fetchone()
+                if row:
+                    from hub.cache.workspace_store import read_session_activity
+                    activity = read_session_activity(conn, session_id).get(
+                        (session_id, row[1] or ""))
+                else:
+                    activity = None
             except sqlite3.OperationalError:
                 return None
         if not row:
@@ -596,11 +599,15 @@ class EventStore:
                 d["metadata"] = json.loads(row[16])
             except (json.JSONDecodeError, TypeError):
                 pass
-        # Ingest-based last activity (MAX(events.created_at)); monotonic and
-        # reliable, unlike last_event_at which carries the original (possibly
-        # days-old) message timestamp in resumed sessions. Always populated for
-        # any session that has at least one event.
-        d["last_activity_at"] = row[19] or ""
+        # Ingest-based last activity (MAX(events.created_at)) for live rows;
+        # monotonic and reliable, unlike last_event_at which carries the
+        # original (possibly days-old) message timestamp in resumed sessions.
+        # Imported history (backfill / re-parse) is dated by its event time
+        # instead (#53, read_session_activity). Always populated for any
+        # session that has at least one event.
+        d["last_activity_at"] = (
+            activity.strftime("%Y-%m-%dT%H:%M:%SZ") if activity else ""
+        )
         return d
 
     def get_session_events(

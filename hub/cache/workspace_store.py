@@ -332,6 +332,87 @@ def _event_ts(timestamp: str | None, created_at: float | None) -> str | None:
     return dt.isoformat(timespec="microseconds") if dt is not None else None
 
 
+def _historical_event_dt(timestamp: str | None, created_at: float | None) -> datetime | None:
+    """Activity time of one HISTORICAL event row (#53), as aware UTC, or ``None``.
+
+    Backfill / catch-up / re-parse insert old events with ``created_at = now``,
+    so for those rows the event's own ``timestamp`` is the only honest clock.
+    Parsed via :func:`_parse_ts` (mixed ISO formats); a bare numeric epoch —
+    seconds, or milliseconds (OpenCode) when > 1e11 — is accepted too. An
+    unparseable/empty timestamp falls back to ``created_at`` (the ingest epoch):
+    a documented, visible degradation rather than a silently dropped session.
+    """
+    dt = _parse_ts(timestamp)
+    if dt is None and timestamp:
+        try:
+            n = float(timestamp.strip())
+            dt = datetime.fromtimestamp(n / 1000.0 if n > 1e11 else n, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            dt = None
+    if dt is None and created_at is not None:
+        try:
+            dt = datetime.fromtimestamp(float(created_at), tz=timezone.utc)
+        except (TypeError, ValueError, OverflowError, OSError):
+            dt = None
+    return dt
+
+
+def read_session_activity(
+    conn: sqlite3.Connection,
+    session_id: str | None = None,
+) -> dict[tuple[str, str], datetime]:
+    """THE per-session activity clock over an open events.db connection (#53).
+
+    ``{(session_id, provider or ''): aware-UTC datetime}``, the max of:
+
+      * ``MAX(created_at)`` over LIVE rows (``historical = 0``) — the ingest
+        epoch, kept for live rows because a resumed session replays original
+        timestamps spanning months (#18); the ingest clock does not;
+      * the parsed event time (:func:`_historical_event_dt`) over HISTORICAL
+        rows (``historical = 1``: backfill / catch-up / re-parse, #45), whose
+        ``created_at`` is the import time, not when the work happened.
+
+    Timestamps are parsed in Python (formats are mixed), never ``MAX()``-ed as
+    strings in SQL. A pre-#45 events.db without the ``historical`` column keeps
+    the old all-rows ``MAX(created_at)`` behavior. ``session_id`` narrows the
+    scan to one session (indexed). Shared by derived state, the production view
+    and session detail — one definition of "when did this session happen".
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
+    has_hist = "historical" in cols
+    where = "session_id IS NOT NULL AND session_id != ''"
+    params: tuple[Any, ...] = ()
+    if session_id is not None:
+        where += " AND session_id = ?"
+        params = (session_id,)
+    out: dict[tuple[str, str], datetime] = {}
+
+    def _bump(key: tuple[str, str], dt: datetime | None) -> None:
+        if dt is not None and (key not in out or dt > out[key]):
+            out[key] = dt
+
+    live_where = where + (" AND historical = 0" if has_hist else "")
+    for sid, prov, mx in conn.execute(
+        f"SELECT session_id, provider, MAX(created_at) FROM events "
+        f"WHERE {live_where} GROUP BY session_id, provider",
+        params,
+    ):
+        if mx is None:
+            continue
+        try:
+            _bump((sid, prov or ""), datetime.fromtimestamp(float(mx), tz=timezone.utc))
+        except (OverflowError, OSError, ValueError):
+            continue
+    if has_hist:
+        for sid, prov, ts, created_at in conn.execute(
+            f"SELECT session_id, provider, timestamp, created_at FROM events "
+            f"WHERE {where} AND historical = 1",
+            params,
+        ):
+            _bump((sid, prov or ""), _historical_event_dt(ts, created_at))
+    return out
+
+
 def _min_ts(a: str | None, b: str | None) -> str | None:
     """NULL-safe minimum of two ``_event_ts`` strings."""
     if a is None:
@@ -996,8 +1077,10 @@ class WorkspaceStore:
           * ``pausado``     — quiet + nothing open and no measurable outcome.
 
         **Honest clocks only.** Quiescence age is measured from the *real* last
-        activity: ``max`` of the session ingest epoch (``events.created_at`` — the
-        honest metric even on resumed sessions, #18), ``path_touches.last_seen``,
+        activity: ``max`` of the session activity clock
+        (:func:`read_session_activity` — ingest epoch for live rows, honest even
+        on resumed sessions #18; event time for imported history #53),
+        ``path_touches.last_seen``,
         and ``git_commits.timestamp``, each normalized to aware UTC (epoch via
         ``fromtimestamp(..., utc)``, the two string clocks via ``_parse_ts``).
         NEVER ``path_attributions.first_seen`` (a backfill artifact) and NEVER
@@ -1038,12 +1121,12 @@ class WorkspaceStore:
 
         # Readers that open their own connections / take the store lock: call
         # them OUTSIDE the lock block below (never re-enter self._lock). The
-        # session-ingest scan over events.db can be handed in by a caller that
-        # already computed it (the production view runs the same MAX(created_at)
-        # group-by), so the hot path pays for that ~194MB scan ONCE, not twice
+        # session-activity scan over events.db can be handed in by a caller that
+        # already computed it (the production view runs the same
+        # read_session_activity), so the hot path pays for that ~194MB scan ONCE, not twice
         # (invariant §2.4 — the dashboard stays fast).
         sess_ingest = (
-            self._read_session_ingest(events_db_path)
+            self._read_session_activity(events_db_path)
             if session_ingest is None else session_ingest
         )
         git_last = self._read_git_latest_by_workspace(github_db_path)
@@ -1139,17 +1222,14 @@ class WorkspaceStore:
         return out
 
     @staticmethod
-    def _read_session_ingest(
+    def _read_session_activity(
         events_db_path: str | Path,
     ) -> dict[tuple[str, str], datetime]:
-        """Real session ingest recency from events.db (read-only).
+        """Real session activity recency from events.db (read-only).
 
-        ``{(session_id, provider): aware-UTC datetime}`` where the datetime is
-        ``MAX(events.created_at)`` — the *ingestion* epoch, the honest activity
-        clock (#18: original timestamps span months on resumed sessions, the
-        ingest epoch does not). ``created_at`` is a ``REAL`` epoch, so it is
-        converted with ``fromtimestamp(..., utc)`` — ``_parse_ts`` (string clocks)
-        cannot parse it.
+        ``{(session_id, provider): aware-UTC datetime}`` from
+        :func:`read_session_activity`: the ingest epoch for live rows (#18),
+        the parsed event time for historical rows (#53).
         """
         if not os.path.exists(str(events_db_path)):
             return {}
@@ -1157,26 +1237,12 @@ class WorkspaceStore:
             src = sqlite3.connect(f"file:{events_db_path}?mode=ro", uri=True, timeout=5)
         except sqlite3.OperationalError:
             return {}
-        out: dict[tuple[str, str], datetime] = {}
         try:
-            for sid, prov, mx in src.execute(
-                "SELECT session_id, provider, MAX(created_at) FROM events "
-                "WHERE session_id IS NOT NULL AND session_id != '' "
-                "GROUP BY session_id, provider"
-            ):
-                if mx is None:
-                    continue
-                try:
-                    out[(sid, prov or "")] = datetime.fromtimestamp(
-                        float(mx), tz=timezone.utc
-                    )
-                except (OverflowError, OSError, ValueError):
-                    continue
+            return read_session_activity(src)
         except sqlite3.OperationalError:
             return {}
         finally:
             src.close()
-        return out
 
     def _read_github_state(
         self, github_db_path: str | Path

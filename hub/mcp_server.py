@@ -831,7 +831,7 @@ _DELIVERABLE_EXTS = _IMAGE_EXTS | _VIDEO_EXTS
 
 
 def _local_day(epoch: float) -> str:
-    """Bucket an ingestion epoch to its LOCAL calendar day (YYYY-MM-DD).
+    """Bucket a session-activity epoch to its LOCAL calendar day (YYYY-MM-DD).
 
     Local, not UTC — matching the #23 rollup timezone fix so the production
     strip agrees with the rest of the portfolio on which day work landed.
@@ -850,9 +850,12 @@ def _portfolio_production(
 ) -> dict[str, Any]:
     """Per-project production over time — the honest-metric chart (#24 Stage 2).
 
-    EFFORT, not duration: each session is a unit of work dated by
-    ``MAX(events.created_at)`` — the *ingestion* epoch (honest even on resumed
-    sessions, whose original timestamps span months; #18). Sessions are
+    EFFORT, not duration: each session is a unit of work dated by its activity
+    clock (``read_session_activity``): ``MAX(events.created_at)`` — the
+    *ingestion* epoch — over live rows (honest even on resumed sessions, whose
+    original timestamps span months; #18), and the parsed event time over
+    imported history (backfill / catch-up / re-parse, #53), whose ingest epoch
+    is the import moment, not the work. Sessions are
     aggregated over the CANONICAL project (``workspace_classification.project_key``
     from Stage 1), so harness/scratchpad folders fold into their real project
     instead of masquerading as projects. Per project we return a per-day,
@@ -913,7 +916,7 @@ def _portfolio_production(
         sess_projects: dict[tuple[str, str], set[str]] = {}
         labels: dict[str, str] = {}
         for r in crows:
-            key = (r["session_id"], r["provider"])
+            key = (r["session_id"], r["provider"] or "")
             sess_projects.setdefault(key, set()).add(r["project_key"])
             if r["project_key"] not in labels and r["project_label"]:
                 labels[r["project_key"]] = r["project_label"]
@@ -943,13 +946,14 @@ def _portfolio_production(
         except sqlite3.OperationalError:
             measurable = False
 
-        # 3. session (id, provider) → ingestion day (MAX created_at, local).
-        erows = econn.execute("""
-            SELECT session_id, provider, MAX(created_at) AS mx
-            FROM events
-            WHERE session_id IS NOT NULL
-            GROUP BY session_id, provider
-        """).fetchall()
+        # 3. session (id, provider) → activity clock (#53): ingest epoch for
+        #    live rows, event time for imported history. Bucketed to a local day
+        #    below; the same map feeds the state layer (one events.db scan).
+        from hub.cache.workspace_store import read_session_activity
+        try:
+            activity = read_session_activity(econn)
+        except sqlite3.OperationalError:
+            return empty
     finally:
         wconn.close()
         econn.close()
@@ -963,15 +967,14 @@ def _portfolio_production(
     # 4. Fold sessions into their canonical project(s), per day, per provider.
     proj: dict[str, dict[str, Any]] = {}
     providers_seen: set[str] = set()
-    for r in erows:
-        key = (r["session_id"], r["provider"])
+    for key, dt in activity.items():
         pkeys = sess_projects.get(key)
-        if not pkeys or r["mx"] is None:
+        if not pkeys:
             continue
-        day = _local_day(r["mx"])
+        day = _local_day(dt.timestamp())
         if day < start or day > today:
             continue
-        provider = r["provider"]
+        provider = key[1]
         providers_seen.add(provider)
         for pk in pkeys:
             g = proj.setdefault(pk, {
@@ -1001,29 +1004,17 @@ def _portfolio_production(
     outcome: dict[str, Any] = {}
     states: dict[str, Any] = {}
     try:
-        import datetime as _dtmod
         from pathlib import Path
         from hub.cache.workspace_store import WorkspaceStore
-        # Reuse the ingest map already computed above (erows = MAX(created_at)
-        # per session): the state layer needs the SAME scan, so hand it in and
-        # the ~194MB events.db is read once, not twice (hot-path invariant).
-        ingest_map: dict[tuple[str, str], _dtmod.datetime] = {}
-        for r in erows:
-            if r["mx"] is None:
-                continue
-            try:
-                ingest_map[(r["session_id"], r["provider"] or "")] = (
-                    _dtmod.datetime.fromtimestamp(
-                        float(r["mx"]), tz=_dtmod.timezone.utc)
-                )
-            except (OverflowError, OSError, ValueError):
-                continue
+        # Reuse the activity map already computed above: the state layer needs
+        # the SAME scan, so hand it in and events.db is read once, not twice
+        # (hot-path invariant).
         store = WorkspaceStore(Path(workspace_db))
         try:
             outcome = store.read_github_outcome(workspace_db, github_db)
             try:
                 states = store.derive_project_states(
-                    events_db, github_db, session_ingest=ingest_map)
+                    events_db, github_db, session_ingest=activity)
             except Exception:
                 _log.exception("derive_project_states failed; states omitted")
                 states = {}
@@ -1495,7 +1486,9 @@ if _mcp is not None:
 
         Métrica honesta: cada sesión es una unidad de trabajo fechada por
         `MAX(events.created_at)` (epoch de INGESTA — honesto incluso en sesiones
-        resumidas, cuyos timestamps originales abarcan meses), agregada sobre el
+        resumidas, cuyos timestamps originales abarcan meses) en las filas en
+        vivo, y por la hora real del evento en la historia importada (backfill /
+        catch-up / re-parseo, #53), agregada sobre el
         proyecto CANÓNICO (`workspace_classification.project_key` de la Etapa 1),
         así el harness/scratchpad se pliega en su proyecto real. Por proyecto
         devuelve la serie diaria por provider (la tira de contribución),
