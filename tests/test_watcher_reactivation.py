@@ -34,7 +34,7 @@ class TestFileReactivation:
         store.save_offset(fp, "claude", str(session), session.stat().st_size)
 
         # Verify offset is in SQLite
-        assert store.get_offset(fp) == session.stat().st_size
+        assert store.get_offset(fp, str(session)) == session.stat().st_size
         store.close()
 
     def test_offset_survives_process_restart(self, tmp_path):
@@ -62,7 +62,7 @@ class TestFileReactivation:
 
         # Reopen in second "process"
         store2 = EventStore(db_path=db)
-        assert store2.get_offset(fp) == offset_before
+        assert store2.get_offset(fp, str(session)) == offset_before
         store2.close()
 
     def test_no_events_lost_during_stale_window(self, tmp_path):
@@ -92,5 +92,5 @@ class TestFileReactivation:
             )
 
         # Offset should still be 0, so harvester reads everything
-        assert store.get_offset(fp) == 0
+        assert store.get_offset(fp, str(session)) == 0
         store.close()

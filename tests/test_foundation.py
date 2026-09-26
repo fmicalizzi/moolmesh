@@ -173,7 +173,7 @@ class TestTransactionalOffset:
         assert store.count() == 1
 
         # Verify offset stored
-        offset = store.get_offset("fp123")
+        offset = store.get_offset("fp123", "/tmp/file.jsonl")
         assert offset == 500
 
         store.close()
@@ -184,7 +184,7 @@ class TestTransactionalOffset:
 
         db = tmp_path / "test.db"
         store = EventStore(db_path=db)
-        assert store.get_offset("unknown") is None
+        assert store.get_offset("unknown", "/tmp/unknown.jsonl") is None
         store.close()
 
     def test_offset_survives_reopen(self, tmp_path):
@@ -197,5 +197,5 @@ class TestTransactionalOffset:
         store1.close()
 
         store2 = EventStore(db_path=db)
-        assert store2.get_offset("fp456") == 1234
+        assert store2.get_offset("fp456", "/tmp/f.jsonl") == 1234
         store2.close()

@@ -274,11 +274,11 @@ class TestBackfillChunkingAndInterrupts:
         real = ClaudeWatcher.harvest_history_file
         n = {"calls": 0}
 
-        def interrupting(self, path, fp):
+        def interrupting(self, path, fp, offset=None):
             n["calls"] += 1
             if n["calls"] == 2:
                 raise KeyboardInterrupt
-            return real(self, path, fp)
+            return real(self, path, fp, offset)
 
         monkeypatch.setattr(ClaudeWatcher, "harvest_history_file", interrupting)
         store = EventStore(db_path=env["db"])

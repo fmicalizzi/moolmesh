@@ -10,6 +10,11 @@ DB and are unaffected) and ingests them through the watcher's own path:
 * Resumable: each file restarts from its stored offset (0 new bytes = no-op),
   so an interrupted run simply continues on the next invocation.
 * Idempotent: the event fingerprint + ``INSERT OR IGNORE``.
+* Collision recovery (#50): files that share their first KB with another file
+  shared ONE offset before ``file_registry`` was keyed by (fingerprint, path),
+  so each skipped part of its own content. Such files are re-read once from 0
+  (the event fingerprint lets only the missing events in) and reported as
+  "recuperados por colisión".
 * No clash with a running daemon: only files OLDER than the live window are
   processed; the daemon owns everything newer.
 * No SSE: this is a separate process and never touches ``sse_buffer``.
@@ -27,7 +32,12 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hub.cache.event_store import EventStore, file_fingerprint
+from hub.cache.event_store import (
+    EventStore,
+    file_fingerprint,
+    registry_path,
+    resolve_registry_offset,
+)
 from hub.cloudfiles import PlaceholderSkipper, is_cloud_placeholder
 
 _log = logging.getLogger("moolmesh.backfill")
@@ -57,6 +67,8 @@ class ProviderReport:
     skipped_empty: int = 0     # 0-byte files
     cloud_dirs: int = 0        # dataless directories not listed
     fingerprint_collisions: int = 0  # distinct files sharing a 1 KB fingerprint
+    collision_files: int = 0   # of those, re-read from 0 to recover (#50)
+    collision_recovered: int = 0  # events those re-reads inserted
     pending_bytes: int = 0     # bytes past the stored offsets (processed files)
     events_parsed: int = 0
     events_inserted: int = 0
@@ -108,6 +120,7 @@ class _ReadOnlyOffsets:
 
     def __init__(self, db_path: Path):
         self._conn: sqlite3.Connection | None = None
+        self._has_legacy: bool | None = None
         if db_path.exists():
             self._conn = _open_ro(db_path)
             has_registry = self._conn.execute(
@@ -117,13 +130,35 @@ class _ReadOnlyOffsets:
                 self._conn.close()
                 self._conn = None
 
-    def get_offset(self, fingerprint: str) -> int | None:
+    def _rows(self, fingerprint: str) -> list[tuple]:
+        """(file_path, last_offset, updated_at, legacy) rows for one key.
+
+        Works on both registry shapes: a DB the new code hasn't migrated yet
+        has no ``legacy`` column, and every one of its rows is legacy.
+        """
         if self._conn is None or not fingerprint:
-            return None
-        row = self._conn.execute(
-            "SELECT last_offset FROM file_registry WHERE fingerprint = ?", (fingerprint,)
-        ).fetchone()
-        return row[0] if row else None
+            return []
+        if self._has_legacy is None:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(file_registry)")}
+            self._has_legacy = "legacy" in cols
+        legacy = "legacy" if self._has_legacy else "1"
+        return self._conn.execute(
+            f"SELECT file_path, last_offset, updated_at, {legacy} FROM file_registry"
+            " WHERE fingerprint = ?",
+            (fingerprint,),
+        ).fetchall()
+
+    def get_offset(self, fingerprint: str, file_path: str | Path) -> int | None:
+        """Same resolution as ``EventStore.get_offset``, without adopting."""
+        rows = self._rows(fingerprint)
+        return resolve_registry_offset([r[:3] for r in rows], file_path)[0]
+
+    def is_legacy_offset(self, fingerprint: str, file_path: str | Path) -> bool | None:
+        want = registry_path(file_path)
+        for row_path, _off, _upd, legacy in self._rows(fingerprint):
+            if registry_path(row_path) == want:
+                return bool(legacy)
+        return None
 
     def session_count(self, provider: str) -> int:
         if self._conn is None:
@@ -225,9 +260,29 @@ def run_backfill(
                 files = []
             rep.cloud_dirs = len(skipper.skipped)
             rep.skipped_paths.extend(("nube (directorio)", str(d)) for d in skipper.skipped)
-            seen_fp: dict[str, Path] = {}
+            entries = _sorted_by_mtime(files)
 
-            for path, st in _sorted_by_mtime(files):
+            # Fingerprint every local file first — in-window ones too — so the
+            # files sharing a first KB are known before any is processed (#50).
+            cloud: set[Path] = set()
+            keys: dict[Path, str] = {}
+            groups: dict[str, set[str]] = {}
+            for path, st in entries:
+                if st is None:
+                    continue
+                if is_cloud_placeholder(path):
+                    cloud.add(path)
+                    continue
+                if st.st_size == 0:
+                    continue
+                key = watcher.registry_key(path)
+                if key:
+                    keys[path] = key
+                    groups.setdefault(key, set()).add(registry_path(path))
+            collided = {k for k, paths in groups.items() if len(paths) > 1}
+            rep.fingerprint_collisions = sum(len(groups[k]) - 1 for k in collided)
+
+            for path, st in entries:
                 rep.seen += 1
                 if st is None:
                     rep.skipped_error += 1
@@ -236,26 +291,26 @@ def run_backfill(
                 if st.st_mtime >= window_start:
                     rep.in_window += 1
                     continue
-                if is_cloud_placeholder(path):
+                if path in cloud:
                     rep.skipped_cloud += 1
                     rep.skipped_paths.append(("nube", str(path)))
                     continue
                 if st.st_size == 0:
                     rep.skipped_empty += 1
                     continue
-                fp = file_fingerprint(path)
+                fp = keys.get(path)
                 if not fp:
                     rep.skipped_error += 1
                     rep.skipped_paths.append(("error", str(path)))
                     continue
-                if fp in seen_fp and seen_fp[fp] != path:
-                    # Same first 1 KB as another file: both share ONE offset row
-                    # (a pre-existing file_registry limitation). Counted so it is
-                    # visible; processed like the live watcher would.
-                    rep.fingerprint_collisions += 1
-                seen_fp.setdefault(fp, path)
 
-                offset = offsets.get_offset(fp) or 0
+                offset = offsets.get_offset(fp, path) or 0
+                # A collided file with no row of its own, or whose row dates
+                # from the shared-offset registry, may have skipped content:
+                # re-read it from 0 once; the event fingerprint dedupes.
+                recover = fp in collided and offsets.is_legacy_offset(fp, path) is not False
+                if recover:
+                    offset = 0
                 if offset >= st.st_size:
                     rep.up_to_date += 1
                     continue
@@ -267,19 +322,25 @@ def run_backfill(
                     rep.processed += 1
                     rep.pending_bytes += st.st_size - offset
                     rep.processed_paths.append(str(path))
+                    if recover:
+                        rep.collision_files += 1
                     if remaining is not None:
                         remaining -= 1
                     continue
 
                 try:
-                    parsed, inserted = watcher.harvest_history_file(path, fp)
+                    parsed, inserted = watcher.harvest_history_file(path, fp, offset=offset)
                 except Exception:
                     # One bad file never aborts the run: log it and move on.
                     _log.warning("backfill: failed to ingest %s", path, exc_info=True)
                     rep.skipped_error += 1
                     rep.skipped_paths.append(("error", str(path)))
                     continue
-                if parsed == 0 and inserted == 0 and (offsets.get_offset(fp) or 0) == offset:
+                if recover:
+                    store.clear_legacy_offset(fp, path)
+                    rep.collision_files += 1
+                    rep.collision_recovered += inserted
+                if parsed == 0 and inserted == 0 and (offsets.get_offset(fp, path) or 0) == offset:
                     # Only a trailing partial line past the offset: nothing to do yet.
                     rep.up_to_date += 1
                     continue

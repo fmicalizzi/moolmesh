@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -95,11 +96,105 @@ def _mig_3_historical_flag(conn: sqlite3.Connection) -> None:
     )
 
 
+# ``file_registry`` identifies a file by (key, path): ``fingerprint`` is the
+# content fingerprint of the first KB (or a provider's stable key, see
+# ``BaseHarvester.registry_key``) and ``file_path`` is ``registry_path()``.
+# ``legacy = 1`` marks offsets written while the table was keyed by the
+# fingerprint alone (#50): two files sharing their first KB shared that offset,
+# so ``mool backfill`` re-reads such files from 0 once and clears the flag.
+_REGISTRY_DDL = """
+    CREATE TABLE IF NOT EXISTS {name} (
+        fingerprint TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        last_offset INTEGER NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL,
+        legacy INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (fingerprint, file_path)
+    )
+"""
+
+
+def registry_path(path: str | Path) -> str:
+    """The one normalization of a path used as part of a ``file_registry`` key.
+
+    Every read and write of the registry goes through it: a lookup that
+    normalized differently from the write would miss its own row and re-read
+    the file from 0 on every poll. ``normcase`` folds case on Windows only.
+    """
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _mig_4_registry_path_key(conn: sqlite3.Connection) -> None:
+    """Key ``file_registry`` by (fingerprint, file_path) — issue #50.
+
+    SQLite cannot change a PRIMARY KEY in place, and a new unique index on
+    (fingerprint, file_path) would not help while the old PK still rejects a
+    second path per fingerprint, so the table is rebuilt: new table, copy every
+    row (paths through ``registry_path``, ``legacy = 1``), drop, rename — in
+    one explicit transaction. Idempotent: a composite PK means it already ran
+    (or the DB was created fresh by ``_ensure_registry``); a leftover
+    ``file_registry_new`` from an interrupted run is dropped first.
+    """
+    info = conn.execute("PRAGMA table_info(file_registry)").fetchall()
+    pk = [r[1] for r in sorted((r for r in info if r[5]), key=lambda r: r[5])]
+    if pk == ["fingerprint", "file_path"]:
+        return
+    rows = conn.execute(
+        "SELECT fingerprint, provider, file_path, last_offset, updated_at FROM file_registry"
+    ).fetchall()
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DROP TABLE IF EXISTS file_registry_new")
+        conn.execute(_REGISTRY_DDL.format(name="file_registry_new"))
+        conn.executemany(
+            """INSERT OR IGNORE INTO file_registry_new
+                   (fingerprint, provider, file_path, last_offset, updated_at, legacy)
+               VALUES (?, ?, ?, ?, ?, 1)""",
+            [(fp, prov, registry_path(path), off, upd) for fp, prov, path, off, upd in rows],
+        )
+        conn.execute("DROP TABLE file_registry")
+        conn.execute("ALTER TABLE file_registry_new RENAME TO file_registry")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def resolve_registry_offset(
+    rows: list[tuple[str, int, float]], path: str | Path
+) -> tuple[int | None, str | None]:
+    """Pick the offset for ``path`` among one key's registry rows (#50).
+
+    ``rows`` are ``(file_path, last_offset, updated_at)`` sharing a key.
+    Returns ``(offset, adopt_from)``:
+
+    * the row for this exact path → its offset;
+    * else a row whose file no longer exists on disk → a rename: its offset,
+      and ``adopt_from`` names the row to move onto the new path (the reason
+      the key is content-based in the first place);
+    * else every other row points at a live file → a collision: a different
+      file that starts with the same bytes, read from 0 (``None``).
+    """
+    want = registry_path(path)
+    for row_path, offset, _updated in rows:
+        if registry_path(row_path) == want:
+            return offset, None
+    gone = [r for r in rows if not os.path.exists(r[0])]
+    if gone:
+        row_path, offset, _updated = max(gone, key=lambda r: r[2])
+        return offset, row_path
+    return None, None
+
+
 # Versioned, additive migrations for events.db — each runs exactly once.
 _EVENT_STORE_MIGRATIONS = [
     (1, "session_lifecycle", _mig_1_session_lifecycle),
     (2, "watcher_state", _mig_2_watcher_state),
     (3, "historical_flag", _mig_3_historical_flag),
+    (4, "registry_path_key", _mig_4_registry_path_key),
 ]
 
 
@@ -250,16 +345,12 @@ class EventStore:
         self._conn.commit()
 
     def _ensure_registry(self) -> None:
-        """Create the file_registry table if it doesn't exist."""
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS file_registry (
-                fingerprint TEXT PRIMARY KEY,
-                provider TEXT NOT NULL,
-                file_path TEXT NOT NULL,
-                last_offset INTEGER NOT NULL DEFAULT 0,
-                updated_at REAL NOT NULL
-            )
-        """)
+        """Create the file_registry table if it doesn't exist.
+
+        A fresh DB gets the (fingerprint, file_path) key directly; an existing
+        one keeps its shape until migration 4 rebuilds it.
+        """
+        self._conn.execute(_REGISTRY_DDL.format(name="file_registry"))
         self._conn.commit()
 
     def _ensure_sessions_table(self) -> None:
@@ -1089,17 +1180,66 @@ class EventStore:
             hours[hour]["total"] += count
         return list(hours.values())
 
-    def get_offset(self, fingerprint: str) -> int | None:
-        """Get the last known byte offset for a file by its content fingerprint.
+    def get_offset(self, fingerprint: str, file_path: str | Path) -> int | None:
+        """Last known offset of a file, keyed by (fingerprint, path) — #50.
 
-        Returns None if the file has never been registered.
+        See ``resolve_registry_offset``: exact row → its offset; a row whose
+        file is gone → a rename, adopted onto ``file_path`` (keeping its
+        offset and ``legacy`` flag); a row whose file still exists → a
+        different file with the same first KB → None (read from 0).
         """
         if not fingerprint:
             return None
         with self._lock:
-            row = self._get_conn().execute(
-                "SELECT last_offset FROM file_registry WHERE fingerprint = ?",
+            conn = self._get_conn()
+            rows = conn.execute(
+                "SELECT file_path, last_offset, updated_at FROM file_registry"
+                " WHERE fingerprint = ?",
                 (fingerprint,),
+            ).fetchall()
+            offset, adopt_from = resolve_registry_offset(rows, file_path)
+            if adopt_from is not None:
+                import time
+                conn.execute(
+                    """UPDATE file_registry SET file_path = ?, updated_at = ?
+                       WHERE fingerprint = ? AND file_path = ?""",
+                    (registry_path(file_path), time.time(), fingerprint, adopt_from),
+                )
+                conn.commit()
+        return offset
+
+    def is_legacy_offset(self, fingerprint: str, file_path: str | Path) -> bool | None:
+        """``legacy`` flag of the exact (fingerprint, path) row; None if no row."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT legacy FROM file_registry WHERE fingerprint = ? AND file_path = ?",
+                (fingerprint, registry_path(file_path)),
+            ).fetchone()
+        return None if row is None else bool(row[0])
+
+    def clear_legacy_offset(self, fingerprint: str, file_path: str | Path) -> None:
+        """Mark a row as re-read from 0 under the (fingerprint, path) key (#50)."""
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute(
+                "UPDATE file_registry SET legacy = 0 WHERE fingerprint = ? AND file_path = ?",
+                (fingerprint, registry_path(file_path)),
+            )
+            conn.commit()
+
+    def latest_offset_for_path(self, provider: str, file_path: str | Path) -> int | None:
+        """Most recently written offset of ``file_path`` under ANY key.
+
+        Seeds a provider's stable key (``BaseHarvester.STABLE_KEY``) from the
+        content-fingerprint rows written before it existed, so the first
+        restart after the upgrade resumes instead of re-reading from 0.
+        """
+        with self._lock:
+            row = self._get_conn().execute(
+                """SELECT last_offset FROM file_registry
+                   WHERE provider = ? AND file_path = ?
+                   ORDER BY updated_at DESC LIMIT 1""",
+                (provider, registry_path(file_path)),
             ).fetchone()
         return row[0] if row else None
 
@@ -1110,11 +1250,10 @@ class EventStore:
             self._get_conn().execute(
                 """INSERT INTO file_registry (fingerprint, provider, file_path, last_offset, updated_at)
                    VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(fingerprint) DO UPDATE SET
+                   ON CONFLICT(fingerprint, file_path) DO UPDATE SET
                        last_offset = excluded.last_offset,
-                       file_path = excluded.file_path,
                        updated_at = excluded.updated_at""",
-                (fingerprint, provider, str(file_path), offset, time.time()),
+                (fingerprint, provider, registry_path(file_path), offset, time.time()),
             )
             self._get_conn().commit()
 
@@ -1210,14 +1349,14 @@ class EventStore:
                         result_events.append(ev)
 
                 if fingerprint:
+                    # ``legacy`` is left alone: only a from-0 re-read clears it.
                     conn.execute(
                         """INSERT INTO file_registry (fingerprint, provider, file_path, last_offset, updated_at)
                            VALUES (?, ?, ?, ?, ?)
-                           ON CONFLICT(fingerprint) DO UPDATE SET
+                           ON CONFLICT(fingerprint, file_path) DO UPDATE SET
                                last_offset = excluded.last_offset,
-                               file_path = excluded.file_path,
                                updated_at = excluded.updated_at""",
-                        (fingerprint, provider, str(file_path), new_offset, now),
+                        (fingerprint, provider, registry_path(file_path), new_offset, now),
                     )
                 conn.execute("COMMIT")
             except Exception:
@@ -1260,8 +1399,11 @@ class EventStore:
                     f"DELETE FROM events WHERE provider = ? AND session_id IN ({marks})",
                     [provider, *session_ids],
                 )
-                for fp, _path, _off in file_offsets:
-                    conn.execute("DELETE FROM file_registry WHERE fingerprint = ?", (fp,))
+                for fp, path, _off in file_offsets:
+                    conn.execute(
+                        "DELETE FROM file_registry WHERE fingerprint = ? AND file_path = ?",
+                        (fp, registry_path(path)),
+                    )
                 for e in events:
                     # Re-parsed history, not live activity (#45).
                     inserted += _insert_event_row(conn, e, now, historical=True)
@@ -1270,7 +1412,7 @@ class EventStore:
                         """INSERT INTO file_registry
                                (fingerprint, provider, file_path, last_offset, updated_at)
                            VALUES (?, ?, ?, ?, ?)""",
-                        (fp, provider, str(path), off, now),
+                        (fp, provider, registry_path(path), off, now),
                     )
                 conn.execute("COMMIT")
             except BaseException:

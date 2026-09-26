@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
 
-from hub.cache.event_store import EventStore, file_fingerprint
+from hub.cache.event_store import EventStore, file_fingerprint, registry_path
 
 
 class BaseHarvester(ABC):
@@ -50,6 +50,11 @@ class BaseHarvester(ABC):
     # Longest single history-ingest transaction seen (seconds) — reported by
     # ``mool backfill`` so lock pressure on events.db is measurable.
     max_history_txn_seconds: float = 0.0
+    # SQLite-backed providers (OpenCode, Cursor) tail ONE database whose first
+    # KB (the SQLite header) changes on writes, so a content fingerprint would
+    # key every daemon start differently and re-read from rowid 0. They set
+    # this and are keyed by ``<provider>:<path>`` instead (#50).
+    STABLE_KEY: bool = False
 
     def __init__(self, store: EventStore, sse_buffer: collections.deque | None = None):
         self._store = store
@@ -77,6 +82,24 @@ class BaseHarvester(ABC):
         ``skip_dir`` is forwarded to ``ProjectDiscovery`` (#45).
         """
         ...
+
+    def registry_key(self, path: Path) -> str:
+        """``file_registry`` key of ``path`` ('' when unreadable).
+
+        Content fingerprint of the first KB by default (survives renames);
+        ``<provider>:<path>`` for ``STABLE_KEY`` providers. Together with the
+        path it identifies the file (#50).
+        """
+        if self.STABLE_KEY:
+            return f"{self.provider_name}:{registry_path(path)}"
+        return file_fingerprint(path)
+
+    def _stored_offset(self, key: str, path: Path) -> int | None:
+        """Stored offset of ``path``; a new stable key resumes from the old rows."""
+        offset = self._store.get_offset(key, str(path))
+        if offset is None and self.STABLE_KEY:
+            offset = self._store.latest_offset_for_path(self.provider_name, str(path))
+        return offset
 
     def _default_cutoff(self) -> float:
         """Oldest mtime the live loop watches: now - MAX_AGE_HOURS."""
@@ -140,7 +163,7 @@ class BaseHarvester(ABC):
 
         # Register new files
         for path in current_set - watched_set:
-            fp = file_fingerprint(path)
+            fp = self.registry_key(path)
             if fp:
                 self._watched_files[path] = fp
 
@@ -232,7 +255,7 @@ class BaseHarvester(ABC):
             if is_cloud_placeholder(path):
                 self.catchup_skipped.append(("nube", path))
                 continue
-            fp = file_fingerprint(path)
+            fp = self.registry_key(path)
             if not fp:
                 continue
             try:
@@ -247,7 +270,7 @@ class BaseHarvester(ABC):
     def _harvest_file(self, path: Path, fingerprint: str) -> None:
         """Read new data from one file, store atomically."""
         # Get offset from SQLite (persistent across restarts)
-        offset = self._store.get_offset(fingerprint)
+        offset = self._stored_offset(fingerprint, path)
         if offset is None:
             offset = 0  # New file — read from beginning (this IS the backfill)
 
@@ -275,7 +298,9 @@ class BaseHarvester(ABC):
             for ev in stored:
                 self._sse_buffer.append(ev)
 
-    def harvest_history_file(self, path: Path, fingerprint: str) -> tuple[int, int]:
+    def harvest_history_file(
+        self, path: Path, fingerprint: str, offset: int | None = None
+    ) -> tuple[int, int]:
         """Ingest one historical file from its stored offset — no SSE (#45).
 
         Same parse path as the live loop (``_parse_and_adapt``), but events are
@@ -289,9 +314,13 @@ class BaseHarvester(ABC):
         the store: the watchers upsert session metadata before the events land,
         which a single-pass ingest would otherwise leave stale.
 
+        ``offset`` overrides the stored one (``mool backfill`` passes 0 to
+        re-read a file whose offset was shared with another file, #50).
+
         Returns ``(events_parsed, events_inserted)``. Parse errors propagate.
         """
-        offset = self._store.get_offset(fingerprint) or 0
+        if offset is None:
+            offset = self._stored_offset(fingerprint, path) or 0
         try:
             events, new_offset = self._parse_and_adapt(path, offset)
         finally:
