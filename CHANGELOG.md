@@ -6,6 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.23.1] — 2026-09-26
+
+Fixes a v1.23.0 regression: after `mool backfill`, imported history made old projects
+look "activo" and piled old sessions onto the import day in the production chart
+(#53). No new dependencies and no schema changes.
+
+### Fixed
+- **#53 — imported history was dated by import time.** Derived project state and
+  the production view dated each session by `MAX(events.created_at)`, the ingest
+  epoch. Rows inserted by `mool backfill`, the daemon catch-up or `--reparse codex`
+  carry the import time there, so every backfilled session looked like it
+  happened today. A single shared per-session activity clock now takes the ingest
+  epoch for **live** rows (unchanged, still robust for resumed sessions, #18) and
+  the parsed **event time** for **historical** rows.
+  - The clock is used by derived state, the production view and
+    `get_session_detail.last_activity_at` (also in `mool export` JSON).
+  - Measured on a real history right after a backfill: projects marked "activo"
+    went from 96 to 14 (all with real activity in the last 3 days), and the
+    import-day spike in the production chart went from 563 sessions to 11.
+  - No action needed: the fix applies as soon as the daemon runs the new version.
+
+---
+
 ## [1.23.0] — 2026-09-26
 
 MoolMesh can now ingest your **whole** session history (#45). Until now, the Claude,
