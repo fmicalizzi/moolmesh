@@ -12,6 +12,7 @@ from pathlib import Path
 from hub.models.base import Provider
 from hub.parsers.cursor_parser import decode_project_name, default_cursor_base
 from hub.log import get as get_logger
+from hub.sqlite_ro import connect_ro
 
 _log = get_logger("Discovery")
 
@@ -133,13 +134,14 @@ class ProjectDiscovery:
         state_db = self.codex_base / "state_5.sqlite"
         if state_db.exists():
             try:
-                import sqlite3
-                conn = sqlite3.connect(str(state_db))
-                rows = conn.execute(
-                    """SELECT rollout_path, cwd, tokens_used, source
-                       FROM threads"""
-                ).fetchall()
-                conn.close()
+                conn = connect_ro(state_db)  # never read-write (#51)
+                try:
+                    rows = conn.execute(
+                        """SELECT rollout_path, cwd, tokens_used, source
+                           FROM threads"""
+                    ).fetchall()
+                finally:
+                    conn.close()
                 for rpath, cwd, tokens_used, source in rows:
                     if not rpath:
                         continue
@@ -250,21 +252,22 @@ class ProjectDiscovery:
             return projects
 
         try:
-            import sqlite3
-            conn = sqlite3.connect(str(self.opencode_db), timeout=5)
-            rows = conn.execute("""
-                SELECT DISTINCT
-                    s.directory,
-                    p.name AS project_name,
-                    COUNT(DISTINCT s.id) AS session_count
-                FROM session s
-                LEFT JOIN project p ON s.project_id = p.id
-                WHERE s.directory IS NOT NULL AND s.directory != ''
-                GROUP BY s.directory
-                HAVING session_count > 0
-                ORDER BY MAX(s.time_updated) DESC
-            """).fetchall()
-            conn.close()
+            conn = connect_ro(self.opencode_db)  # never read-write (#51)
+            try:
+                rows = conn.execute("""
+                    SELECT DISTINCT
+                        s.directory,
+                        p.name AS project_name,
+                        COUNT(DISTINCT s.id) AS session_count
+                    FROM session s
+                    LEFT JOIN project p ON s.project_id = p.id
+                    WHERE s.directory IS NOT NULL AND s.directory != ''
+                    GROUP BY s.directory
+                    HAVING session_count > 0
+                    ORDER BY MAX(s.time_updated) DESC
+                """).fetchall()
+            finally:
+                conn.close()
 
             for directory, project_name, _session_count in rows:
                 name = project_name or self.extract_project_name(directory)

@@ -7,60 +7,92 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from hub.log import get as get_logger
 from hub.models.opencode import OpenCodeEntry, OpenCodeToolCall
 from hub.parsers.base import BaseParser
+from hub.sqlite_ro import connect_ro
+
+_log = get_logger("OpenCodeParser")
 
 
 class OpenCodeParser(BaseParser):
+    """Reads ``opencode.db`` — always read-only (``hub.sqlite_ro``, #51)."""
+
+    def __init__(self) -> None:
+        # Incremental reads poll every few seconds: log a failing DB once, when
+        # it starts failing, and once when it reads again — not every poll.
+        self._failing = False
+
+    def _connect(self, path: Path, timeout: float = 5.0) -> sqlite3.Connection:
+        conn = connect_ro(path, timeout=timeout)
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def parse_file(self, path: Path) -> list[OpenCodeEntry]:
         """Parse all sessions from an OpenCode SQLite database."""
         if not path.exists():
             return []
-
-        entries: list[OpenCodeEntry] = []
-        conn = sqlite3.connect(str(path), timeout=5)
-        conn.row_factory = sqlite3.Row
         try:
-            entries = self._extract_all(conn)
-        finally:
-            conn.close()
-        return entries
+            conn = self._connect(path)
+            try:
+                return self._extract_all(conn)
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            _log.warning("No se pudo leer %s en solo lectura; se saltea", path, exc_info=True)
+            return []
 
     def parse_session(self, path: Path, session_id: str) -> list[OpenCodeEntry]:
         """Parse a single session by ID."""
         if not path.exists():
             return []
-        conn = sqlite3.connect(str(path), timeout=5)
-        conn.row_factory = sqlite3.Row
         try:
-            entries = self._extract_session(conn, session_id)
-        finally:
-            conn.close()
-        return entries
+            conn = self._connect(path)
+            try:
+                return self._extract_session(conn, session_id)
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            _log.warning("No se pudo leer %s en solo lectura; se saltea", path, exc_info=True)
+            return []
 
     def parse_incremental(self, path: Path, offset: int) -> tuple[list[OpenCodeEntry], int]:
-        """Incremental parse using rowid as cursor. offset = last processed rowid."""
+        """Incremental parse using rowid as cursor. offset = last processed rowid.
+
+        A DB that can't be read (e.g. a WAL whose ``-shm`` can't be created)
+        is skipped for this cycle — never reopened read-write.
+        """
         if not path.exists():
             return [], offset
         try:
-            conn = sqlite3.connect(str(path), timeout=5)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                self._QUERY + " WHERE pt.rowid > ? ORDER BY pt.rowid ASC LIMIT 500",
-                (offset,),
-            ).fetchall()
-            if not rows:
+            conn = self._connect(path)
+            try:
+                rows = conn.execute(
+                    self._QUERY + " WHERE pt.rowid > ? ORDER BY pt.rowid ASC LIMIT 500",
+                    (offset,),
+                ).fetchall()
+                if not rows:
+                    result: tuple[list[OpenCodeEntry], int] = ([], offset)
+                else:
+                    entries = [e for row in rows if (e := self._row_to_entry(row)) is not None]
+                    new_offset = conn.execute(
+                        "SELECT MAX(rowid) FROM part WHERE rowid > ?", (offset,)
+                    ).fetchone()[0] or offset
+                    result = (entries, new_offset)
+            finally:
                 conn.close()
-                return [], offset
-            entries = [e for row in rows if (e := self._row_to_entry(row)) is not None]
-            new_offset = conn.execute(
-                "SELECT MAX(rowid) FROM part WHERE rowid > ?", (offset,)
-            ).fetchone()[0] or offset
-            conn.close()
-            return entries, new_offset
         except (sqlite3.Error, OSError):
+            if not self._failing:
+                self._failing = True
+                _log.warning(
+                    "No se pudo leer %s en solo lectura; se saltea hasta que vuelva a abrir",
+                    path, exc_info=True,
+                )
             return [], offset
+        if self._failing:
+            self._failing = False
+            _log.info("%s vuelve a leerse en solo lectura", path)
+        return result
 
     @staticmethod
     def can_parse(path: Path) -> bool:
@@ -69,11 +101,13 @@ class OpenCodeParser(BaseParser):
         if not path.exists():
             return False
         try:
-            conn = sqlite3.connect(str(path), timeout=2)
-            tables = {r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()}
-            conn.close()
+            conn = connect_ro(path, timeout=2)
+            try:
+                tables = {r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()}
+            finally:
+                conn.close()
             return {"session", "message", "part", "project"}.issubset(tables)
         except (sqlite3.Error, OSError):
             return False
