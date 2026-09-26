@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import collections
-import time
+from collections.abc import Callable
 from pathlib import Path
 
 from hub.adapters.codex_adapter import CodexAdapter
@@ -32,11 +32,13 @@ class CodexWatcher(BaseHarvester):
     def provider_name(self) -> str:
         return "codex"
 
-    def discover_files(self) -> list[Path]:
-        discovery = ProjectDiscovery(codex_base=self._codex_base)
+    def discover_files(
+        self, since: float | None = None, skip_dir: Callable[[Path], bool] | None = None
+    ) -> list[Path]:
+        discovery = ProjectDiscovery(codex_base=self._codex_base, skip_dir=skip_dir)
         projects = discovery.discover_codex()
         files: list[Path] = []
-        cutoff = time.time() - (self.MAX_AGE_HOURS * 3600)
+        cutoff = self._default_cutoff() if since is None else since
         for proj in projects:
             for f in proj.session_files:
                 try:
