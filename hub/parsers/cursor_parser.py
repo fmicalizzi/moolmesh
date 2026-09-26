@@ -18,6 +18,7 @@ from urllib.parse import unquote, urlparse
 
 from hub.models.cursor import CursorBubble, CursorComposer
 from hub.parsers.base import BaseParser
+from hub.sqlite_ro import connect_ro
 
 _MAP_TTL_SECONDS = 30.0
 _BUBBLE_BATCH = 500
@@ -53,7 +54,7 @@ def decode_project_name(folder_uri: str) -> tuple[str, str]:
 
 def _ro_connect(path: Path) -> sqlite3.Connection:
     """Open a SQLite DB read-only; never blocks the writer."""
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    conn = connect_ro(path)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -125,7 +126,7 @@ class CursorParser(BaseParser):
         if not path.exists():
             return False
         try:
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+            conn = connect_ro(path, timeout=2)
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()}
