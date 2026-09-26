@@ -25,7 +25,8 @@ The taxonomy (epic #24), one rule each:
     collapsed "sin clasificar / herramientas" section. Also D2 (#36), never a
     project even though ``anchor_path`` would mint one below the skipped system
     segments: OS temp dirs (``/tmp/**``, ``/private/tmp/**``,
-    ``/var/folders/**``, ``/private/var/**`` — subtype ``temporary``). Only
+    ``/var/folders/**``, ``/private/var/**`` — subtype ``temporary``) and app
+    bundles (``/Applications/**``, ``*.app`` — subtype ``app_bundle``). Only
     gitless (``path_hash``) dirs: a git repo is a project wherever it lives.
 
 Collapse (A) resolves the real project two ways, in order:
@@ -92,10 +93,29 @@ def is_temp_path(abspath: str) -> bool:
     return any(tuple(parts[: len(r)]) == r for r in _TEMP_ROOTS)
 
 
+def is_app_bundle_path(abspath: str) -> bool:
+    """True for ``/Applications/**`` or a path inside a macOS ``*.app`` bundle.
+
+    A ``*.app`` segment counts only when it IS a bundle — followed by
+    ``Contents`` or sitting in an ``Applications`` dir — so a gitless project
+    folder named like a domain (``shop.app``) is not swallowed.
+    """
+    parts = _split(abspath)
+    if parts[:1] == ["Applications"]:
+        return True
+    for i, seg in enumerate(parts):
+        if len(seg) > 4 and seg.lower().endswith(".app"):
+            if parts[i + 1:i + 2] == ["Contents"] or (i and parts[i - 1] == "Applications"):
+                return True
+    return False
+
+
 def noise_subtype(abspath: str) -> str | None:
     """The D2 subtype of a gitless dir that is never a project, else ``None``."""
     if is_temp_path(abspath):
         return "temporary"
+    if is_app_bundle_path(abspath):
+        return "app_bundle"
     return None
 
 
@@ -241,7 +261,7 @@ class Classification:
     """The classification of one workspace (a row of ``workspace_classification``)."""
 
     category: str      # root | A | B | C | D
-    subtype: str       # project | harness | subdir | materials | config | home_config | degenerate | temporary
+    subtype: str       # project | harness | subdir | materials | config | home_config | degenerate | temporary | app_bundle
     role: str          # project | collapse | nest | orphan
     project_key: str | None
     project_label: str | None
@@ -314,8 +334,8 @@ def classify(
     if anchor is None:
         return _orphan("degenerate", "degenerate")
 
-    # 7. D2 — temp dirs are never projects (#36). Gitless only: a dir whose
-    #    anchor resolved to a git repo keeps nesting under it.
+    # 7. D2 — temp dirs and app bundles are never projects (#36). Gitless
+    #    only: a dir whose anchor resolved to a git repo keeps nesting under it.
     noise = _noise_of(anchor, d)
     if noise:
         return noise

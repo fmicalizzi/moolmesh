@@ -245,6 +245,31 @@ class TestTempRoots:
         store.close()
 
 
+class TestAppBundles:
+    @pytest.mark.parametrize("d", [
+        "/Applications/Editor.app",
+        "/Applications/Editor.app/Contents/Resources/app/skills/dev",
+        "/Applications/Utilities",
+        f"{HOME}/Applications/Tool.app/Contents/MacOS",
+        f"{CLAUDE}/vendor/Viewer.app/Contents/Resources",
+    ])
+    def test_gitless_app_path_is_D2_app_bundle(self, d):
+        c = _classify("path_hash", dir_path=d)
+        assert (c.category, c.subtype, c.role) == ("D", "app_bundle", "orphan"), d
+        assert c.project_key is None
+
+    def test_domain_named_project_folder_is_not_a_bundle(self):
+        c = _classify("path_hash", dir_path=f"{CLAUDE}/shop.app")
+        assert c.role == "project"
+        c = _classify("path_hash", dir_path=f"{CLAUDE}/shop.app/src")
+        assert c.role == "nest"
+
+    def test_git_repo_inside_applications_stays_project(self):
+        c = _classify("git_remote", root_path="/Applications/Tool.app/Contents/src",
+                      remote_url="github.com/me/tool")
+        assert c.category == "root" and c.role == "project"
+
+
 # ── fs_decode: hyphenated names must not be split ────────────────────────
 
 class TestFsDecode:
