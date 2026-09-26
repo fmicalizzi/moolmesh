@@ -302,6 +302,13 @@ def _print_backfill_report(report, verbose: bool) -> None:
         if r.fingerprint_collisions:
             print(yellow(f"    archivos con huella repetida (1er KB igual): "
                          f"{r.fingerprint_collisions}"))
+        if r.collision_files:
+            if report.dry_run:
+                print(yellow(f"    a recuperar por colisión: {r.collision_files} archivos "
+                             f"(se releen desde el inicio)"))
+            else:
+                print(yellow(f"    recuperados por colisión: {r.collision_recovered:,} eventos "
+                             f"({r.collision_files} archivos releídos)"))
         if not report.dry_run:
             print(f"    eventos insertados:     {r.events_inserted:>7,}   "
                   f"(de {r.events_parsed:,} leídos; el resto ya existía)")

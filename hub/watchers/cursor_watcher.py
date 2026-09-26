@@ -14,9 +14,11 @@ from hub.watchers.base import BaseHarvester
 class CursorWatcher(BaseHarvester):
     """Harvests Cursor agent/composer bubbles into EventStore.
 
-    Uses the global state.vscdb cursorDiskKV rowid as the incremental cursor.
+    Uses the global state.vscdb cursorDiskKV rowid as the incremental cursor,
+    stored under the stable key ``cursor:<path>`` (``STABLE_KEY``, #50).
     """
 
+    STABLE_KEY = True
     POLL_INTERVAL: float = 2.0
     RESCAN_INTERVAL: float = 60.0
 

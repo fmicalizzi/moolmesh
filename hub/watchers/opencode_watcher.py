@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from hub.adapters.opencode_adapter import OpenCodeAdapter
-from hub.cache.event_store import EventStore, file_fingerprint
+from hub.cache.event_store import EventStore
 from hub.parsers.opencode_parser import OpenCodeParser
 from hub.watchers.base import BaseHarvester
 
@@ -19,9 +19,13 @@ class OpenCodeWatcher(BaseHarvester):
     """Harvests OpenCode SQLite sessions into EventStore.
 
     Uses rowid as cursor instead of byte offset — same atomic
-    store_with_offset pattern as JSONL watchers.
+    store_with_offset pattern as JSONL watchers. The rowid is stored under the
+    stable key ``opencode:<path>`` (``STABLE_KEY``): the SQLite header in the
+    first KB changes on writes, so a content fingerprint would restart the
+    cursor at 0 on every daemon start (#50).
     """
 
+    STABLE_KEY = True
     POLL_INTERVAL: float = 2.0
     RESCAN_INTERVAL: float = 60.0
 

@@ -24,7 +24,7 @@ class TestHarvesterNewFileOffset:
         f.write_text('{"type":"user","sessionId":"s1","timestamp":"2026-04-10T10:00:00Z","message":{"role":"user","content":"hello"}}\n')
 
         fp = file_fingerprint(f)
-        assert store.get_offset(fp) is None  # Not in registry
+        assert store.get_offset(fp, str(f)) is None  # Not in registry
         store.close()
 
     def test_known_file_resumes_from_stored_offset(self, tmp_path):
@@ -38,7 +38,7 @@ class TestHarvesterNewFileOffset:
         fp = file_fingerprint(f)
         store.save_offset(fp, "claude", str(f), 500)
 
-        assert store.get_offset(fp) == 500
+        assert store.get_offset(fp, str(f)) == 500
         store.close()
 
 
@@ -62,15 +62,15 @@ class TestHarvesterOffsetPerFile:
         store.save_offset(fp_a, "claude", str(file_a), 100)
         store.save_offset(fp_b, "claude", str(file_b), 200)
 
-        assert store.get_offset(fp_a) == 100
-        assert store.get_offset(fp_b) == 200
+        assert store.get_offset(fp_a, str(file_a)) == 100
+        assert store.get_offset(fp_b, str(file_b)) == 200
         store.close()
 
     def test_unknown_file_returns_none(self, tmp_path):
         """A file not in file_registry returns None offset."""
         db = tmp_path / "events.db"
         store = EventStore(db_path=db)
-        assert store.get_offset("nonexistent-fingerprint") is None
+        assert store.get_offset("nonexistent-fingerprint", "/nonexistent.jsonl") is None
         store.close()
 
 

@@ -25,7 +25,7 @@ class TestBaseHarvester:
         f.write_text(line)
 
         fp = file_fingerprint(f)
-        assert store.get_offset(fp) is None  # No prior offset
+        assert store.get_offset(fp, str(f)) is None  # No prior offset
 
         parser = ClaudeParser()
         adapter = ClaudeAdapter()
@@ -38,7 +38,7 @@ class TestBaseHarvester:
 
         store.store_with_offset(events, fp, "claude", str(f), new_offset)
 
-        assert store.get_offset(fp) == new_offset
+        assert store.get_offset(fp, str(f)) == new_offset
         assert store.count() >= 1
         store.close()
 
@@ -71,7 +71,7 @@ class TestBaseHarvester:
 
         # Second harvest (simulates restart)
         store2 = EventStore(db_path=db)
-        resumed_offset = store2.get_offset(fp)
+        resumed_offset = store2.get_offset(fp, str(f))
         assert resumed_offset == offset  # Should resume from where we left off
 
         entries2, offset2 = parser.parse_incremental(f, resumed_offset)
