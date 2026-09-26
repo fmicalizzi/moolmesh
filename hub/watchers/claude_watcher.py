@@ -16,6 +16,8 @@ from hub.watchers.base import BaseHarvester
 class ClaudeWatcher(BaseHarvester):
     """Harvests Claude Code JSONL session files into EventStore."""
 
+    CATCHUP = True  # startup catch-up after a daemon outage (#45)
+
     def __init__(
         self,
         store: EventStore,

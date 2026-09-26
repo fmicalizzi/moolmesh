@@ -53,9 +53,28 @@ def _mig_1_session_lifecycle(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE sessions ADD COLUMN ended_reason TEXT")
 
 
+def _mig_2_watcher_state(conn: sqlite3.Connection) -> None:
+    """Per-provider watcher heartbeat for the startup catch-up (issue #45).
+
+    One row per file-based provider: the wall-clock time of the watcher's last
+    completed rescan. On startup a gap longer than the live window means the
+    daemon was down, so the first pass widens its cutoff to this time. A
+    dedicated table (not ``file_registry``, which is keyed by file fingerprint
+    and read as "one row per session file") keeps both shapes clean.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS watcher_state (
+            provider TEXT PRIMARY KEY,
+            last_cycle_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+    """)
+
+
 # Versioned, additive migrations for events.db — each runs exactly once.
 _EVENT_STORE_MIGRATIONS = [
     (1, "session_lifecycle", _mig_1_session_lifecycle),
+    (2, "watcher_state", _mig_2_watcher_state),
 ]
 
 
@@ -1029,6 +1048,29 @@ class EventStore:
                 (fingerprint, provider, str(file_path), offset, time.time()),
             )
             self._get_conn().commit()
+
+    def get_watcher_cycle(self, provider: str) -> float | None:
+        """Wall-clock time of the provider watcher's last completed cycle (#45)."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT last_cycle_at FROM watcher_state WHERE provider = ?", (provider,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def set_watcher_cycle(self, provider: str, at: float) -> None:
+        """Persist the provider watcher's last completed cycle (#45)."""
+        import time
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute(
+                """INSERT INTO watcher_state (provider, last_cycle_at, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(provider) DO UPDATE SET
+                       last_cycle_at = excluded.last_cycle_at,
+                       updated_at = excluded.updated_at""",
+                (provider, at, time.time()),
+            )
+            conn.commit()
 
     def store_with_offset(
         self,
