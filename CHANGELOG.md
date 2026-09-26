@@ -6,6 +6,50 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.23.2] — 2026-09-26
+
+Two Observe fixes: session files that start with the same bytes no longer share one
+read offset, so their lost events can be recovered (#50); and MoolMesh now opens
+other tools' databases (Codex, OpenCode, Cursor) strictly read-only (#51). No new
+dependencies.
+
+### Upgrade notes
+- **Restart the daemon right after upgrading, before any other `mool` command:**
+  `pipx upgrade moolmesh` (or pip), then `mool daemon restart`. A migration
+  (`file_registry` gets a composite key) runs the first time new code opens
+  events.db. A daemon still running the **old** code after that can no longer save
+  file offsets, and its watcher thread stops. `mool daemon restart` stops the old
+  daemon before the new one opens the database, so it is safe.
+- **Then run `mool backfill` once.** It re-reads files whose offset was shared with
+  another file and inserts only the missing events. Measured on a real history: 809
+  events recovered from 2 pairs of colliding Claude files. A second run is a no-op.
+- When Codex (or Cursor) is **not** running, SQLite's read-only mode may leave an
+  empty `-wal` and a small `-shm` file next to that tool's database. That's
+  expected and harmless. The previous read-write connection removed them, but
+  checkpointed the tool's database, which is a real write.
+
+### Fixed
+- **#50 — files sharing their first KB shared one offset (silent data loss).**
+  `file_registry` is now keyed by `(fingerprint, file_path)` (migration 4 rebuilds
+  the table in one transaction and keeps every row and offset). Offset lookup:
+  - an exact match returns its offset;
+  - the same fingerprint whose old path no longer exists is a **rename** and
+    keeps its offset;
+  - the same fingerprint whose path still exists is a **collision**: the new file
+    starts at 0.
+  - `mool backfill` re-reads collided files from the start once (event
+    fingerprints dedupe) and reports "recuperados por colisión".
+  - SQLite-backed sources (OpenCode, Cursor), whose file header changes on every
+    write, now use a stable `<provider>:<path>` key and resume from their last
+    rowid, instead of re-reading the whole database after each daemon restart.
+- **#51 — provider databases were opened read-write.** Codex `state_5.sqlite` and
+  the OpenCode database (discovery + parser) were opened with a plain
+  `sqlite3.connect()`. Every provider database is now opened through one helper
+  with a `mode=ro` URI. If a read-only open fails, that read is logged and skipped:
+  it never falls back to read-write and never uses `immutable=1`.
+
+---
+
 ## [1.23.1] — 2026-09-26
 
 Fixes a v1.23.0 regression: after `mool backfill`, imported history made old projects
