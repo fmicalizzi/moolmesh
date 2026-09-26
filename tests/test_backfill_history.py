@@ -337,3 +337,19 @@ class TestBackfillCli:
         from hub.cli import _parse_since
         with pytest.raises(SystemExit):
             _parse_since("25/03/2026")
+
+
+class TestUnreadableDb:
+    def test_dry_run_fails_loudly_when_db_cannot_be_opened(self, env, monkeypatch):
+        _claude_file(env["claude"], "alpha", "s1")
+        EventStore(db_path=env["db"]).close()
+
+        def broken(*a, **kw):
+            raise sqlite3.OperationalError("unable to open database file")
+
+        monkeypatch.setattr(backfill_mod.sqlite3, "connect", broken)
+        with pytest.raises(backfill_mod.EventsDbUnreadable):
+            _run(env, None, dry_run=True)
+        with pytest.raises(backfill_mod.EventsDbUnreadable):
+            backfill_mod.run_reparse_codex(None, dry_run=True, db_path=env["db"],
+                                           bases=env["bases"])

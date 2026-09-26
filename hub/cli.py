@@ -334,12 +334,17 @@ def cmd_backfill_reparse(args: argparse.Namespace) -> None:
     from hub.backfill import ReparseReport, run_reparse_codex
     from hub.cache.event_store import DEFAULT_DB_PATH, EventStore
 
+    from hub.backfill import EventsDbUnreadable
+
     real = args.yes and not args.dry_run
     store = EventStore() if real else None
     report = ReparseReport()
     try:
         run_reparse_codex(store, dry_run=not real, yes=args.yes,
                           db_path=DEFAULT_DB_PATH, report=report)
+    except EventsDbUnreadable as exc:
+        print(red(f"  No se pudo abrir events.db en solo lectura: {exc}"))
+        sys.exit(1)
     finally:
         if store is not None:
             store.close()
@@ -357,6 +362,8 @@ def cmd_backfill_reparse(args: argparse.Namespace) -> None:
     print(f"    ya al día:                    {report.up_to_date:>7,}")
     print(f"    sin rollout en disco:         {report.no_rollout:>7,}   (no se tocan)")
     print(f"    en ventana del daemon:        {report.in_window:>7,}   (no se tocan)")
+    if report.unreadable:
+        print(yellow(f"    rollouts ilegibles:           {report.unreadable:>7,}   (no se tocan)"))
     if report.skipped_cloud:
         print(yellow(f"    rollouts en la nube:          {report.skipped_cloud:>7,}   (no se tocan)"))
     if report.failed:
@@ -390,7 +397,7 @@ def cmd_backfill(args: argparse.Namespace) -> None:
         print(dim(f"  [{rep.provider}] {rep.processed:,} archivos, "
                   f"{rep.events_inserted:,} eventos…"), flush=True)
 
-    from hub.backfill import BackfillReport
+    from hub.backfill import BackfillReport, EventsDbUnreadable
     report = BackfillReport()
     try:
         run_backfill(
@@ -398,6 +405,9 @@ def cmd_backfill(args: argparse.Namespace) -> None:
             limit=args.limit, db_path=DEFAULT_DB_PATH,
             progress=None if args.dry_run else progress, report=report,
         )
+    except EventsDbUnreadable as exc:
+        print(red(f"  No se pudo abrir events.db en solo lectura: {exc}"))
+        sys.exit(1)
     finally:
         if store is not None:
             store.close()
