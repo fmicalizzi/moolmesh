@@ -1,7 +1,9 @@
 """Abstract base watcher — unified harvester pattern.
 
 Each provider has ONE loop: discover -> read offset -> parse -> store -> sleep -> repeat.
-No queue, no dispatcher, no backfill. The first cycle IS the backfill.
+The live loop only watches files modified within ``MAX_AGE_HOURS``; older
+history is ingested by ``mool backfill`` (``hub/backfill.py``) through the same
+parse/store path (``harvest_history_file``), never pushed to SSE (#45).
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 
 from hub.cache.event_store import EventStore, file_fingerprint
@@ -31,6 +34,13 @@ class BaseHarvester(ABC):
     RESCAN_INTERVAL: float = 30.0
     # Max age of files to watch (hours)
     MAX_AGE_HOURS: int = 12
+    # History ingestion (backfill / catch-up) writes at most this many events
+    # per transaction, so a huge old file never holds the events.db write lock
+    # long enough to starve the live daemon (busy_timeout is 5 s).
+    HISTORY_CHUNK_EVENTS: int = 500
+    # Longest single history-ingest transaction seen (seconds) — reported by
+    # ``mool backfill`` so lock pressure on events.db is measurable.
+    max_history_txn_seconds: float = 0.0
 
     def __init__(self, store: EventStore, sse_buffer: collections.deque | None = None):
         self._store = store
@@ -46,9 +56,19 @@ class BaseHarvester(ABC):
         ...
 
     @abstractmethod
-    def discover_files(self) -> list[Path]:
-        """Find all session files for this provider within MAX_AGE_HOURS."""
+    def discover_files(
+        self, since: float | None = None, skip_dir: Callable[[Path], bool] | None = None
+    ) -> list[Path]:
+        """Find session files modified at/after ``since`` (epoch seconds).
+
+        ``since=None`` means the live window (``_default_cutoff()``);
+        ``skip_dir`` is forwarded to ``ProjectDiscovery`` (#45).
+        """
         ...
+
+    def _default_cutoff(self) -> float:
+        """Oldest mtime the live loop watches: now - MAX_AGE_HOURS."""
+        return time.time() - (self.MAX_AGE_HOURS * 3600)
 
     @abstractmethod
     def _parse_and_adapt(self, path: Path, offset: int) -> tuple[list[dict], int]:
@@ -145,6 +165,54 @@ class BaseHarvester(ABC):
         if self._sse_buffer is not None and stored:
             for ev in stored:
                 self._sse_buffer.append(ev)
+
+    def harvest_history_file(self, path: Path, fingerprint: str) -> tuple[int, int]:
+        """Ingest one historical file from its stored offset — no SSE (#45).
+
+        Same parse path as the live loop (``_parse_and_adapt``), but events are
+        written in ``HISTORY_CHUNK_EVENTS``-sized transactions: intermediate
+        chunks carry no fingerprint (no offset write) and only the last chunk
+        persists the new offset. An interruption therefore leaves the old
+        offset in place and the next run re-reads the file; ``INSERT OR
+        IGNORE`` on the event fingerprint drops what was already stored.
+
+        Session stats (``event_count``, first/last event) are refreshed after
+        the store: the watchers upsert session metadata before the events land,
+        which a single-pass ingest would otherwise leave stale.
+
+        Returns ``(events_parsed, events_inserted)``. Parse errors propagate.
+        """
+        offset = self._store.get_offset(fingerprint) or 0
+        try:
+            events, new_offset = self._parse_and_adapt(path, offset)
+        finally:
+            # A history walk parses each file once: drop per-file parser
+            # state (Codex keeps session_meta context per path) to bound memory.
+            ctx = getattr(getattr(self, "_parser", None), "_session_ctx", None)
+            if isinstance(ctx, dict):
+                ctx.pop(str(path), None)
+        if new_offset == offset and not events:
+            return 0, 0
+
+        inserted = 0
+        step = max(1, self.HISTORY_CHUNK_EVENTS)
+        chunks = [events[i:i + step] for i in range(0, len(events), step)] or [[]]
+        for i, chunk in enumerate(chunks):
+            last = i == len(chunks) - 1
+            t0 = time.monotonic()
+            stored = self._store.store_with_offset(
+                chunk, fingerprint if last else "", self.provider_name,
+                str(path), new_offset,
+            )
+            self.max_history_txn_seconds = max(
+                self.max_history_txn_seconds, time.monotonic() - t0
+            )
+            inserted += len(stored)
+
+        session_ids = {e.get("session_id") for e in events if e.get("session_id")}
+        if session_ids:
+            self._store.refresh_session_stats(self.provider_name, session_ids)
+        return len(events), inserted
 
     @property
     def watched_count(self) -> int:

@@ -368,6 +368,42 @@ class EventStore:
             ))
             conn.commit()
 
+    def refresh_session_stats(self, provider: str, session_ids: set[str] | list[str]) -> None:
+        """Recompute event_count and first/last event time from ``events``.
+
+        ``upsert_session`` runs before a batch's events are stored and dates the
+        session with that batch's first entry, so a file ingested in ONE pass
+        (history backfill / catch-up, #45) would keep ``event_count`` at the
+        pre-insert count and ``last_event_at == first_event_at``. Widens the
+        stored range with the events' range; never narrows it (session_meta
+        lines can date a session without producing an event).
+        """
+        ids = [s for s in session_ids if s]
+        if not ids or not provider:
+            return
+        with self._lock:
+            conn = self._get_conn()
+            for sid in ids:
+                conn.execute("""
+                    UPDATE sessions SET
+                        event_count = (SELECT COUNT(*) FROM events
+                                       WHERE session_id = :sid AND provider = :p),
+                        -- '~' sorts after any ISO timestamp: a sentinel for
+                        -- "missing" so MIN() keeps whichever side exists.
+                        first_event_at = NULLIF(MIN(
+                            COALESCE(NULLIF(first_event_at, ''), '~'),
+                            COALESCE((SELECT MIN(NULLIF(timestamp, '')) FROM events
+                                      WHERE session_id = :sid AND provider = :p), '~')
+                        ), '~'),
+                        last_event_at = NULLIF(MAX(
+                            COALESCE(last_event_at, ''),
+                            COALESCE((SELECT MAX(timestamp) FROM events
+                                      WHERE session_id = :sid AND provider = :p), '')
+                        ), '')
+                    WHERE id = :sid AND provider = :p
+                """, {"sid": sid, "p": provider})
+            conn.commit()
+
     def mark_session_ended(
         self, session_id: str, provider: str, ended_at: str, reason: str
     ) -> None:

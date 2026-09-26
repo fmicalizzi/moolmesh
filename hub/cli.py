@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from hub.colors import green, yellow, red, dim, bold
 from hub.discovery import ProjectDiscovery
@@ -266,16 +267,95 @@ def cmd_discover(args: argparse.Namespace) -> None:
     print(f"\n  Total: {total_projects} projects, {total_files} session files\n")
 
 
-def cmd_backfill(args: argparse.Namespace) -> None:
-    from hub.cache.event_store import EventStore
+def _parse_since(value: str | None) -> float | None:
+    """``--since YYYY-MM-DD`` → epoch seconds at local midnight (None = all)."""
+    if not value:
+        return None
+    from datetime import datetime
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").timestamp()
+    except ValueError:
+        print(red(f"  --since inválido: {value!r} (formato YYYY-MM-DD)"))
+        sys.exit(2)
 
-    store = EventStore()
-    print(f"EventStore: {store.db_path}")
-    print(f"Current events: {store.count():,}\n")
-    print("Harvesters handle backfill automatically on dashboard startup.")
-    print("Run 'python3 -m hub.cli dashboard' to start harvesting.")
-    print(f"\nTotal in EventStore: {store.count():,}")
-    store.close()
+
+def _print_backfill_report(report, verbose: bool) -> None:
+    from hub.config import load_config, masked_label
+    hide = load_config().hide_project_names
+    title = "Backfill (simulación, no escribe)" if report.dry_run else "Backfill"
+    print(f"\n  {bold(title)} — {report.elapsed:.1f}s")
+    print(f"  {'─' * 66}")
+    tot_ev = tot_new = 0
+    for r in report.providers:
+        skipped = r.skipped_cloud + r.skipped_error + r.skipped_empty
+        print(f"  {bold(r.provider.upper())}")
+        print(f"    archivos vistos:        {r.seen:>7,}")
+        verb = "a procesar" if report.dry_run else "procesados"
+        print(f"    {verb + ':':<24}{r.processed:>7,}   "
+              f"({r.pending_bytes / 1_048_576:,.1f} MB nuevos)")
+        print(f"    ya al día:              {r.up_to_date:>7,}")
+        print(f"    en ventana del daemon:  {r.in_window:>7,}   (los lee el daemon en vivo)")
+        print(f"    salteados:              {skipped:>7,}   "
+              f"(nube {r.skipped_cloud}, error {r.skipped_error}, vacíos {r.skipped_empty})")
+        if r.cloud_dirs:
+            print(yellow(f"    directorios en la nube sin listar: {r.cloud_dirs}"))
+        if r.fingerprint_collisions:
+            print(yellow(f"    archivos con huella repetida (1er KB igual): "
+                         f"{r.fingerprint_collisions}"))
+        if not report.dry_run:
+            print(f"    eventos insertados:     {r.events_inserted:>7,}   "
+                  f"(de {r.events_parsed:,} leídos; el resto ya existía)")
+            print(f"    sesiones nuevas:        {r.new_sessions:>7,}   "
+                  f"({r.sessions_before:,} → {r.sessions_after:,})")
+            print(dim(f"    transacción más larga:  {r.max_txn_seconds * 1000:.0f} ms"))
+            tot_ev += r.events_inserted
+            tot_new += r.new_sessions
+        if r.limit_reached:
+            print(yellow("    --limit alcanzado: volvé a correr para continuar"))
+        if verbose:
+            for path in r.processed_paths:
+                shown = Path(path).name if hide else path
+                print(dim(f"      + {shown}"))
+            for reason, path in r.skipped_paths:
+                shown = masked_label(path, True) if hide else path
+                print(dim(f"      - [{reason}] {shown}"))
+    print(f"  {'─' * 66}")
+    if not report.dry_run:
+        print(f"  Total: {tot_ev:,} eventos insertados, {tot_new:,} sesiones nuevas")
+    print(dim(f"  Archivos modificados en las últimas {report.window_hours} h se dejan "
+              "al daemon (sin choque con el proceso en vivo)."))
+    if report.interrupted:
+        print(yellow("  Interrumpido: lo ya guardado queda; volvé a correr para continuar."))
+    print()
+
+
+def cmd_backfill(args: argparse.Namespace) -> None:
+    from hub.backfill import FILE_PROVIDERS, run_backfill
+    from hub.cache.event_store import DEFAULT_DB_PATH, EventStore
+
+    providers = FILE_PROVIDERS if args.provider in (None, "all") else (args.provider,)
+    since = _parse_since(args.since)
+    store = None if args.dry_run else EventStore()
+    print(f"  EventStore: {DEFAULT_DB_PATH}")
+
+    def progress(rep) -> None:
+        print(dim(f"  [{rep.provider}] {rep.processed:,} archivos, "
+                  f"{rep.events_inserted:,} eventos…"), flush=True)
+
+    from hub.backfill import BackfillReport
+    report = BackfillReport()
+    try:
+        run_backfill(
+            store, providers=providers, since=since, dry_run=args.dry_run,
+            limit=args.limit, db_path=DEFAULT_DB_PATH,
+            progress=None if args.dry_run else progress, report=report,
+        )
+    finally:
+        if store is not None:
+            store.close()
+    _print_backfill_report(report, args.verbose)
+    if report.interrupted:
+        sys.exit(130)
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
@@ -814,9 +894,21 @@ def main() -> None:
     disc.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
 
     # backfill
-    bf = subparsers.add_parser("backfill", help="Import historical session data into EventStore")
-    bf.add_argument("--full", action="store_true",
-                    help="Full import (all data). Default: only import new events since last run.")
+    bf = subparsers.add_parser(
+        "backfill",
+        help="Import historical session files (claude, codex, qwen) into EventStore",
+    )
+    bf.add_argument("--provider", choices=["claude", "codex", "qwen", "all"], default="all",
+                    help="Provider to ingest (default: all file-based providers)")
+    bf.add_argument("--since", metavar="YYYY-MM-DD",
+                    help="Only files modified on/after this local date")
+    bf.add_argument("--dry-run", action="store_true",
+                    help="Count what would be processed (files, bytes); write nothing")
+    bf.add_argument("--limit", type=int, metavar="N",
+                    help="Process at most N files with new data, then stop (re-run continues)")
+    bf.add_argument("--verbose", action="store_true",
+                    help="List processed/skipped files (masked under hide_project_names)")
+    bf.add_argument("--full", action="store_true", help=argparse.SUPPRESS)  # legacy no-op
 
     # repo (con sub-subcommands)
     repo_parser = subparsers.add_parser("repo", help="Manage monitored git repositories")

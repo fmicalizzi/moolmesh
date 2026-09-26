@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import collections
-import time
+from collections.abc import Callable
 from pathlib import Path
 
 from hub.adapters.claude_adapter import ClaudeAdapter
@@ -34,11 +34,13 @@ class ClaudeWatcher(BaseHarvester):
     def provider_name(self) -> str:
         return "claude"
 
-    def discover_files(self) -> list[Path]:
-        discovery = ProjectDiscovery(claude_base=self._claude_base)
+    def discover_files(
+        self, since: float | None = None, skip_dir: Callable[[Path], bool] | None = None
+    ) -> list[Path]:
+        discovery = ProjectDiscovery(claude_base=self._claude_base, skip_dir=skip_dir)
         projects = discovery.discover_claude()
         files: list[Path] = []
-        cutoff = time.time() - (self.MAX_AGE_HOURS * 3600)
+        cutoff = self._default_cutoff() if since is None else since
         for proj in projects:
             if self._project_filter and self._project_filter.lower() not in proj.name.lower():
                 continue
