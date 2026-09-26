@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.23.0
+Last updated: September 2026 — v1.23.1
 
 ---
 
@@ -185,7 +185,7 @@ Everything you did before installing MoolMesh, or while the daemon was down, bec
 - **Daemon catch-up** after downtime (bounded, no SSE flood), tracked in a new `watcher_state` table.
 - **`--reparse codex`** re-ingests pre-v1.21 Codex sessions with the current parser. It needs `--yes`, backs up first and runs one transaction per session.
 - **Cloud-only placeholders** (iCloud/FileProvider `SF_DATALESS`, Windows recall attributes, `.icloud`) are detected and skipped without triggering a download.
-- **History stays out of "recent":** an `events.historical` flag with a partial index keeps the live feed, startup stats and SSE replay live-only.
+- **History stays out of "recent":** an `events.historical` flag with a partial index keeps the live feed, startup stats and SSE replay live-only. v1.23.1 ([#53](https://github.com/fmicalizzi/moolmesh/issues/53)) also dates imported history by event time in project state and the production view, not by import time.
 
 ---
 
