@@ -164,6 +164,87 @@ class TestNesting:
             assert c.role == "orphan" and c.subtype == "degenerate", d
 
 
+# ── D2 noise (#36): temp dirs are never projects ─────────────────────────
+
+class TestTempRoots:
+    @pytest.mark.parametrize("d", [
+        "/tmp/review-run.AbC123",
+        "/tmp/scan_pages",
+        "/private/tmp/refine.Xy9",
+        "/var/folders/ab/cdef0123/T",
+        "/var/folders/ab/cdef0123/T/TemporaryItems/capture_1",
+        "/private/var/folders/ab/cdef0123/T/tool-run",
+        "/tmp/lab/configs/sub",
+    ])
+    def test_gitless_temp_dir_is_D2_temporary(self, d):
+        c = _classify("path_hash", dir_path=d)
+        assert (c.category, c.subtype, c.role) == ("D", "temporary", "orphan"), d
+        assert c.project_key is None and c.resolved_via == "noise"
+
+    def test_temp_roots_themselves_stay_degenerate(self):
+        for d in ("/tmp", "/private/tmp"):
+            assert _classify("path_hash", dir_path=d).subtype == "degenerate", d
+
+    def test_boundary_non_temp_system_dirs_unchanged(self):
+        # /var/www is not temp; home dirs named like temp roots are projects.
+        assert _classify("path_hash", dir_path="/var/www/html").role == "nest"
+        c = _classify("path_hash", dir_path=f"{CLAUDE}/tmp-notes")
+        assert c.role == "project"
+        c = _classify("path_hash", dir_path=f"{CLAUDE}/myproj/tmp/out")
+        assert c.role == "nest" and c.project_key == f"path_hash:{_hash(f'{CLAUDE}/myproj')}"
+
+    def test_git_repo_in_temp_stays_project(self):
+        c = _classify("git_remote", root_path="/tmp/clone",
+                      remote_url="github.com/me/clone")
+        assert c.category == "root" and c.role == "project"
+        c = _classify("git_root", root_path="/private/tmp/scratch-repo")
+        assert c.category == "root" and c.role == "project"
+
+    def test_gitless_dir_inside_git_repo_in_temp_still_nests(self, tmp_path):
+        # pytest's tmp_path is itself under an OS temp root: a repo there is a
+        # project and its gitless subdirs keep nesting under it.
+        repo = _mkrepo(tmp_path, "proj", "git@github.com:me/proj.git")
+        (repo / "src").mkdir()
+        c = _classify("path_hash", dir_path=str(repo / "src"))
+        assert c.role == "nest" and c.project_key == "git_remote:github.com/me/proj"
+
+    def test_harness_of_a_temp_session_is_not_a_project(self):
+        # Scratchpad whose session ran from /tmp/x: collapsing it would re-mint
+        # the temp dir as a project under the harness's key.
+        d = f"/private/tmp/claude-501/-tmp-scan-pages/{UUID}/scratchpad"
+        c = _classify("path_hash", dir_path=d, session_cwds={UUID: "/tmp/scan_pages"})
+        assert (c.subtype, c.role) == ("temporary", "orphan")
+
+    def test_harness_of_temp_session_via_encode_match_and_decode(self):
+        enc_index = {path_encode("/tmp/scan"): Anchor(
+            f"path_hash:{_hash('/tmp/scan')}", "tmp/scan", "/tmp/scan")}
+        d = f"{HOME}/.claude/projects/{path_encode('/tmp/scan')}/memory"
+        c = _classify("path_hash", dir_path=d, enc_index=enc_index)
+        assert (c.subtype, c.role) == ("temporary", "orphan")
+        # Unresolvable (dir gone): the lossy decode still reads as temp.
+        d = f"/private/tmp/claude-501/-private-tmp-gone-dir/{UUID}/scratchpad"
+        c = _classify("path_hash", dir_path=d)
+        assert (c.subtype, c.role) == ("temporary", "orphan")
+
+    def test_harness_of_a_real_project_still_collapses(self):
+        d = f"/private/tmp/claude-501/-Users-tester-Downloads-Claude-myproj/{UUID}/scratchpad"
+        c = _classify("path_hash", dir_path=d, session_cwds={UUID: f"{CLAUDE}/myproj"})
+        assert c.category == "A" and c.role == "collapse"
+
+    def test_temp_orphan_leaves_grouped_projects_and_states(self, tmp_path):
+        events = _make_sessions_db(tmp_path / "events.db", [])
+        store = WorkspaceStore(tmp_path / "workspace.db")
+        store.record_attribution("s1", "claude", "/tmp/scan_pages/p1.png",
+                                 resolve_path("/tmp/scan_pages/p1.png"))
+        store.build_rollup()
+        store.classify_workspaces(events)
+        g = store.get_portfolio_grouped()
+        assert g["projects"] == []
+        assert [o["subtype"] for o in g["unclassified"]] == ["temporary"]
+        assert g["unclassified"][0]["session_touches"] == 1  # visible, not dropped
+        store.close()
+
+
 # ── fs_decode: hyphenated names must not be split ────────────────────────
 
 class TestFsDecode:

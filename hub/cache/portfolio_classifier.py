@@ -22,7 +22,11 @@ The taxonomy (epic #24), one rule each:
     *inside* a project nests under it but de-prioritized as config; D2:
     home-level dotfolders (``~/.config/*``, ``~/.claude/*`` non-project) and
     degenerate/system roots (``/``, ``/tmp``, ``~``, containers) go to the
-    collapsed "sin clasificar / herramientas" section.
+    collapsed "sin clasificar / herramientas" section. Also D2 (#36), never a
+    project even though ``anchor_path`` would mint one below the skipped system
+    segments: OS temp dirs (``/tmp/**``, ``/private/tmp/**``,
+    ``/var/folders/**``, ``/private/var/**`` — subtype ``temporary``). Only
+    gitless (``path_hash``) dirs: a git repo is a project wherever it lives.
 
 Collapse (A) resolves the real project two ways, in order:
 
@@ -74,6 +78,25 @@ _SCRATCH = re.compile(
 
 def _split(p: str) -> list[str]:
     return [x for x in p.replace("\\", "/").split("/") if x]
+
+
+# OS temp roots (#36). ``_SYS_ROOTS`` only strips the leading segments, so
+# ``/tmp/x`` or ``/var/folders/…/T/y`` would otherwise anchor as a project.
+# ``/var/folders`` is listed on its own: ``/var/www`` and friends are not temp.
+_TEMP_ROOTS = (("tmp",), ("private", "tmp"), ("var", "folders"), ("private", "var"))
+
+
+def is_temp_path(abspath: str) -> bool:
+    """True for a path at or below an OS temp root (see ``_TEMP_ROOTS``)."""
+    parts = _split(abspath)
+    return any(tuple(parts[: len(r)]) == r for r in _TEMP_ROOTS)
+
+
+def noise_subtype(abspath: str) -> str | None:
+    """The D2 subtype of a gitless dir that is never a project, else ``None``."""
+    if is_temp_path(abspath):
+        return "temporary"
+    return None
 
 
 def path_encode(abspath: str) -> str:
@@ -218,15 +241,23 @@ class Classification:
     """The classification of one workspace (a row of ``workspace_classification``)."""
 
     category: str      # root | A | B | C | D
-    subtype: str       # project | harness | subdir | materials | config | home_config | degenerate
+    subtype: str       # project | harness | subdir | materials | config | home_config | degenerate | temporary
     role: str          # project | collapse | nest | orphan
     project_key: str | None
     project_label: str | None
-    resolved_via: str  # self | session_cwd | encode_match | fs_decode | subdir | materials | dotchild | home_dot | degenerate | tool | unresolved
+    resolved_via: str  # self | session_cwd | encode_match | fs_decode | subdir | materials | dotchild | home_dot | degenerate | tool | unresolved | noise
 
 
 def _orphan(subtype: str, via: str) -> Classification:
     return Classification("D", subtype, "orphan", None, None, via)
+
+
+def _noise_of(anchor: Anchor, path: str) -> Classification | None:
+    """D2 orphan when ``path`` is a gitless never-a-project dir (#36), else ``None``."""
+    if not anchor.key.startswith("path_hash:"):
+        return None
+    sub = noise_subtype(path)
+    return _orphan(sub, "noise") if sub else None
 
 
 def classify(
@@ -283,6 +314,12 @@ def classify(
     if anchor is None:
         return _orphan("degenerate", "degenerate")
 
+    # 7. D2 — temp dirs are never projects (#36). Gitless only: a dir whose
+    #    anchor resolved to a git repo keeps nesting under it.
+    noise = _noise_of(anchor, d)
+    if noise:
+        return noise
+
     if os.path.normpath(anchor.path) == os.path.normpath(d):
         return Classification("root", "project", "project", anchor.key,
                               anchor.label, "self")
@@ -319,24 +356,30 @@ def _collapse_from_encoded(
         if cwd:
             anchor = anchor_of_realpath(cwd)
             if anchor is not None:
-                return Classification("A", "harness", "collapse",
-                                      anchor.key, anchor.label, "session_cwd")
+                # A harness whose real project is itself noise (a session run
+                # from /tmp/x) must not re-mint that noise as a project (#36).
+                return _noise_of(anchor, cwd) or Classification(
+                    "A", "harness", "collapse", anchor.key, anchor.label, "session_cwd")
 
     anchor = enc_index.get(enc)
     if anchor is not None:
-        return Classification("A", "harness", "collapse",
-                              anchor.key, anchor.label, "encode_match")
+        return _noise_of(anchor, anchor.path) or Classification(
+            "A", "harness", "collapse", anchor.key, anchor.label, "encode_match")
 
     decoded = fs_decode(enc)
     if decoded is not None:
         anchor = anchor_of_realpath(decoded)
         if anchor is not None:
-            return Classification("A", "harness", "collapse",
-                                  anchor.key, anchor.label, "fs_decode")
+            return _noise_of(anchor, decoded) or Classification(
+                "A", "harness", "collapse", anchor.key, anchor.label, "fs_decode")
 
     # Last resort: keep the harness folder collapsed onto a synthetic project
     # from its encoded name (never orphaned — its work still belongs to a
-    # project we simply could not pin to a real path).
+    # project we simply could not pin to a real path) — unless even the lossy
+    # decode reads as noise (#36).
+    sub = noise_subtype(enc.replace("-", "/"))
+    if sub:
+        return _orphan(sub, "noise")
     label = ProjectDiscovery.extract_project_name(enc.replace("-", "/"))
     return Classification("A", "harness", "collapse",
                           f"encoded:{enc}", label or enc, "unresolved")
