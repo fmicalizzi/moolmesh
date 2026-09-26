@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: September 2026 — v1.21.0
+Last updated: September 2026 — v1.22.0
 
 ---
 
@@ -171,6 +171,11 @@ Codex work becomes visible ([#40](https://github.com/fmicalizzi/moolmesh/issues/
 - **cwd fallback** for any provider: sessions with no file path are attributed to their working directory (`via='cwd'`), and those edges are replaced once a real file edge appears.
 - **Event-time dating:** `path_attributions.event_ts` (earliest event, mixed formats parsed to UTC). The rollup buckets sessions by that UTC day. A one-time migration resets the cursor so the daemon re-derives the history automatically, and the one-day backfill spike spreads back over the real days.
 - **Rollup reconcile:** session counts are recomputed from edges (fs/git history untouched), removing an old double count.
+
+### v1.22 — Portfolio freshness + test isolation
+
+- **Freshness indicator** in `/portfolio` ([#43](https://github.com/fmicalizzi/moolmesh/issues/43)): "actualizado hace X", with warnings for a stale portfolio (> 2× the attribution interval), a failed cycle (error type only), auto-attribution off, or a config change not yet applied. It re-fetches only the monitoring endpoint every 60 s and never relies on color alone.
+- **Test isolation** ([#44](https://github.com/fmicalizzi/moolmesh/issues/44)): the suite runs against a throwaway home set before any import, and a guard aborts if a path escapes it. Real-data tests are opt-in and read-only. The folder watcher is stopped cleanly on shutdown.
 
 ---
 
