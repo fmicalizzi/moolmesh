@@ -237,7 +237,7 @@
   <div class="fs-mon" id="attr-fresh" aria-live="polite"></div>
   <div class="prod" id="prod-card">
     <div class="prod-top">
-      <h3 title="Sesiones fechadas por ingesta (MAX created_at). Los totales son de la ventana elegida; una sesión que tocó varios proyectos cuenta en cada uno, así que no son aditivos entre filas.">Producción por proyecto en el tiempo — esfuerzo (sesiones), no duración</h3>
+      <h3 title="Sesiones fechadas por ingesta (MAX created_at) si se capturaron en vivo, y por la hora real del evento si son historia importada. Los totales son de la ventana elegida; una sesión que tocó varios proyectos cuenta en cada uno, así que no son aditivos entre filas.">Producción por proyecto en el tiempo — esfuerzo (sesiones), no duración</h3>
       <div class="toggle" id="prod-toggle">
         <button data-days="4">4 días</button>
         <button data-days="7" class="on">semana</button>
@@ -272,8 +272,8 @@ function badges(sources){ return (sources||[]).map(s => `<span class="badge b-${
 function metaStr(r){ return `${r.session_touches||0}s / ${r.fs_touches||0}f / ${r.git_touches||0}g · ${r.active_days||0}d · ${esc((r.last_activity||'—').replace('T',' ').slice(0,16))}`; }
 
 // --- Production over time (#24 Stage 2): per-project contribution strip.
-// Effort = sessions (NOT duration), dated by ingestion (MAX events.created_at),
-// aggregated over the canonical project. Cell color = the day's dominant
+// Effort = sessions (NOT duration), dated by ingestion (MAX events.created_at)
+// for live rows and by event time for imported history (#53), aggregated over the canonical project. Cell color = the day's dominant
 // provider; shade = session volume vs the window's busiest day. Hand-rolled
 // inline SVG, zero-dep. hide_project_names is honored server-side (labels come
 // already masked; we never fall back to project_key).
