@@ -71,10 +71,35 @@ def _mig_2_watcher_state(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _mig_3_historical_flag(conn: sqlite3.Connection) -> None:
+    """Mark events ingested by a non-live path (issue #45).
+
+    ``mool backfill``, the daemon's startup catch-up and ``--reparse codex``
+    insert OLD events with NEW ids, so every "highest id = most recent" reader
+    (the dashboard's recent feed, the startup stats tracker, SSE replay, MCP
+    ``get_recent_events``) would surface March history as current activity.
+    Those paths write ``historical = 1``; the live watcher keeps the default 0.
+    Rows that already exist stay 0: they were ingested live. The flag is NOT
+    part of the event fingerprint, so a re-harvest still dedupes.
+
+    The partial index keeps ``load_recent`` a bounded index walk even when the
+    newest ids are hundreds of thousands of historical rows.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "historical" not in columns:
+        conn.execute(
+            "ALTER TABLE events ADD COLUMN historical INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_live ON events(id) WHERE historical = 0"
+    )
+
+
 # Versioned, additive migrations for events.db — each runs exactly once.
 _EVENT_STORE_MIGRATIONS = [
     (1, "session_lifecycle", _mig_1_session_lifecycle),
     (2, "watcher_state", _mig_2_watcher_state),
+    (3, "historical_flag", _mig_3_historical_flag),
 ]
 
 
@@ -108,21 +133,23 @@ def _compute_fingerprint(event_dict: dict[str, Any]) -> str:
     return hashlib.md5(key.encode()).hexdigest()
 
 
-def _insert_event_row(conn: sqlite3.Connection, e: dict[str, Any], now: float) -> int:
+def _insert_event_row(
+    conn: sqlite3.Connection, e: dict[str, Any], now: float, historical: bool = False
+) -> int:
     """INSERT OR IGNORE one event (+ its full text); 1 if inserted, else 0."""
     tokens = e.get("tokens")
     cursor = conn.execute(
         """INSERT OR IGNORE INTO events
            (provider, project, event_type, timestamp, summary,
             session_id, tokens_json, tool_name, file_path, model, cwd,
-            fingerprint, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            fingerprint, created_at, historical)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             e.get("provider", ""), e.get("project", ""), e.get("event_type", ""),
             e.get("timestamp", ""), e.get("summary", ""), e.get("session_id"),
             json.dumps(tokens) if tokens else None, e.get("tool_name"),
             e.get("file_path"), e.get("model"), e.get("cwd"),
-            _compute_fingerprint(e), now,
+            _compute_fingerprint(e), now, 1 if historical else 0,
         ),
     )
     if cursor.rowcount <= 0:
@@ -711,13 +738,17 @@ class EventStore:
             conn.commit()
 
     def load_recent(self, limit: int = 500) -> list[dict[str, Any]]:
-        """Load the most recent N events, including their SQLite IDs."""
+        """Load the most recent N live events, including their SQLite IDs.
+
+        Historical rows (backfill / catch-up / re-parse, #45) carry new ids but
+        old timestamps; they are excluded so they never pose as recent.
+        """
         with self._lock:
             conn = self._get_conn()
             rows = conn.execute(
                 """SELECT id, provider, project, event_type, timestamp, summary,
                           session_id, tokens_json, tool_name, file_path, model, cwd
-                   FROM events ORDER BY id DESC LIMIT ?""",
+                   FROM events WHERE historical = 0 ORDER BY id DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
 
@@ -798,13 +829,16 @@ class EventStore:
         SQLite autoincrement — monotonically increasing, gap-free.
 
         Returns list of dicts with an extra 'id' field for the SSE event ID.
+        Historical rows (#45) are skipped: the id sequence stays monotonic for
+        the client, it just jumps over ids that were never live.
         """
         with self._lock:
             conn = self._get_conn()
             rows = conn.execute(
                 """SELECT id, provider, project, event_type, timestamp, summary,
                           session_id, tokens_json, tool_name, file_path, model, cwd
-                   FROM events WHERE id > ? ORDER BY id ASC LIMIT ?""",
+                   FROM events WHERE id > ? AND historical = 0
+                   ORDER BY id ASC LIMIT ?""",
                 (last_id, limit),
             ).fetchall()
 
@@ -1107,8 +1141,12 @@ class EventStore:
         provider: str,
         file_path: str,
         new_offset: int,
+        historical: bool = False,
     ) -> list[dict]:
         """Store events and update file offset in a single atomic transaction.
+
+        ``historical=True`` marks rows ingested by a non-live path (backfill /
+        catch-up, #45) so the "recent" readers skip them.
 
         Returns the events with their assigned SQLite IDs (for SSE broadcast).
         Duplicates (INSERT OR IGNORE that don't insert) are NOT returned.
@@ -1136,6 +1174,7 @@ class EventStore:
                 e.get("cwd"),
                 _compute_fingerprint(e),
                 now,
+                1 if historical else 0,
             ))
 
         result_events = []
@@ -1148,8 +1187,8 @@ class EventStore:
                         """INSERT OR IGNORE INTO events
                            (provider, project, event_type, timestamp, summary,
                             session_id, tokens_json, tool_name, file_path, model, cwd,
-                            fingerprint, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            fingerprint, created_at, historical)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         row,
                     )
                     if cursor.rowcount > 0:
@@ -1217,7 +1256,8 @@ class EventStore:
                 for fp, _path, _off in file_offsets:
                     conn.execute("DELETE FROM file_registry WHERE fingerprint = ?", (fp,))
                 for e in events:
-                    inserted += _insert_event_row(conn, e, now)
+                    # Re-parsed history, not live activity (#45).
+                    inserted += _insert_event_row(conn, e, now, historical=True)
                 for fp, path, off in file_offsets:
                     conn.execute(
                         """INSERT INTO file_registry
