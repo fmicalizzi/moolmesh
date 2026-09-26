@@ -6,6 +6,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.22.0] — 2026-09-26
+
+`/portfolio` now shows how fresh it is (#43), and the test suite can no longer touch
+a developer's real `~/.moolmesh` (#44). No new dependencies and no schema changes.
+
+### Added
+- **#43 — portfolio freshness indicator.** A status line next to the folder-monitoring
+  card: "Portfolio actualizado hace X". It turns into a warning when the last
+  attribution cycle is older than 2× the interval (+60 s grace), when the last cycle
+  failed (error type only, with a pointer to `~/.moolmesh/hub.log`), or when
+  `auto_attribution` is on in the config but the daemon wasn't restarted. It also
+  explains how to turn it on when disabled, and shows "Primera actualización en
+  curso…" before the first cycle. It re-fetches only `/api/workspace/monitoring`
+  every 60 s (no SSE, no portfolio reload). Every state uses dot + text, never color
+  alone, and shows no names or paths.
+  - `/api/workspace/monitoring` adds `attribution_interval_s` (additive).
+
+### Fixed
+- **#44 — the test suite touched the real `~/.moolmesh`.** Several modules derive
+  their store paths at import time, and the server tests built `DashboardServer()`
+  against the real home, so a suite run could open and **migrate** the developer's
+  live databases. `tests/conftest.py` now points `HOME` / `USERPROFILE` at a throwaway
+  directory before the package is imported, and a session guard aborts the run if
+  any store, config or log path escapes it. Tests that read real data on purpose are
+  opt-in (`MOOLMESH_REAL_DATA_TESTS=1`) and open the databases read-only.
+- **#44 — `WorkspaceWatcher` is now stopped on dashboard shutdown**, with a bounded
+  join before the stores close, so an in-flight scan isn't cut mid-write.
+
+---
+
 ## [1.21.0] — 2026-09-26
 
 Codex work now shows up in the portfolio (#40), and session activity is dated by
