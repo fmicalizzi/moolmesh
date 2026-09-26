@@ -6,6 +6,66 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.21.0] — 2026-09-26
+
+Codex work now shows up in the portfolio (#40), and session activity is dated by
+when it happened, not by when it was attributed (#42). They ship together so the
+history is re-derived once, with correct dates. No new dependencies; `events.db`
+is still only read.
+
+### Upgrade notes
+- **Automatic re-derive.** A `workspace.db` migration resets the attribution cursor
+  once. On its first cycle after the upgrade (~30 s after start), the daemon runs a
+  full attribution pass (about 1 s on a large history) that dates every session edge
+  by its real event time. No manual `mool workspace backfill` is needed.
+- **Numbers change.** The cwd fallback attributes sessions that never edited a file,
+  such as conversational sessions in a project folder. Measured on a real history:
+  OpenCode went from 140 to 400 attributed sessions and Claude from 336 to 389. The
+  old spike on the first-backfill day spreads back over the real days (6540 of 7131
+  edges on one day → 178 distinct days).
+- **If the portfolio still shows a spike on an old backfill day** (the migration ran
+  under an older daemon, e.g. from a test run against the real `~/.moolmesh`), run
+  `mool workspace backfill` once.
+- Codex events stored before this version keep their old fields. They're covered by
+  the cwd fallback, and re-parsing them is tracked in #45.
+
+### Added
+- **#40 — Codex attribution.**
+  - The Codex parser now reads `custom_tool_call` records (`exec` JavaScript that
+    drives `tools.apply_patch` / `tools.exec_command`, and raw `apply_patch`).
+    Touched files are extracted from patch headers by regex (JavaScript is never
+    evaluated), resolved against the call's `workdir`, and stored untruncated. A
+    command's `workdir` becomes that event's cwd. A call that patches several
+    directories emits one extra event per additional directory.
+  - **cwd fallback (every provider).** A session with no absolute file path is
+    attributed to each working directory it used (`path_attributions.via = 'cwd'`,
+    skipping `~` and `/`). Those edges are removed as soon as the session gets a
+    real file edge.
+
+### Fixed
+- **#42 — rollup dated sessions by attribution time.** `path_attributions` gains
+  `event_ts`: the earliest underlying event, parsed across the mixed timestamp
+  formats (`…Z`, `-06:00` offsets) to a fixed-format UTC ISO string, falling back
+  to the ingest time. The rollup buckets session activity by that UTC day
+  (consistent with git, #23). It only ever moves earlier on later passes.
+- **Codex session context was shared across files.** One parser tails every
+  rollout, so text read after a daemon restart could get an empty or foreign
+  session id and cwd (59 events had an empty `session_id`). The context is now per
+  file and re-seeded when resuming mid-file.
+- **Session counts in the rollup are reconciled.** `session_touches` is recomputed
+  from the attribution edges on every rollup, zeroing days with no edge left. This
+  removes an existing double count, and the durable fs/git history is never
+  touched.
+- Delivery candidates ignore cwd edges when computing file-extension signals.
+
+### Known follow-ups
+Orphan workspaces (#46); precision items such as `turn_context.cwd` and drive-letter
+paths (#47); tool-stats and "files" counters with the new edges (#48); temp and
+repo-container folders to classify as noise (#36); historical ingestion and a
+Codex re-parse (#45); test isolation from the real `~/.moolmesh` (#44).
+
+---
+
 ## [1.20.0] — 2026-09-23
 
 The portfolio now stays current on its own. The daemon attributes new sessions to
