@@ -16,6 +16,8 @@ from hub.watchers.base import BaseHarvester
 class CodexWatcher(BaseHarvester):
     """Harvests Codex rollout JSONL files into EventStore."""
 
+    CATCHUP = True  # startup catch-up after a daemon outage (#45)
+
     def __init__(
         self,
         store: EventStore,
