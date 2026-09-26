@@ -40,14 +40,15 @@ def _make_events_db(path: Path) -> Path:
 
 
 def _add_event(db: Path, session: str, file_path: str, cwd: str | None = None,
-               provider: str = "claude") -> int:
+               provider: str = "claude", timestamp: str = "2026-01-01T00:00:00Z",
+               created_at: float | None = None) -> int:
     c = sqlite3.connect(db)
     cur = c.execute(
         "INSERT INTO events (provider, project, event_type, timestamp, summary,"
         " session_id, tool_name, file_path, cwd, created_at)"
         " VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (provider, "p", "tool_use", "2026-01-01T00:00:00", "s", session,
-         "Edit", file_path, cwd, time.time()),
+        (provider, "p", "tool_use", timestamp, "s", session,
+         "Edit", file_path, cwd, time.time() if created_at is None else created_at),
     )
     c.commit()
     rid = cur.lastrowid

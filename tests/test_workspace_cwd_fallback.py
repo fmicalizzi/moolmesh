@@ -56,9 +56,10 @@ def env(tmp_path, monkeypatch):
     s.close()
 
 
-def _cwd_event(db: Path, session: str, cwd: str | None, provider: str = "codex") -> int:
+def _cwd_event(db: Path, session: str, cwd: str | None, provider: str = "codex",
+               **kw) -> int:
     """A tool/prompt event with no absolute file path — only a cwd."""
-    return _add_event(db, session, None, cwd=cwd, provider=provider)
+    return _add_event(db, session, None, cwd=cwd, provider=provider, **kw)
 
 
 class TestCwdFallbackEdges:
@@ -251,7 +252,7 @@ class TestRollupReconcile:
         s, events, site, other, plain, tmp = env
         gh = tmp / "absent-github.db"
         monkeypatch.setattr(store_mod, "_now", lambda: "2026-09-20T10:00:00+00:00")
-        _cwd_event(events, "cx1", str(plain))
+        _cwd_event(events, "cx1", str(plain), timestamp="2026-09-20T09:00:00Z")
         s.attribute_incremental(events)
         s.build_rollup(gh)
         # Same day, the filesystem watcher saw a file there (durable fs history).
@@ -259,7 +260,8 @@ class TestRollupReconcile:
             s._conn.execute(
                 "UPDATE workspace_rollup SET fs_touches = 4 WHERE day = '2026-09-20'")
             s._conn.commit()
-        _add_event(events, "cx1", str(other / "x.md"), provider="codex")
+        _add_event(events, "cx1", str(other / "x.md"), provider="codex",
+                   timestamp="2026-09-20T09:30:00Z")
         s.attribute_incremental(events)
         s.build_rollup(gh)
         assert _rollup_by_key(s)[resolve_dir(str(plain)).key] == (0, 4, 0)
@@ -465,11 +467,14 @@ class TestReplayMatchesFullPass:
             ],
         ]
 
-    def _replay(self, s, events, windows, gh, days, monkeypatch):
-        for rows, day in zip(windows, days):
+    def _replay(self, s, events, windows, gh, days, monkeypatch, event_days=None):
+        """One window per pass day; each window's events are stamped on its
+        ``event_days`` entry (default: the pass day itself)."""
+        for rows, day, eday in zip(windows, days, event_days or days):
             monkeypatch.setattr(store_mod, "_now", lambda d=day: f"{d}T10:00:00+00:00")
             for sid, prov, fp, cwd in rows:
-                _add_event(events, sid, fp, cwd=cwd, provider=prov)
+                _add_event(events, sid, fp, cwd=cwd, provider=prov,
+                           timestamp=f"{eday}T08:00:00Z")
             s.attribute_incremental(events)
             s.build_rollup(gh)
 
@@ -495,23 +500,22 @@ class TestReplayMatchesFullPass:
         vias = {(r[0], r[3]) for r in _attr_rows(s)}
         assert vias == {("A", "file"), ("B", "file"), ("C", "cwd"), ("D", "file")}
 
-    def test_multi_day_replay_differs_only_in_first_seen_day(self, env, monkeypatch):
-        """By design (#42): ``first_seen`` — hence the rollup ``day`` — is the
-        attribution pass's clock, not the event's. A replay spread over 4 days
-        dates each edge on the day its window ran; a later full pass dates all
-        of them on its own day. Edges and per-workspace totals must still match;
-        only the day buckets differ."""
+    def test_multi_day_replay_equals_full_pass_by_event_day(self, env, monkeypatch):
+        """#42: the rollup ``day`` is the EVENT's UTC day, not the pass clock
+        (``first_seen``). A replay whose passes run days after the events, and
+        a single full pass on yet another day, bucket identically — and never
+        on a pass day."""
         s, events, site, other, plain, tmp = env
         gh = tmp / "absent-github.db"
         windows = self._windows(site, other, plain)
-        days = ["2026-09-20", "2026-09-21", "2026-09-22", "2026-09-23"]
-        self._replay(s, events, windows, gh, days, monkeypatch)
-        full = self._full(tmp, events, gh, "2026-09-23", monkeypatch)
+        event_days = ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13"]
+        pass_days = ["2026-09-20", "2026-09-21", "2026-09-22", "2026-09-23"]
+        self._replay(s, events, windows, gh, pass_days, monkeypatch, event_days)
+        full = self._full(tmp, events, gh, "2026-09-30", monkeypatch)
         try:
             assert _attr_rows(s) == _attr_rows(full)
-            assert (_session_rollup(s, by_day=False)
-                    == _session_rollup(full, by_day=False))
-            assert {d for _, d in _session_rollup(full)} == {"2026-09-23"}
-            assert len({d for _, d in _session_rollup(s)}) > 1
+            assert _session_rollup(s) == _session_rollup(full)
+            days = {d for _, d in _session_rollup(full)}
+            assert days <= set(event_days) and len(days) > 1
         finally:
             full.close()
