@@ -245,6 +245,36 @@ class TestTempRoots:
         store.close()
 
 
+class TestNoiseGuarantees:
+    def test_client_and_shared_containers_unchanged(self):
+        # A remote-less git repo at container depth and a "_"-prefixed client
+        # folder (with nested materials) classify exactly as before #36.
+        c = _classify("git_root", root_path=f"{CLAUDE}/SHARED")
+        assert (c.category, c.role, c.project_key) == ("root", "project", f"git_root:{CLAUDE}/SHARED")
+        c = _classify("path_hash", dir_path=f"{CLAUDE}/_acme")
+        assert (c.category, c.role) == ("root", "project")
+        c = _classify("path_hash", dir_path=f"{CLAUDE}/_acme/assets/renders")
+        assert (c.category, c.subtype, c.role) == ("C", "materials", "nest")
+        assert c.project_key == f"path_hash:{_hash(f'{CLAUDE}/_acme')}"
+
+    def test_temp_orphan_is_masked_under_hide(self, tmp_path, monkeypatch):
+        import hub.mcp_server as ms
+        events = _make_sessions_db(tmp_path / "events.db", [])
+        store = WorkspaceStore(tmp_path / "workspace.db")
+        store.record_attribution("s1", "claude", "/tmp/scan_pages/p1.png",
+                                 resolve_path("/tmp/scan_pages/p1.png"))
+        store.build_rollup()
+        store.classify_workspaces(events)
+        store.close()
+        monkeypatch.setattr(ms, "_hide_project_names", lambda: True)
+        g = _get_portfolio_grouped(str(tmp_path / "workspace.db"),
+                                   events_db=str(events),
+                                   github_db=str(tmp_path / "github.db"))
+        o = g["unclassified"][0]
+        assert o["subtype"] == "temporary"
+        assert o["dir_path"] is None and o["label"].startswith("hidden:")
+
+
 class TestAppBundles:
     @pytest.mark.parametrize("d", [
         "/Applications/Editor.app",
