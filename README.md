@@ -133,7 +133,7 @@ pip install moolmesh
 
 ### systemd service (Linux)
 
-Use `mool dashboard` (foreground) as the entry point — MoolMesh auto-detects systemd and skips the double-fork:
+`mool daemon start` works as a foreground entry point — MoolMesh auto-detects systemd and skips the double-fork:
 
 ```ini
 # ~/.config/systemd/user/moolmesh.service
@@ -144,7 +144,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/mool daemon start --port 5200
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
@@ -157,7 +157,11 @@ systemctl --user enable --now moolmesh
 systemctl --user status moolmesh
 ```
 
-> **Note:** `mool daemon start` auto-detects systemd (`$INVOCATION_ID`) and stays in the foreground, so `Type=simple` works correctly. Outside systemd, it double-forks as usual.
+> **Why `Restart=always`:** according to `systemd.service(5)`, `SIGHUP`, `SIGINT`, `SIGTERM` and `SIGPIPE` count as a *clean* exit, and `Restart=on-failure` only revives non-zero exits or unclean signals. So with `Restart=on-failure` a `kill -TERM` — including a `mool daemon stop` from outside — would never be revived, whatever the exit code. `Restart=always` revives the dashboard after any exit; `systemctl --user stop moolmesh` still stops it for good, because systemd never restarts a service it stopped itself.
+>
+> `Restart=on-failure` remains a valid choice if you only want real failures revived: `mool daemon start`/`mool dashboard` exit 1 when they cannot start (port already in use, another MoolMesh on the port), and a supervised run never silently moves to the next port. But a terminated process will stay down until you start it again.
+>
+> **Note:** `mool daemon start` auto-detects systemd (`$INVOCATION_ID`) and stays in the foreground, so `Type=simple` works correctly. Outside systemd, it double-forks as usual; `--foreground` forces the same behavior without the environment marker. When managed by systemd, use `systemctl --user stop/restart moolmesh` instead of `mool daemon stop/restart` — MoolMesh warns, but it cannot restart the unit for you.
 
 ---
 
