@@ -317,6 +317,7 @@ class TestDaemonCLIExitCodes:
         monkeypatch.setattr(daemon_mod, "_pid_is_supervised", lambda pid: pid == 4242)
         monkeypatch.setattr(daemon_mod, "stop_daemon", lambda: True)
         monkeypatch.setattr(daemon_mod, "daemonize", lambda **kwargs: 12345)
+        monkeypatch.setattr(daemon_mod, "wait_for_daemon_ready", lambda *args, **kwargs: None)
         monkeypatch.setattr("time.sleep", lambda _: None)
         monkeypatch.delenv("INVOCATION_ID", raising=False)
         monkeypatch.delenv("NOTIFY_SOCKET", raising=False)

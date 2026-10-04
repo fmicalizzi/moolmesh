@@ -73,14 +73,24 @@ def _print_supervisor_warning(action: str) -> None:
     print(dim("  can leave the unit out of sync (or the supervisor may revive it)."))
 
 
+def _report_daemon_failure(exc: Exception) -> None:
+    from hub.daemon import LOG_FILE, log_tail
+    print(red(f"Error: daemon did not start: {exc}"), file=sys.stderr)
+    print(dim(f"  Logs → {LOG_FILE}"), file=sys.stderr)
+    for line in log_tail().splitlines():
+        print(dim(f"  | {line}"), file=sys.stderr)
+
+
 def _launch_daemon(args: argparse.Namespace, *, restarted: bool) -> None:
     """Start (or restart) the daemon, or run it in the foreground.
 
     Exit codes: 0 on success or after a supervised foreground run stops
-    gracefully; 1 when a supervised/foreground start could not bind its port
-    (#55). The background double-fork path cannot report a child failure.
+    gracefully; 1 when the start fails — a supervised/foreground bind error,
+    or a background child that never answers /health (#55, #55b).
     """
-    from hub.daemon import daemonize, _is_supervised, LOG_FILE
+    from hub.daemon import (
+        daemonize, wait_for_daemon_ready, DaemonStartError, _is_supervised, LOG_FILE,
+    )
     from hub.dashboard.server import DashboardStartError
 
     providers = None
@@ -111,13 +121,19 @@ def _launch_daemon(args: argparse.Namespace, *, restarted: bool) -> None:
         print(dim("MoolMesh daemon stopped"))
         return
 
-    pid = daemonize(
-        host=args.host,
-        port=port,
-        project_filter=getattr(args, "project", None),
-        providers=providers,
-        fixed_port=True,
-    )
+    try:
+        pid = daemonize(
+            host=args.host,
+            port=port,
+            project_filter=getattr(args, "project", None),
+            providers=providers,
+            fixed_port=True,
+        )
+        wait_for_daemon_ready(pid, args.host, port)
+    except DaemonStartError as exc:
+        _report_daemon_failure(exc)
+        sys.exit(1)
+
     verb = "restarted" if restarted else "started"
     print(green(f"MoolMesh daemon {verb} (PID {pid})"))
     print(f"  Dashboard → http://{args.host}:{port}")
@@ -127,9 +143,10 @@ def _launch_daemon(args: argparse.Namespace, *, restarted: bool) -> None:
 def cmd_daemon(args: argparse.Namespace) -> None:
     """Manage the background dashboard daemon.
 
-    ``start``/``restart`` exit 1 when a supervised or foreground run cannot
-    bind its port; the background double-fork path cannot report a child
-    failure, and ``stop``/``status`` always notify without blocking (#55).
+    ``start``/``restart`` exit 1 when the daemon cannot start: a supervised
+    or foreground bind error, or a background child that never answers
+    /health within the start window (#55, #55b). ``stop``/``status`` always
+    notify without blocking.
     """
     from hub.daemon import (
         stop_daemon, daemon_status, read_pid, _pid_is_supervised,

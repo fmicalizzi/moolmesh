@@ -674,6 +674,7 @@ class DashboardServer:
                         uptime = int(time.monotonic() - server_ref._start_time)
                         self._serve_json({
                             "status": "healthy",
+                            "pid": os.getpid(),
                             "version": __version__,
                             "uptime_seconds": uptime,
                             "events_count": server_ref.stats["total_events"],

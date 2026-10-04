@@ -15,6 +15,14 @@ CONFIG_DIR = Path.home() / ".moolmesh"
 PID_FILE = CONFIG_DIR / "moolmesh.pid"
 LOG_FILE = CONFIG_DIR / "daemon.log"
 
+# How long the parent waits for a just-launched daemon to answer /health (#55b).
+DEFAULT_START_TIMEOUT = 10.0
+_POLL_INTERVAL = 0.2
+
+
+class DaemonStartError(RuntimeError):
+    """The background daemon did not become healthy in the start window."""
+
 
 def read_pid() -> int | None:
     try:
@@ -50,6 +58,143 @@ def _pid_is_supervised(pid: int) -> bool:
     except OSError:
         return False
     return b"INVOCATION_ID=" in environ or b"NOTIFY_SOCKET=" in environ
+
+
+def _probe_host(host: str) -> str:
+    """Loopback when the daemon bound a wildcard address (#55b)."""
+    return "127.0.0.1" if host in ("0.0.0.0", "") else host
+
+
+def _pid_alive(pid: int) -> bool:
+    """Liveness probe that never signals the process (os.kill on Windows would)."""
+    if _IS_WINDOWS:
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            return bool(ok) and exit_code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _fetch_health(host: str, port: int) -> dict | None:
+    """One GET /health; None when nothing healthy answers (or it is not JSON)."""
+    import http.client
+    import json
+    from urllib.request import urlopen
+    try:
+        with urlopen(f"http://{host}:{port}/health", timeout=2) as resp:
+            return json.loads(resp.read())
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+
+
+def _terminate_pid(pid: int, *, wait_seconds: float = 3.0) -> None:
+    """Best-effort stop of a specific pid (SIGTERM, then SIGKILL on Unix)."""
+    if _IS_WINDOWS:
+        subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def wait_for_daemon_ready(
+    pid: int,
+    host: str,
+    port: int,
+    *,
+    timeout: float | None = None,
+) -> None:
+    """Wait until the just-launched daemon answers /health as itself (#55b).
+
+    Success: ``/health`` reports ``status == "healthy"`` and ``pid == pid``
+    (the health payload carries the serving process id). Failure: the process
+    is gone, or ``timeout`` seconds (default ``DEFAULT_START_TIMEOUT``) pass
+    without a healthy answer; on timeout the process is stopped so a slow
+    start cannot leave a daemon running behind a reported failure.
+
+    Raises ``DaemonStartError`` for the caller to report and exit 1 on.
+    """
+    if timeout is None:
+        timeout = DEFAULT_START_TIMEOUT
+    probe = _probe_host(host)
+    deadline = time.monotonic() + timeout
+    while True:
+        health = _fetch_health(probe, port)
+        if health and health.get("status") == "healthy" and health.get("pid") == pid:
+            return
+        if not _pid_alive(pid):
+            raise DaemonStartError(
+                f"the daemon exited before becoming healthy (port {port})"
+            )
+        if time.monotonic() >= deadline:
+            _terminate_pid(pid)
+            raise DaemonStartError(
+                f"no healthy answer on port {port} within {timeout:g}s"
+            )
+        time.sleep(_POLL_INTERVAL)
+
+
+def log_tail(max_lines: int = 10) -> str:
+    """Last ``max_lines`` lines of the daemon log ("" when there is none)."""
+    try:
+        lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        return f"(could not read {LOG_FILE}: {exc})"
+    return "\n".join(lines[-max_lines:])
+
+
+def _read_pid_report(read_fd: int, *, timeout: float = 5.0) -> int | None:
+    """Read the child's PID line from the launch pipe; None on EOF/timeout."""
+    import select
+    deadline = time.monotonic() + timeout
+    buf = b""
+    while b"\n" not in buf:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            ready, _, _ = select.select([read_fd], [], [], remaining)
+        except OSError:
+            return None
+        if not ready:
+            return None
+        chunk = os.read(read_fd, 64)
+        if not chunk:
+            break
+        buf += chunk
+    try:
+        return int(buf.split(b"\n", 1)[0])
+    except ValueError:
+        return None
 
 
 def daemonize(
@@ -114,12 +259,26 @@ def _daemonize_unix(
     *,
     fixed_port: bool = False,
 ) -> int:
-    """Unix double-fork daemon."""
+    """Unix double-fork daemon. Returns the server (grandchild) PID.
+
+    The grandchild reports its PID — and, with EOF, an early death — through a
+    pipe before serving, so the parent never guesses from a pidfile race and
+    reaps the intermediate process instead of leaving a zombie (#55b).
+    """
+    read_fd, write_fd = os.pipe()
     pid = os.fork()
     if pid > 0:
-        time.sleep(0.3)
-        return read_pid() or pid
+        os.close(write_fd)
+        os.waitpid(pid, 0)
+        try:
+            daemon_pid = _read_pid_report(read_fd)
+        finally:
+            os.close(read_fd)
+        if daemon_pid is None:
+            raise DaemonStartError("the daemon process exited before reporting its PID")
+        return daemon_pid
 
+    os.close(read_fd)
     os.setsid()
 
     pid2 = os.fork()
@@ -128,6 +287,10 @@ def _daemonize_unix(
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     write_pid(os.getpid())
+    try:
+        os.write(write_fd, f"{os.getpid()}\n".encode("ascii"))
+    finally:
+        os.close(write_fd)
 
     log_fd = os.open(str(LOG_FILE), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     os.dup2(log_fd, sys.stdout.fileno())
@@ -143,7 +306,11 @@ def _daemonize_unix(
     try:
         _run_server(host, port, project_filter, providers, fixed_port=fixed_port)
     except DashboardStartError:
+        sys.stdout.flush()
+        sys.stderr.flush()
         os._exit(1)
+    sys.stdout.flush()
+    sys.stderr.flush()
     os._exit(0)
 
 
