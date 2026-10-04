@@ -32,7 +32,18 @@ def _configure_stdio_encoding() -> None:
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:
-    from hub.dashboard.server import DashboardServer
+    """Start the dashboard in the foreground.
+
+    Exit codes: 0 after a graceful stop (Ctrl+C; a supervised
+    ``mool daemon start`` also shuts down cleanly on SIGTERM); 1 when the
+    dashboard could not start — port taken, another MoolMesh already on the
+    port, or no free port after the interactive retries (#55).
+
+    A port passed with ``--port`` (or a supervised run) is fixed: if it is
+    taken the command fails instead of silently moving to the next port.
+    """
+    from hub.daemon import _is_supervised
+    from hub.dashboard.server import DashboardServer, DashboardStartError
     from hub.log import setup
 
     setup(level=getattr(args, "log_level", "INFO"))
@@ -41,17 +52,88 @@ def cmd_dashboard(args: argparse.Namespace) -> None:
     if args.providers:
         providers = [p.strip() for p in args.providers.split(",")]
 
+    port = args.port if args.port is not None else 5200
     server = DashboardServer(
         host=args.host,
-        port=args.port,
+        port=port,
         project_filter=args.project,
         providers=providers,
+        fixed_port=args.port is not None or _is_supervised(),
     )
-    server.start()
+    try:
+        server.start()
+    except DashboardStartError as exc:
+        print(red(f"Error: dashboard did not start: {exc}"), file=sys.stderr)
+        sys.exit(1)
+
+
+def _print_supervisor_warning(action: str) -> None:
+    print(yellow("This MoolMesh was started by a process supervisor (systemd)."))
+    print(dim(f"  Prefer: systemctl --user {action} moolmesh — doing it from here"))
+    print(dim("  can leave the unit out of sync (or the supervisor may revive it)."))
+
+
+def _launch_daemon(args: argparse.Namespace, *, restarted: bool) -> None:
+    """Start (or restart) the daemon, or run it in the foreground.
+
+    Exit codes: 0 on success or after a supervised foreground run stops
+    gracefully; 1 when a supervised/foreground start could not bind its port
+    (#55). The background double-fork path cannot report a child failure.
+    """
+    from hub.daemon import daemonize, _is_supervised, LOG_FILE
+    from hub.dashboard.server import DashboardStartError
+
+    providers = None
+    if args.providers:
+        providers = [p.strip() for p in args.providers.split(",")]
+
+    port = args.port if args.port is not None else 5200
+    foreground = getattr(args, "foreground", False) or _is_supervised()
+    fixed_port = args.port is not None or foreground
+
+    if foreground:
+        verb = "restarting" if restarted else "starting"
+        print(green(f"MoolMesh daemon {verb} in the foreground (PID {os.getpid()})"))
+        print(f"  Dashboard → http://{args.host}:{port}")
+        print(dim("  Logs → stderr (foreground mode)"))
+        try:
+            daemonize(
+                host=args.host,
+                port=port,
+                project_filter=getattr(args, "project", None),
+                providers=providers,
+                foreground=True,
+                fixed_port=fixed_port,
+            )
+        except DashboardStartError as exc:
+            print(red(f"Error: dashboard did not start: {exc}"), file=sys.stderr)
+            sys.exit(1)
+        print(dim("MoolMesh daemon stopped"))
+        return
+
+    pid = daemonize(
+        host=args.host,
+        port=port,
+        project_filter=getattr(args, "project", None),
+        providers=providers,
+        fixed_port=True,
+    )
+    verb = "restarted" if restarted else "started"
+    print(green(f"MoolMesh daemon {verb} (PID {pid})"))
+    print(f"  Dashboard → http://{args.host}:{port}")
+    print(dim(f"  Logs → {LOG_FILE}"))
 
 
 def cmd_daemon(args: argparse.Namespace) -> None:
-    from hub.daemon import daemonize, stop_daemon, daemon_status, read_pid, LOG_FILE
+    """Manage the background dashboard daemon.
+
+    ``start``/``restart`` exit 1 when a supervised or foreground run cannot
+    bind its port; the background double-fork path cannot report a child
+    failure, and ``stop``/``status`` always notify without blocking (#55).
+    """
+    from hub.daemon import (
+        stop_daemon, daemon_status, read_pid, _pid_is_supervised,
+    )
 
     match args.daemon_command:
         case "start":
@@ -59,22 +141,12 @@ def cmd_daemon(args: argparse.Namespace) -> None:
             if existing:
                 print(yellow(f"MoolMesh daemon already running (PID {existing})"))
                 return
-
-            providers = None
-            if args.providers:
-                providers = [p.strip() for p in args.providers.split(",")]
-
-            pid = daemonize(
-                host=args.host,
-                port=args.port,
-                project_filter=getattr(args, "project", None),
-                providers=providers,
-            )
-            print(green(f"MoolMesh daemon started (PID {pid})"))
-            print(f"  Dashboard → http://{args.host}:{args.port}")
-            print(dim(f"  Logs → {LOG_FILE}"))
+            _launch_daemon(args, restarted=False)
 
         case "stop":
+            pid = read_pid()
+            if pid and _pid_is_supervised(pid):
+                _print_supervisor_warning("stop")
             if stop_daemon():
                 print(green("MoolMesh daemon stopped"))
             else:
@@ -83,24 +155,14 @@ def cmd_daemon(args: argparse.Namespace) -> None:
         case "restart":
             info = daemon_status()
             if info:
+                if _pid_is_supervised(info["pid"]):
+                    _print_supervisor_warning("restart")
                 stop_daemon()
                 print(dim("Stopped previous daemon"))
                 import time
                 time.sleep(0.5)
 
-            providers = None
-            if args.providers:
-                providers = [p.strip() for p in args.providers.split(",")]
-
-            pid = daemonize(
-                host=args.host,
-                port=args.port,
-                project_filter=getattr(args, "project", None),
-                providers=providers,
-            )
-            print(green(f"MoolMesh daemon restarted (PID {pid})"))
-            print(f"  Dashboard → http://{args.host}:{args.port}")
-            print(dim(f"  Logs → {LOG_FILE}"))
+            _launch_daemon(args, restarted=True)
 
         case "status":
             _print_daemon_status()
@@ -911,7 +973,8 @@ def main() -> None:
 
     # dashboard
     dash = subparsers.add_parser("dashboard", help="Start live dashboard")
-    dash.add_argument("--port", type=int, default=5200, help="Server port (default: 5200)")
+    dash.add_argument("--port", type=int, default=None,
+                      help="Server port; pinned if given (default: 5200)")
     dash.add_argument("--host", default="localhost", help="Server host (default: localhost)")
     dash.add_argument("--project", help="Filter to project name (substring match)")
     dash.add_argument("--providers", help="Comma-separated providers: claude,codex,qwen,opencode")
@@ -924,19 +987,25 @@ def main() -> None:
     daemon_sub = daemon.add_subparsers(dest="daemon_command")
 
     d_start = daemon_sub.add_parser("start", help="Start daemon")
-    d_start.add_argument("--port", type=int, default=5200, help="Server port (default: 5200)")
+    d_start.add_argument("--port", type=int, default=None,
+                         help="Server port; pinned if given (default: 5200)")
     d_start.add_argument("--host", default="localhost", help="Server host (default: localhost)")
     d_start.add_argument("--project", help="Filter to project name")
     d_start.add_argument("--providers", help="Comma-separated providers")
+    d_start.add_argument("--foreground", action="store_true",
+                         help="Stay in the foreground instead of double-forking")
 
     daemon_sub.add_parser("stop", help="Stop daemon")
     daemon_sub.add_parser("status", help="Show daemon status")
 
     d_restart = daemon_sub.add_parser("restart", help="Restart daemon")
-    d_restart.add_argument("--port", type=int, default=5200, help="Server port (default: 5200)")
+    d_restart.add_argument("--port", type=int, default=None,
+                           help="Server port; pinned if given (default: 5200)")
     d_restart.add_argument("--host", default="localhost", help="Server host (default: localhost)")
     d_restart.add_argument("--project", help="Filter to project name")
     d_restart.add_argument("--providers", help="Comma-separated providers")
+    d_restart.add_argument("--foreground", action="store_true",
+                           help="Stay in the foreground instead of double-forking")
 
     # status (shortcut for daemon status)
     st = subparsers.add_parser("status", help="Show daemon status")

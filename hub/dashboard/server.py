@@ -14,6 +14,18 @@ from typing import Any
 from hub.cache.event_store import EventStore
 
 
+class DashboardStartError(RuntimeError):
+    """The dashboard did not start; callers should exit non-zero (#55)."""
+
+
+class AlreadyRunningError(DashboardStartError):
+    """A healthy MoolMesh already owns the configured port."""
+
+
+class PortUnavailableError(DashboardStartError):
+    """No usable port: the fixed port is taken, or retries were exhausted."""
+
+
 class SessionTracker:
     """Tracks per-project, per-session live analytics from events."""
 
@@ -142,9 +154,11 @@ class DashboardServer:
         port: int = 5200,
         project_filter: str | None = None,
         providers: list[str] | None = None,
+        fixed_port: bool = False,
     ):
         self.host = host
         self.port = port
+        self.fixed_port = fixed_port
         self._start_time = time.monotonic()
 
         # Shared SSE buffer — harvesters push here, SSE handler reads
@@ -301,7 +315,21 @@ class DashboardServer:
         return ""
 
     def start(self) -> None:
-        """Start harvesters and HTTP server.
+        """Start harvesters and HTTP server; block until shutdown.
+
+        Returns normally after a graceful stop (Ctrl+C; ``mool daemon start``
+        also turns SIGTERM into the same path), which is exit code 0 for the
+        CLI. Raises ``DashboardStartError`` (after printing the human-readable
+        reason) when the dashboard could not start, so callers can exit
+        non-zero and supervisors can react (#55):
+
+        - ``AlreadyRunningError``: the port already serves a healthy MoolMesh.
+        - ``PortUnavailableError``: a fixed port is taken, or every retry failed.
+
+        ``fixed_port=True`` (explicit ``--port``, supervised or foreground
+        runs) makes exactly one bind attempt. Otherwise up to 10 ports are
+        tried — interactive ``mool dashboard`` without ``--port`` — and
+        ``self.port`` ends up at the one that worked.
 
         Each harvester reads its live window from the last SQLite offset (or 0
         for new files) and, after an outage, catches up on files missed while
@@ -358,38 +386,64 @@ class DashboardServer:
 
         # Start HTTP server (blocking) — detect existing instance or auto-increment
         handler = self._make_handler()
-        server = None
-        for attempt in range(10):
-            try:
-                server = http.server.ThreadingHTTPServer((self.host, self.port), handler)
-                break
-            except OSError:
-                if attempt == 0:
-                    # Check if the port is already running MoolMesh
-                    try:
-                        import json as _json
-                        from urllib.request import urlopen
-                        with urlopen(f"http://{self.host}:{self.port}/health", timeout=2) as resp:
-                            health = _json.loads(resp.read())
-                        if health.get("status") == "healthy":
-                            print(f"\n  MoolMesh is already running on port {self.port}")
-                            print(f"  Dashboard → http://{self.host}:{self.port}")
-                            print("  Use 'mool daemon stop' to stop it, or --port to use a different port.\n")
-                            return
-                    except Exception:
-                        pass
-                    print(f"\n  Port {self.port} in use, trying next...")
-                self.port += 1
-        if server is None:
-            print(f"\n  Could not find an available port. Exiting.")
-            return
-        print(f"\n  Dashboard → http://{self.host}:{self.port}")
+        server = self._bind_http_server(handler)
         print("  Press Ctrl+C to stop\n")
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             print("\nShutting down...")
             self._shutdown(server)
+
+    def _bind_http_server(self, handler) -> http.server.ThreadingHTTPServer:
+        """Bind the HTTP listener, honoring ``fixed_port``.
+
+        On success prints and returns the bound server with ``self.port`` set
+        to the port actually used. Raises ``AlreadyRunningError`` when the
+        port answers as a healthy MoolMesh, and ``PortUnavailableError`` when
+        a fixed port is taken or every auto-increment retry is exhausted.
+        """
+        attempts = 1 if self.fixed_port else 10
+        first_port = self.port
+        for attempt in range(attempts):
+            try:
+                server = http.server.ThreadingHTTPServer((self.host, self.port), handler)
+            except OSError:
+                if attempt == 0:
+                    if self._moolmesh_answers_on(self.port):
+                        print(f"\n  MoolMesh is already running on port {self.port}")
+                        print(f"  Dashboard → http://{self.host}:{self.port}")
+                        print("  Use 'mool daemon stop' to stop it, or --port to use a different port.\n")
+                        raise AlreadyRunningError(
+                            f"MoolMesh is already running on port {self.port}"
+                        )
+                    if self.fixed_port:
+                        print(f"\n  Port {self.port} is in use by another process")
+                        print("  and this port is fixed (--port, supervised or foreground run):")
+                        print("  not trying another port.\n")
+                        raise PortUnavailableError(
+                            f"port {self.port} is in use by another process"
+                        )
+                    print(f"\n  Port {self.port} in use, trying next...")
+                self.port += 1
+                continue
+            print(f"\n  Dashboard → http://{self.host}:{self.port}")
+            return server
+        print("\n  Could not find an available port. Exiting.\n")
+        raise PortUnavailableError(
+            f"no available port in {first_port}-{first_port + attempts - 1}"
+        )
+
+    def _moolmesh_answers_on(self, port: int) -> bool:
+        """True when ``port`` answers /health as a healthy MoolMesh."""
+        import http.client
+        try:
+            import json as _json
+            from urllib.request import urlopen
+            with urlopen(f"http://{self.host}:{port}/health", timeout=2) as resp:
+                health = _json.loads(resp.read())
+            return health.get("status") == "healthy"
+        except (OSError, ValueError, http.client.HTTPException):
+            return False
 
     def _shutdown(self, server) -> None:
         """Stop every background thread, then close the stores they write to."""

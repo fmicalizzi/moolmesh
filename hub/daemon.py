@@ -36,19 +36,46 @@ def _is_supervised() -> bool:
     return bool(os.environ.get("INVOCATION_ID") or os.environ.get("NOTIFY_SOCKET"))
 
 
-def daemonize(host: str, port: int, project_filter: str | None, providers: list[str] | None) -> int:
+def _pid_is_supervised(pid: int) -> bool:
+    """Best-effort: was ``pid`` started by a supervisor?
+
+    Linux: the process environment carries INVOCATION_ID (systemd) or
+    NOTIFY_SOCKET. Other platforms expose no reliable portable marker, so
+    this returns False there — callers use it only to warn, never to block.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    return b"INVOCATION_ID=" in environ or b"NOTIFY_SOCKET=" in environ
+
+
+def daemonize(
+    host: str,
+    port: int,
+    project_filter: str | None,
+    providers: list[str] | None,
+    *,
+    foreground: bool = False,
+    fixed_port: bool = False,
+) -> int:
     """Launch dashboard in background. Returns child PID.
 
     Unix: classic double-fork. Windows: subprocess with CREATE_NO_WINDOW.
-    Supervised (systemd/Docker): stays in foreground.
+    Supervised (systemd/Docker) or ``foreground=True``: stays in the
+    foreground and blocks until the server stops. ``fixed_port`` forbids
+    silent port auto-increment (explicit --port, supervised or foreground
+    runs, #55).
     """
-    if _is_supervised():
-        return _run_foreground(host, port, project_filter, providers)
+    if foreground or _is_supervised():
+        return _run_foreground(host, port, project_filter, providers, fixed_port=fixed_port)
 
     if _IS_WINDOWS:
         return _daemonize_windows(host, port, project_filter, providers)
 
-    return _daemonize_unix(host, port, project_filter, providers)
+    return _daemonize_unix(host, port, project_filter, providers, fixed_port=fixed_port)
 
 
 def _daemonize_windows(host: str, port: int, project_filter: str | None, providers: list[str] | None) -> int:
@@ -79,7 +106,14 @@ def _daemonize_windows(host: str, port: int, project_filter: str | None, provide
     return proc.pid
 
 
-def _daemonize_unix(host: str, port: int, project_filter: str | None, providers: list[str] | None) -> int:
+def _daemonize_unix(
+    host: str,
+    port: int,
+    project_filter: str | None,
+    providers: list[str] | None,
+    *,
+    fixed_port: bool = False,
+) -> int:
     """Unix double-fork daemon."""
     pid = os.fork()
     if pid > 0:
@@ -104,19 +138,42 @@ def _daemonize_unix(host: str, port: int, project_filter: str | None, providers:
     os.dup2(devnull, sys.stdin.fileno())
     os.close(devnull)
 
-    _run_server(host, port, project_filter, providers)
+    from hub.dashboard.server import DashboardStartError
+
+    try:
+        _run_server(host, port, project_filter, providers, fixed_port=fixed_port)
+    except DashboardStartError:
+        os._exit(1)
     os._exit(0)
 
 
-def _run_foreground(host: str, port: int, project_filter: str | None, providers: list[str] | None) -> int:
-    """Run in foreground for process supervisors (systemd, Docker)."""
+def _run_foreground(
+    host: str,
+    port: int,
+    project_filter: str | None,
+    providers: list[str] | None,
+    *,
+    fixed_port: bool = False,
+) -> int:
+    """Run in foreground for process supervisors (systemd, Docker).
+
+    Blocks until the server stops; lets ``DashboardStartError`` propagate so
+    the CLI can exit 1 when the dashboard could not start (#55).
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     write_pid(os.getpid())
-    _run_server(host, port, project_filter, providers)
+    _run_server(host, port, project_filter, providers, fixed_port=fixed_port)
     return os.getpid()
 
 
-def _run_server(host: str, port: int, project_filter: str | None, providers: list[str] | None) -> None:
+def _run_server(
+    host: str,
+    port: int,
+    project_filter: str | None,
+    providers: list[str] | None,
+    *,
+    fixed_port: bool = False,
+) -> None:
     """Start the dashboard server with signal handling."""
     from hub.dashboard.server import DashboardServer
     from hub.log import setup
@@ -127,6 +184,7 @@ def _run_server(host: str, port: int, project_filter: str | None, providers: lis
         port=port,
         project_filter=project_filter,
         providers=providers,
+        fixed_port=fixed_port or _is_supervised(),
     )
 
     def _handle_term(signum, frame):
