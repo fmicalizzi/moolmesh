@@ -6,6 +6,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.23.3] — 2026-10-04
+
+Daemon reliability: `mool daemon start` / `restart` / `mool dashboard` now report
+failures honestly, so supervised installs (systemd) can revive a dead dashboard
+(#55). Also fixes `mool daemon status` killing the daemon on Windows. No new
+dependencies.
+
+### Upgrade notes
+- **systemd users:** use `Restart=always` (+ `RestartSec=5`) in the unit (README
+  updated). Per `systemd.service(5)`, `SIGTERM` is a *clean* exit, so with
+  `Restart=on-failure` a dashboard terminated from outside is never revived.
+  `systemctl --user stop moolmesh` still stops it for good. Under systemd, prefer
+  `systemctl --user stop/restart moolmesh` over `mool daemon stop/restart`
+  (MoolMesh now warns).
+- **Port behavior changed:** a port passed with `--port`, a supervised or
+  `--foreground` run, and the background daemon are **fixed**. If the port is
+  taken, the command fails with exit 1 instead of silently moving to the next
+  port. Only interactive `mool dashboard` without `--port` still tries the next
+  ports, and it says which one it used.
+
+### Fixed
+- **#55 — exit code 0 when the dashboard did not start.** "No free port" and
+  "MoolMesh already running on this port" now exit **1** with a clear message,
+  instead of `return` (0).
+- **#55 — background start/restart claimed success.**
+  - The parent now waits up to 10 s until the child answers `GET /health` with
+    its own PID (passed back through a pipe; `/health` gains an additive `pid`
+    field). Only then does it print "started"/"restarted".
+  - If the child dies or the window expires, it exits 1, shows the tail of
+    `daemon.log`, and stops a child that never became healthy.
+- **#55 — supervised messages.** `daemon started (PID …)` is no longer printed
+  after the server has already stopped.
+- **`mool daemon status` killed the daemon on Windows.** The liveness check used
+  `os.kill(pid, 0)`, which on Windows calls `TerminateProcess`. Liveness now uses a
+  non-signalling probe on every platform (`OpenProcess` + `GetExitCodeProcess` on
+  Windows).
+
+### Added
+- `mool daemon start|restart --foreground`: stay in the foreground without relying
+  on systemd environment detection.
+
+---
+
 ## [1.23.2] — 2026-09-26
 
 Two Observe fixes: session files that start with the same bytes no longer share one
