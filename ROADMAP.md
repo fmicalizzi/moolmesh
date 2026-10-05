@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: October 2026 — v1.23.3
+Last updated: October 2026 — v1.24.0
 
 ---
 
@@ -186,6 +186,18 @@ Everything you did before installing MoolMesh, or while the daemon was down, bec
 - **`--reparse codex`** re-ingests pre-v1.21 Codex sessions with the current parser. It needs `--yes`, backs up first and runs one transaction per session.
 - **Cloud-only placeholders** (iCloud/FileProvider `SF_DATALESS`, Windows recall attributes, `.icloud`) are detected and skipped without triggering a download.
 - **History stays out of "recent":** an `events.historical` flag with a partial index keeps the live feed, startup stats and SSE replay live-only. v1.23.1 ([#53](https://github.com/fmicalizzi/moolmesh/issues/53)) also dates imported history by event time in project state and the production view, not by import time. v1.23.2 fixes offsets shared by files with the same first KB ([#50](https://github.com/fmicalizzi/moolmesh/issues/50), lost events recovered by `mool backfill`) and opens provider databases strictly read-only ([#51](https://github.com/fmicalizzi/moolmesh/issues/51)).
+- **v1.23.3** ([#55](https://github.com/fmicalizzi/moolmesh/issues/55)): honest daemon exit codes (exit 1 when it cannot start, no silent port moves, PID handshake on background start/restart), `Restart=always` guidance for systemd, `--foreground`, and `mool daemon status` no longer kills the daemon on Windows.
+
+### v1.24 — Honest portfolio (audit #36)
+
+The fixes from the portfolio data audit ([#36](https://github.com/fmicalizzi/moolmesh/issues/36)), shipped together so the numbers change once:
+
+- **Per-edge activity clock** ([#56](https://github.com/fmicalizzi/moolmesh/issues/56)): a project is dated by its own edges, not by the latest activity of any session that touched it.
+- **Totals follow state** ([#57](https://github.com/fmicalizzi/moolmesh/issues/57)): nested sub-folders and materials count in a project's totals (distinct sessions).
+- **Shell commands are not folders** ([#58](https://github.com/fmicalizzi/moolmesh/issues/58)): attribution ignores `file_path` on shell tools, and shell-only edges are removed.
+- **Install-day OpenCode rows** ([#61](https://github.com/fmicalizzi/moolmesh/issues/61)) are dated by their event time.
+- **Noise out of projects:** temp/system folders and app bundles are "unclassified" (still visible).
+- A one-time cursor reset re-derives everything on the daemon's first cycle.
 
 ---
 

@@ -6,6 +6,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.24.0] — 2026-10-05
+
+"Honest portfolio": the fixes that came out of the portfolio data audit (#36).
+Noise folders stop counting as projects, each project is dated by its own
+activity, totals and state follow the same rule, shell commands no longer mint
+folders, and old OpenCode sessions stop counting as install-day activity. No new
+dependencies; `events.db` is still only read by the workspace layer.
+
+### Upgrade notes
+- **Numbers will drop, and that is the point.** Measured on a real history:
+  - the grouped portfolio went from 182 to 165 projects, and "activo" from 16 to 12;
+  - the 30-day production view went from 61 projects (14 "activo") to 36 (10).
+  The removed projects were temp/system folders, an app bundle and projects kept
+  "active" by a long session that touched them weeks ago.
+- **Automatic re-derive.** A `workspace.db` migration resets the attribution
+  cursor once. The daemon's first cycle after the upgrade runs a full pass (~2.5 s
+  on a large history) that fills the new per-edge clock and drops shell-only
+  edges. No manual command is needed.
+
+### Fixed
+- **#56 — a session's clock was applied to every project it touched.** Each
+  attribution edge now keeps its own activity clock (`path_attributions.activity_ts`,
+  additive). It uses the same rule as #53: the ingest time for live rows, the event
+  time for imported ones, and it only moves forward. Derived state and the
+  production view read it, so a project is "activo" only if **it** had recent
+  work, and a session counts on a project on the days of its edges with that
+  project.
+- **#57 — node totals excluded nested children while the state included them.**
+  Totals now include a project's nested sub-folders and materials, counting
+  distinct sessions. No more nodes showing a state with 0/0 activity.
+- **#58 — shell commands became folders.** Shell tools store the **command** in
+  `file_path` (Claude `Bash`, OpenCode `bash`, Qwen `run_shell_command`, Codex
+  `shell`/`exec_command`). Attribution now ignores `file_path` for those tools,
+  matched by tool name, never by text pattern. Existing shell-only edges are removed
+  on the full pass; edges also backed by a real file event are kept.
+- **#61 — old OpenCode sessions dated to the install day.** An `events.db`
+  migration marks as historical the OpenCode rows ingested live on the provider's
+  first ingest day whose event time is earlier, so they're dated by their real
+  event time.
+- **#36 — temp/system folders and app bundles counted as projects.**
+  - `/var/folders/**`, `/private/var/**`, `/tmp/**` and `/private/tmp/**` (except
+    Claude scratchpads, which still collapse onto their project) are now
+    "unclassified".
+  - So are app bundles (`*.app/Contents`, `/Applications/**`).
+  - They stay visible in the "sin clasificar" section.
+
+### Known follow-ups
+Orphan workspaces left by removed edges (#46); generalize historical marking for
+any first live read of old data (#62); registered repos with no activity (#60);
+14-day git history on `repo add` (#59).
+
+---
+
 ## [1.23.3] — 2026-10-04
 
 Daemon reliability: `mool daemon start` / `restart` / `mool dashboard` now report
