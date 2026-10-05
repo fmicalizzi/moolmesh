@@ -57,6 +57,11 @@ CREATE TABLE IF NOT EXISTS workspaces (
 -- chronological. ``first_seen`` is the attribution pass's clock (a backfill
 -- artifact); the rollup dates session activity on ``event_ts`` and falls back
 -- to ``first_seen`` only where no event clock was readable (NULL).
+-- ``activity_ts`` (issue #56): THE EDGE'S OWN clock — the time of the LATEST
+-- underlying event of the edge, per the #53 rule (live rows: ``created_at``;
+-- historical rows: parsed event time), fixed-format UTC ISO so the NULL-safe
+-- MAX upsert only ever moves it later. State and production read it instead of
+-- applying the session's max clock to every project the session touched.
 CREATE TABLE IF NOT EXISTS path_attributions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -67,6 +72,7 @@ CREATE TABLE IF NOT EXISTS path_attributions (
     first_seen TEXT NOT NULL,
     via TEXT NOT NULL DEFAULT 'file',      -- 'file' | 'cwd' (#40)
     event_ts TEXT,                         -- earliest event time, UTC ISO (#42)
+    activity_ts TEXT,                      -- latest event clock, UTC ISO (#56)
     UNIQUE(session_id, provider, file_path)
 );
 CREATE INDEX IF NOT EXISTS idx_attr_workspace ON path_attributions(workspace_id);
@@ -251,10 +257,42 @@ def _mig_2_attribution_event_ts(conn: sqlite3.Connection) -> int:
     return added
 
 
+def _mig_3_attribution_activity_ts(conn: sqlite3.Connection) -> int:
+    """Add ``path_attributions.activity_ts`` (#56) and re-derive it for history.
+
+    Fresh DBs get the column from ``_SCHEMA`` (the ``PRAGMA table_info`` guard
+    skips the ALTER). Existing edges are seeded from ``event_ts`` — the closest
+    edge clock already on file; the pass below then advances it to the real
+    latest event. Like #42, this resets the ``'events'`` attribution cursor so
+    the daemon's next incremental pass is a full pass that fills ``activity_ts``
+    for every edge whose events are still readable. Runs exactly once via
+    ``schema_migrations``: a later open never resets the cursor again. The
+    reset also makes the next pass the full pass that purges shell-only edges
+    (#58), since both ship together. A fresh DB has no cursor row — the UPDATE
+    is a no-op.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(path_attributions)")}
+    added = 0
+    if "activity_ts" not in columns:
+        conn.execute("ALTER TABLE path_attributions ADD COLUMN activity_ts TEXT")
+        added = 1
+    conn.execute(
+        "UPDATE path_attributions SET activity_ts = event_ts"
+        " WHERE activity_ts IS NULL AND event_ts IS NOT NULL"
+    )
+    conn.execute(
+        "UPDATE attribution_cursors SET last_event_id = 0, updated_at = ?"
+        " WHERE source = 'events'",
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    return added
+
+
 # Versioned, additive migrations — each runs exactly once (mirrors git_store).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
     (1, "attribution_via", _mig_1_attribution_via),
     (2, "attribution_event_ts", _mig_2_attribution_event_ts),
+    (3, "attribution_activity_ts", _mig_3_attribution_activity_ts),
 ]
 
 
@@ -422,6 +460,40 @@ def _min_ts(a: str | None, b: str | None) -> str | None:
     return min(a, b)
 
 
+def _max_ts(a: str | None, b: str | None) -> str | None:
+    """NULL-safe maximum of two fixed-format UTC ISO strings."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
+def _edge_activity_dt(
+    timestamp: str | None, created_at: float | None, historical: bool
+) -> datetime | None:
+    """One event's #53 activity clock: the honest time of THAT event.
+
+    Live rows (``historical = 0``) use the ingest epoch ``created_at`` — a
+    resumed session replays original timestamps spanning months (#18), so the
+    ingest clock is the honest one for watched work. Historical rows (#45:
+    backfill / catch-up / re-parse) stored ``created_at = now`` at import, so
+    their parsed event time is the only honest clock
+    (:func:`_historical_event_dt`, which also falls back to ``created_at``).
+    A live row with no usable ``created_at`` falls back to the parsed
+    timestamp; an unreadable row yields ``None``.
+    """
+    if historical:
+        return _historical_event_dt(timestamp, created_at)
+    dt: datetime | None = None
+    if created_at is not None:
+        try:
+            dt = datetime.fromtimestamp(float(created_at), tz=timezone.utc)
+        except (TypeError, ValueError, OverflowError, OSError):
+            dt = None
+    return dt if dt is not None else _parse_ts(timestamp)
+
+
 # NULL-safe "keep the earliest" for the event_ts upsert (#42). SQLite's scalar
 # MIN() is NULL if either side is NULL, so each side falls back to the other: a
 # later incremental pass never moves an old edge later, and a NULL (unreadable
@@ -429,6 +501,14 @@ def _min_ts(a: str | None, b: str | None) -> str | None:
 _EVENT_TS_UPSERT = (
     "event_ts = MIN(COALESCE(path_attributions.event_ts, excluded.event_ts),"
     " COALESCE(excluded.event_ts, path_attributions.event_ts))"
+)
+
+# NULL-safe "keep the latest" for the activity_ts upsert (#56). Same COALESCE
+# discipline as event_ts, but with MAX: the edge's clock only ever advances, a
+# later pass never moves it backwards, and a NULL never clobbers a known value.
+_ACTIVITY_TS_UPSERT = (
+    "activity_ts = MAX(COALESCE(path_attributions.activity_ts, excluded.activity_ts),"
+    " COALESCE(excluded.activity_ts, path_attributions.activity_ts))"
 )
 
 
@@ -554,23 +634,26 @@ class WorkspaceStore:
         now: str,
         via: str = "file",
         event_ts: str | None = None,
+        activity_ts: str | None = None,
     ) -> None:
         """Record one session↔workspace edge. Idempotent and self-healing.
 
-        ``event_ts`` only ever moves earlier (``_EVENT_TS_UPSERT``).
+        ``event_ts`` only ever moves earlier (``_EVENT_TS_UPSERT``) and
+        ``activity_ts`` only ever moves later (``_ACTIVITY_TS_UPSERT``).
         """
         self._conn.execute(
             f"""INSERT INTO path_attributions
                    (session_id, provider, file_path, workspace_id, resolved_via,
-                    first_seen, via, event_ts)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    first_seen, via, event_ts, activity_ts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(session_id, provider, file_path) DO UPDATE SET
                    workspace_id = excluded.workspace_id,
                    resolved_via = excluded.resolved_via,
                    via = excluded.via,
-                   {_EVENT_TS_UPSERT}""",
+                   {_EVENT_TS_UPSERT},
+                   {_ACTIVITY_TS_UPSERT}""",
             (session_id, provider, file_path, workspace_id, resolved_via, now, via,
-             event_ts),
+             event_ts, activity_ts),
         )
 
     # --- Public write API ---
@@ -1077,13 +1160,18 @@ class WorkspaceStore:
           * ``pausado``     — quiet + nothing open and no measurable outcome.
 
         **Honest clocks only.** Quiescence age is measured from the *real* last
-        activity: ``max`` of the session activity clock
-        (:func:`read_session_activity` — ingest epoch for live rows, honest even
-        on resumed sessions #18; event time for imported history #53),
+        activity: ``max`` of each edge's OWN clock
+        (``path_attributions.activity_ts``, #56 — the latest event of that edge
+        per the #53 rule, so a long session that touched project A weeks ago
+        and B today dates A to weeks ago and B to today, not both to today),
         ``path_touches.last_seen``,
         and ``git_commits.timestamp``, each normalized to aware UTC (epoch via
         ``fromtimestamp(..., utc)``, the two string clocks via ``_parse_ts``).
-        NEVER ``path_attributions.first_seen`` (a backfill artifact) and NEVER
+        The session activity clock (:func:`read_session_activity`) is only a
+        fallback for an edge with NO per-edge clock at all (a legacy row whose
+        events are gone from events.db); it is not scanned when every edge
+        carries its own clock. NEVER ``path_attributions.first_seen`` (a
+        backfill artifact) and NEVER
         session ``duration`` (unreliable on resume) — same discipline as
         ``detect_delivery_candidates``. A project with NO real activity yields NO
         state (evidence-first; absence is never fabricated into ``pausado``).
@@ -1120,15 +1208,7 @@ class WorkspaceStore:
         ))
 
         # Readers that open their own connections / take the store lock: call
-        # them OUTSIDE the lock block below (never re-enter self._lock). The
-        # session-activity scan over events.db can be handed in by a caller that
-        # already computed it (the production view runs the same
-        # read_session_activity), so the hot path pays for that ~194MB scan ONCE, not twice
-        # (invariant §2.4 — the dashboard stays fast).
-        sess_ingest = (
-            self._read_session_activity(events_db_path)
-            if session_ingest is None else session_ingest
-        )
+        # them OUTSIDE the lock block below (never re-enter self._lock).
         git_last = self._read_git_latest_by_workspace(github_db_path)
         github_state = self._read_github_state(github_db_path)
 
@@ -1143,19 +1223,27 @@ class WorkspaceStore:
             if cur is None or ts > cur:
                 last_real[pk] = ts
 
+        # Edge clocks (#56) collected under the lock, folded after it: an edge
+        # with no clock of its own may need the session-activity scan, which
+        # opens events.db and must stay outside self._lock.
+        edge_clocks: list[tuple[int, str, str, datetime | None]] = []
+        wid_pk: dict[int, str] = {}
         with self._lock:
             conn = self._conn
-            wid_pk: dict[int, str] = {}
             for wid, pk in conn.execute(
                 "SELECT workspace_id, project_key FROM workspace_classification "
                 "WHERE project_key IS NOT NULL"
             ):
                 wid_pk[wid] = pk
-            # Sessions attributed to each workspace → project ingest recency.
-            for wid, sid, prov in conn.execute(
-                "SELECT workspace_id, session_id, provider FROM path_attributions"
+            # Each edge's own clock: activity_ts (#56), or event_ts as the
+            # pre-#56 seed; first_seen is never a clock.
+            for wid, sid, prov, ats, ets in conn.execute(
+                "SELECT workspace_id, session_id, provider, activity_ts, event_ts"
+                " FROM path_attributions"
             ):
-                _bump(wid_pk.get(wid), sess_ingest.get((sid, prov or "")))
+                edge_clocks.append(
+                    (wid, sid, prov or "", _parse_ts(ats) or _parse_ts(ets))
+                )
             # Filesystem watcher touches.
             for wid, last_seen in conn.execute(
                 "SELECT workspace_id, last_seen FROM path_touches"
@@ -1172,6 +1260,16 @@ class WorkspaceStore:
                 pk = wid_pk.get(wid)
                 if pk is not None:
                     dc_projects.add(pk)
+
+        # Lazy session fallback: only when some edge carries no clock at all.
+        # A caller that already computed the map (the production view) hands it
+        # in, so the ~194MB scan is paid once at most (invariant §2.4).
+        if session_ingest is None and any(dt is None for *_, dt in edge_clocks):
+            session_ingest = self._read_session_activity(events_db_path)
+        for wid, sid, prov, dt in edge_clocks:
+            if dt is None and session_ingest:
+                dt = session_ingest.get((sid, prov))
+            _bump(wid_pk.get(wid), dt)
 
         out: dict[str, dict[str, Any]] = {}
         for pk, lr in last_real.items():
@@ -1673,15 +1771,16 @@ class WorkspaceStore:
     # file edge committed after the pre-check still wins (no mixed session).
     _CWD_EDGE_SQL = f"""INSERT INTO path_attributions
                (session_id, provider, file_path, workspace_id, resolved_via,
-                first_seen, via, event_ts)
-           SELECT ?, ?, ?, ?, ?, ?, 'cwd', ?
+                first_seen, via, event_ts, activity_ts)
+           SELECT ?, ?, ?, ?, ?, ?, 'cwd', ?, ?
            WHERE NOT EXISTS (
                SELECT 1 FROM path_attributions
                WHERE session_id = ? AND provider = ? AND via = 'file')
            ON CONFLICT(session_id, provider, file_path) DO UPDATE SET
                workspace_id = excluded.workspace_id,
                resolved_via = excluded.resolved_via,
-               {_EVENT_TS_UPSERT}"""
+               {_EVENT_TS_UPSERT},
+               {_ACTIVITY_TS_UPSERT}"""
 
     @staticmethod
     def _cwd_qualifies(cwd: str | None, home: str) -> bool:
@@ -1720,30 +1819,45 @@ class WorkspaceStore:
            ``via='cwd'`` edge per distinct qualifying cwd of its events in the
            range, resolved on the directory ITSELF (``file_path`` = the cwd).
 
+        The scan also folds each edge's TWO clocks (#42/#56): the earliest event
+        (``event_ts``, for the rollup's work day) and the latest event clock per
+        the #53 rule (``activity_ts`` — live rows: ``created_at``; historical:
+        parsed event time).
+
         ``events.db`` is opened ``mode=ro``; this never writes to it.
         """
         uri = f"file:{events_db_path}?mode=ro"
         src = sqlite3.connect(uri, uri=True, timeout=5)
         rng, params = "id > ? AND id <= ?", (lo, hi)
-        # Per-edge earliest event clock (#42), folded in Python: the timestamp
-        # formats are mixed, so a SQL MIN() over the raw strings would be wrong.
-        # (session, provider, file_path) -> [cwd, event_ts]
+        # Per-edge clocks (#42/#56), folded in Python: timestamp formats are
+        # mixed, so a SQL MIN()/MAX() over the raw strings would be wrong.
+        # (session, provider, file_path) -> [cwd, event_ts, activity_ts]
         file_edges: dict[tuple[str, str, str], list] = {}
-        # (session, provider, raw cwd) -> event_ts
-        cwd_rows: dict[tuple[str, str, str], str | None] = {}
+        # (session, provider, raw cwd) -> [event_ts, activity_ts]
+        cwd_rows: dict[tuple[str, str, str], list] = {}
         try:
-            for session_id, provider, file_path, cwd, ts, created_at in src.execute(
-                f"""SELECT session_id, provider, file_path, cwd, timestamp, created_at
+            has_hist = "historical" in {
+                r[1] for r in src.execute("PRAGMA table_info(events)")
+            }
+            hist_col = ", historical" if has_hist else ""
+            for (session_id, provider, file_path, cwd, ts, created_at,
+                 *hist) in src.execute(
+                f"""SELECT session_id, provider, file_path, cwd, timestamp,
+                           created_at{hist_col}
                     FROM events WHERE {rng} AND {self._ATTR_WHERE}""",
                 params,
             ):
                 key = (session_id, provider or "", file_path)
+                historical = bool(hist[0]) if has_hist else False
                 ets = _event_ts(ts, created_at)
+                ats_dt = _edge_activity_dt(ts, created_at, historical)
+                ats = ats_dt.isoformat(timespec="microseconds") if ats_dt else None
                 cell = file_edges.get(key)
                 if cell is None:
-                    file_edges[key] = [cwd, ets]
+                    file_edges[key] = [cwd, ets, ats]
                 else:
                     cell[1] = _min_ts(cell[1], ets)
+                    cell[2] = _max_ts(cell[2], ats)
             skipped = src.execute(
                 f"""SELECT COUNT(*) FROM (
                         SELECT DISTINCT session_id, provider, file_path FROM events
@@ -1751,15 +1865,24 @@ class WorkspaceStore:
                     )""",
                 params,
             ).fetchone()[0]
-            for session_id, provider, cwd, ts, created_at in src.execute(
-                f"""SELECT session_id, provider, cwd, timestamp, created_at FROM events
+            for session_id, provider, cwd, ts, created_at, *hist in src.execute(
+                f"""SELECT session_id, provider, cwd, timestamp, created_at{hist_col}
+                    FROM events
                     WHERE {rng} AND session_id IS NOT NULL AND session_id != ''
                       AND cwd IS NOT NULL AND cwd != ''""",
                 params,
             ):
                 key = (session_id, provider or "", cwd)
+                historical = bool(hist[0]) if has_hist else False
                 ets = _event_ts(ts, created_at)
-                cwd_rows[key] = _min_ts(cwd_rows[key], ets) if key in cwd_rows else ets
+                ats_dt = _edge_activity_dt(ts, created_at, historical)
+                ats = ats_dt.isoformat(timespec="microseconds") if ats_dt else None
+                cell = cwd_rows.get(key)
+                if cell is None:
+                    cwd_rows[key] = [ets, ats]
+                else:
+                    cell[0] = _min_ts(cell[0], ets)
+                    cell[1] = _max_ts(cell[1], ats)
         finally:
             src.close()
 
@@ -1767,14 +1890,15 @@ class WorkspaceStore:
         # An absolute file_path ignores cwd in _containing_dir, so keeping the
         # first row's cwd per edge changes nothing.
         dir_cache: dict[str, WorkspaceIdentity] = {}
-        resolved: list[tuple[str, str, str, WorkspaceIdentity, str | None]] = []
-        for (session_id, provider, file_path), (cwd, ets) in file_edges.items():
+        resolved: list[tuple[str, str, str, WorkspaceIdentity, str | None,
+                             str | None]] = []
+        for (session_id, provider, file_path), (cwd, ets, ats) in file_edges.items():
             container = _containing_dir(file_path, cwd)
             ident = dir_cache.get(container)
             if ident is None:
                 ident = resolve_dir(container)
                 dir_cache[container] = ident
-            resolved.append((session_id, provider, file_path, ident, ets))
+            resolved.append((session_id, provider, file_path, ident, ets, ats))
 
         now = _now()
         attributed = 0
@@ -1788,11 +1912,11 @@ class WorkspaceStore:
                                WHERE session_id = ? AND provider = ? AND via = 'cwd'""",
                             (session_id, provider),
                         )
-                    for session_id, provider, file_path, ident, ets in chunk:
+                    for session_id, provider, file_path, ident, ets, ats in chunk:
                         wid = self._upsert_workspace_locked(ident, now)
                         self._record_attribution_locked(
                             session_id, provider, file_path, wid, ident.kind, now,
-                            event_ts=ets,
+                            event_ts=ets, activity_ts=ats,
                         )
                     self._conn.commit()
                 except BaseException:
@@ -1821,31 +1945,35 @@ class WorkspaceStore:
 
     def _attribute_cwd_fallback(
         self,
-        cwd_rows: dict[tuple[str, str, str], str | None],
+        cwd_rows: dict[tuple[str, str, str], list],
         file_sessions: set[tuple[str, str]],
         dir_cache: dict[str, WorkspaceIdentity],
         now: str,
     ) -> int:
         """Pass 2 of :meth:`_attribute_event_range` — the ``via='cwd'`` edges.
 
-        ``cwd_rows`` maps ``(session, provider, raw cwd)`` to its earliest
-        event clock; the minimum is re-folded after ``normpath`` so spelling
-        variants of one directory keep the earliest time (#42).
+        ``cwd_rows`` maps ``(session, provider, raw cwd)`` to its two clocks
+        ``[earliest, latest]``; both are re-folded after ``normpath`` so spelling
+        variants of one directory keep the same clocks (#42/#56).
 
         Same discipline as the file pass: the has-file-edge pre-check is one
         short lock hold, ``resolve_dir`` runs with no lock, and inserts commit
         in rolled-back-on-failure chunks. Returns the edges written.
         """
         home = os.path.normpath(os.path.expanduser("~"))
-        # (session, provider) -> {normalized cwd: event_ts}, insertion-ordered
-        wanted: dict[tuple[str, str], dict[str, str | None]] = {}
-        for (session_id, provider, cwd), ets in cwd_rows.items():
+        # (session, provider) -> {normalized cwd: [event_ts, activity_ts]}
+        wanted: dict[tuple[str, str], dict[str, list]] = {}
+        for (session_id, provider, cwd), (ets, ats) in cwd_rows.items():
             key = (session_id, provider)
             if key in file_sessions or not self._cwd_qualifies(cwd, home):
                 continue
             norm = os.path.normpath(cwd)
             cwds = wanted.setdefault(key, {})
-            cwds[norm] = _min_ts(cwds[norm], ets) if norm in cwds else ets
+            if norm in cwds:
+                cwds[norm][0] = _min_ts(cwds[norm][0], ets)
+                cwds[norm][1] = _max_ts(cwds[norm][1], ats)
+            else:
+                cwds[norm] = [ets, ats]
         if not wanted:
             return 0
 
@@ -1859,21 +1987,21 @@ class WorkspaceStore:
                 ).fetchone():
                     del wanted[key]
 
-        edges: list[tuple[str, str, str, WorkspaceIdentity, str | None]] = []
+        edges: list[tuple[str, str, str, WorkspaceIdentity, str | None, str | None]] = []
         for (session_id, provider), cwds in wanted.items():
-            for cwd, ets in cwds.items():
+            for cwd, (ets, ats) in cwds.items():
                 ident = dir_cache.get(cwd)
                 if ident is None:
                     ident = resolve_dir(cwd)  # the directory itself, not its parent
                     dir_cache[cwd] = ident
-                edges.append((session_id, provider, cwd, ident, ets))
+                edges.append((session_id, provider, cwd, ident, ets, ats))
 
         written = 0
         for i in range(0, len(edges), self._ATTRIBUTION_CHUNK):
             chunk = edges[i:i + self._ATTRIBUTION_CHUNK]
             with self._lock:
                 try:
-                    for session_id, provider, cwd, ident, ets in chunk:
+                    for session_id, provider, cwd, ident, ets, ats in chunk:
                         # Re-check in-transaction before minting a workspace
                         # row, so a session that just gained a file edge
                         # leaves no orphan workspace behind.
@@ -1888,7 +2016,7 @@ class WorkspaceStore:
                         cur = self._conn.execute(
                             self._CWD_EDGE_SQL,
                             (session_id, provider, cwd, wid, ident.kind, now, ets,
-                             session_id, provider),
+                             ats, session_id, provider),
                         )
                         written += cur.rowcount
                     self._conn.commit()

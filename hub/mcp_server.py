@@ -850,12 +850,12 @@ def _portfolio_production(
 ) -> dict[str, Any]:
     """Per-project production over time — the honest-metric chart (#24 Stage 2).
 
-    EFFORT, not duration: each session is a unit of work dated by its activity
-    clock (``read_session_activity``): ``MAX(events.created_at)`` — the
-    *ingestion* epoch — over live rows (honest even on resumed sessions, whose
-    original timestamps span months; #18), and the parsed event time over
-    imported history (backfill / catch-up / re-parse, #53), whose ingest epoch
-    is the import moment, not the work. Sessions are
+    EFFORT, not duration: each session is a unit of work dated by the clock of
+    its edges (``path_attributions.activity_ts``, #56), the latest event of THAT
+    edge per the #53 rule (live rows: ingest epoch, honest even on resumed
+    sessions whose original timestamps span months, #18; historical rows:
+    parsed event time), so a long session that touched project A weeks ago and
+    B today contributes to A on its old day and to B today. Sessions are
     aggregated over the CANONICAL project (``workspace_classification.project_key``
     from Stage 1), so harness/scratchpad folders fold into their real project
     instead of masquerading as projects. Per project we return a per-day,
@@ -865,7 +865,13 @@ def _portfolio_production(
     A session that touched N distinct projects counts once in EACH — the strip
     is a per-project statement ("this project saw a session that day"), so a
     cross-project session is genuine activity in every project it touched;
-    portfolio-wide session counts are therefore NOT additive across rows.
+    portfolio-wide session counts are therefore NOT additive across rows. On
+    each project-day a session counts once, no matter how many edges reached it.
+
+    The session activity clock (``read_session_activity``, one events.db scan)
+    is only a fallback for an edge whose ``activity_ts`` and ``event_ts`` are
+    both NULL (a legacy edge whose events are gone); on a database filled by the
+    #56 pass, events.db is never scanned and the view reads workspace.db alone.
 
     Each project also carries an OUTCOME layer (issue #27) — ``merged_prs``,
     ``closed_issues``, ``open_issues`` — the authoritative delivery already
@@ -891,35 +897,37 @@ def _portfolio_production(
              "deliverables_measurable": False}
 
     wconn = _connect_optional(workspace_db)
-    econn = _connect_optional(events_db)
-    if wconn is None or econn is None:
-        if wconn:
-            wconn.close()
-        if econn:
-            econn.close()
+    if wconn is None:
         return empty
+    econn = _connect_optional(events_db)
 
     try:
-        # 1. session (id, provider) → set of canonical project_key, + labels.
+        # 1. Every edge with its canonical project_key (#56). The edge's OWN
+        #    clock (activity_ts, else event_ts) dates it; the session clock is
+        #    only a fallback for an edge with no clock of its own.
         try:
             crows = wconn.execute("""
-                SELECT a.session_id, a.provider, c.project_key, c.project_label
+                SELECT a.session_id, a.provider, c.project_key, c.project_label,
+                       a.activity_ts, a.event_ts
                 FROM path_attributions a
                 JOIN workspace_classification c
                   ON c.workspace_id = a.workspace_id
                 WHERE c.project_key IS NOT NULL
-                GROUP BY a.session_id, a.provider, c.project_key
             """).fetchall()
         except sqlite3.OperationalError:
             return empty
 
-        sess_projects: dict[tuple[str, str], set[str]] = {}
+        from hub.cache.workspace_store import _parse_ts
+        edge_rows: list[tuple[str, str, str, Any]] = []
         labels: dict[str, str] = {}
         for r in crows:
-            key = (r["session_id"], r["provider"] or "")
-            sess_projects.setdefault(key, set()).add(r["project_key"])
-            if r["project_key"] not in labels and r["project_label"]:
-                labels[r["project_key"]] = r["project_label"]
+            pk = r["project_key"]
+            edge_rows.append((
+                r["session_id"], r["provider"] or "", pk,
+                _parse_ts(r["activity_ts"]) or _parse_ts(r["event_ts"]),
+            ))
+            if pk not in labels and r["project_label"]:
+                labels[pk] = r["project_label"]
 
         # 2. deliverable (image/video) count per canonical project, from the
         #    filesystem watcher. Empty until a root is marked — reported via
@@ -946,17 +954,22 @@ def _portfolio_production(
         except sqlite3.OperationalError:
             measurable = False
 
-        # 3. session (id, provider) → activity clock (#53): ingest epoch for
-        #    live rows, event time for imported history. Bucketed to a local day
-        #    below; the same map feeds the state layer (one events.db scan).
-        from hub.cache.workspace_store import read_session_activity
-        try:
-            activity = read_session_activity(econn)
-        except sqlite3.OperationalError:
-            return empty
+        # 3. Lazy session fallback (#53): only an edge with NO per-edge clock
+        #    needs the session scan — every clocked edge is dated from
+        #    workspace.db alone (#56), so the ~194MB scan is skipped entirely on
+        #    a healthy database. The same map feeds the state layer, so when it
+        #    is needed it is paid once (hot-path invariant).
+        activity: dict[tuple[str, str], Any] = {}
+        if econn is not None and any(dt is None for *_, dt in edge_rows):
+            from hub.cache.workspace_store import read_session_activity
+            try:
+                activity = read_session_activity(econn)
+            except sqlite3.OperationalError:
+                activity = {}
     finally:
         wconn.close()
-        econn.close()
+        if econn is not None:
+            econn.close()
 
     # Window bounds (inclusive) in local days.
     if today is None:
@@ -964,31 +977,39 @@ def _portfolio_production(
     start = (datetime.date.fromisoformat(today)
              - datetime.timedelta(days=days - 1)).strftime("%Y-%m-%d")
 
-    # 4. Fold sessions into their canonical project(s), per day, per provider.
+    # 4. Fold each edge into its canonical project on the edge's OWN local day
+    #    (#56) — a long session that touched project A weeks ago and B today
+    #    contributes to A on its old day and to B today, not to both today.
+    #    One session counts once per project per day: several edges to the same
+    #    project on one day are still that one session (a per-project
+    #    statement, not an edge count).
     proj: dict[str, dict[str, Any]] = {}
     providers_seen: set[str] = set()
-    for key, dt in activity.items():
-        pkeys = sess_projects.get(key)
-        if not pkeys:
+    seen_cells: set[tuple[str, str, str, str]] = set()  # (pk, day, provider, sid)
+    for sid, provider, pk, dt in edge_rows:
+        if dt is None:
+            dt = activity.get((sid, provider))
+        if dt is None:
             continue
         day = _local_day(dt.timestamp())
         if day < start or day > today:
             continue
-        provider = key[1]
         providers_seen.add(provider)
-        for pk in pkeys:
-            g = proj.setdefault(pk, {
-                "project_key": pk,
-                "project_label": labels.get(pk, ""),
-                "_sessions": set(), "_days": set(), "days": {},
-                "last_day": "",
-            })
-            g["_sessions"].add(key)
-            g["_days"].add(day)
-            g["days"].setdefault(day, {})
-            g["days"][day][provider] = g["days"][day].get(provider, 0) + 1
-            if day > g["last_day"]:
-                g["last_day"] = day
+        g = proj.setdefault(pk, {
+            "project_key": pk,
+            "project_label": labels.get(pk, ""),
+            "_sessions": set(), "_days": set(), "days": {},
+            "last_day": "",
+        })
+        if (pk, day, provider, sid) in seen_cells:
+            continue
+        seen_cells.add((pk, day, provider, sid))
+        g["_sessions"].add((sid, provider))
+        g["_days"].add(day)
+        g["days"].setdefault(day, {})
+        g["days"][day][provider] = g["days"][day].get(provider, 0) + 1
+        if day > g["last_day"]:
+            g["last_day"] = day
 
     # 5. Outcome layer (#27) — merged-PR/closed-issue/open-issue per canonical
     #    project from github.db (read-only). Best-effort: a missing/unreadable
@@ -1006,9 +1027,9 @@ def _portfolio_production(
     try:
         from pathlib import Path
         from hub.cache.workspace_store import WorkspaceStore
-        # Reuse the activity map already computed above: the state layer needs
-        # the SAME scan, so hand it in and events.db is read once, not twice
-        # (hot-path invariant).
+        # Reuse the fallback map computed above (empty when every edge carried
+        # its own clock): the state layer would need the SAME scan, so hand it
+        # in and events.db is read once, not twice (hot-path invariant).
         store = WorkspaceStore(Path(workspace_db))
         try:
             outcome = store.read_github_outcome(workspace_db, github_db)
