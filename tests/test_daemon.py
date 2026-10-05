@@ -35,6 +35,37 @@ class TestReadPidEncoding:
         assert not pid_file.exists()
 
 
+class TestReadPidNeverSignals:
+    """#55: read_pid must never os.kill — on Windows that terminates the pid."""
+
+    def _exploding_kill(self, monkeypatch):
+        def boom(*args):
+            raise AssertionError("read_pid must not call os.kill")
+        monkeypatch.setattr("os.kill", boom)
+
+    def test_alive_pid_is_returned_without_signaling(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daemon, "_IS_WINDOWS", True)
+        pid_file = tmp_path / "moolmesh.pid"
+        pid_file.write_text("4242", encoding="utf-8")
+        monkeypatch.setattr(daemon, "PID_FILE", pid_file)
+        self._exploding_kill(monkeypatch)
+        monkeypatch.setattr(daemon, "_pid_alive", lambda pid: True)
+
+        assert daemon.read_pid() == 4242
+        assert pid_file.exists()
+
+    def test_dead_pid_returns_none_and_clears_pidfile(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(daemon, "_IS_WINDOWS", True)
+        pid_file = tmp_path / "moolmesh.pid"
+        pid_file.write_text("4242", encoding="utf-8")
+        monkeypatch.setattr(daemon, "PID_FILE", pid_file)
+        self._exploding_kill(monkeypatch)
+        monkeypatch.setattr(daemon, "_pid_alive", lambda pid: False)
+
+        assert daemon.read_pid() is None
+        assert not pid_file.exists()
+
+
 class TestDaemonizeWindows:
     def test_launches_background_process(self, monkeypatch, tmp_path):
         # Neutralize supervisor autodetection: a CI runner (e.g. GitHub Actions,
@@ -89,15 +120,14 @@ class TestStopDaemonWindows:
         pid_file.write_text("42", encoding="utf-8")
         monkeypatch.setattr(daemon, "PID_FILE", pid_file)
 
-        call_count = 0
-        def fake_kill(pid, sig):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return  # read_pid's os.kill(pid, 0) probe
-            raise ProcessLookupError
+        # Alive for read_pid(), gone after the graceful taskkill.
+        alive = iter([True, False])
+        monkeypatch.setattr(daemon, "_pid_alive", lambda pid: next(alive))
 
-        monkeypatch.setattr("os.kill", fake_kill)
+        def exploding_kill(*args):
+            raise AssertionError("os.kill must not be called on Windows")
+
+        monkeypatch.setattr("os.kill", exploding_kill)
         monkeypatch.setattr(daemon.time, "sleep", lambda _: None)
 
         with patch("subprocess.run") as mock_run:
@@ -112,11 +142,13 @@ class TestStopDaemonWindows:
         pid_file.write_text("42", encoding="utf-8")
         monkeypatch.setattr(daemon, "PID_FILE", pid_file)
 
-        def fake_kill(pid, sig):
-            if sig == 0:
-                return  # process is "alive"
+        # Stays alive through the graceful wait, then force taskkill.
+        monkeypatch.setattr(daemon, "_pid_alive", lambda pid: True)
 
-        monkeypatch.setattr("os.kill", fake_kill)
+        def exploding_kill(*args):
+            raise AssertionError("os.kill must not be called on Windows")
+
+        monkeypatch.setattr("os.kill", exploding_kill)
         monkeypatch.setattr(daemon.time, "sleep", lambda _: None)
 
         with patch("subprocess.run") as mock_run:

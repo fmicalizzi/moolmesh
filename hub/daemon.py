@@ -25,13 +25,20 @@ class DaemonStartError(RuntimeError):
 
 
 def read_pid() -> int | None:
+    """PID from the pidfile if that process is alive, else None (and clears it).
+
+    Liveness goes through ``_pid_alive``: ``os.kill(pid, 0)`` would terminate
+    the daemon on Windows (#55).
+    """
     try:
         pid = int(PID_FILE.read_text(encoding="utf-8").strip())
-        os.kill(pid, 0)
-        return pid
-    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError, OSError):
+    except (FileNotFoundError, ValueError, OSError):
         PID_FILE.unlink(missing_ok=True)
         return None
+    if not _pid_alive(pid):
+        PID_FILE.unlink(missing_ok=True)
+        return None
+    return pid
 
 
 def write_pid(pid: int) -> None:
@@ -105,7 +112,12 @@ def _fetch_health(host: str, port: int) -> dict | None:
 
 
 def _terminate_pid(pid: int, *, wait_seconds: float = 3.0) -> None:
-    """Best-effort stop of a specific pid (SIGTERM, then SIGKILL on Unix)."""
+    """Best-effort stop of a specific pid.
+
+    Windows: ``taskkill /PID`` — no signals, since ``os.kill`` would terminate
+    the process and ``signal.SIGKILL`` does not exist there. Unix: SIGTERM,
+    then SIGKILL after ``wait_seconds``.
+    """
     if _IS_WINDOWS:
         subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
         return
@@ -369,7 +381,12 @@ def _run_server(
 
 
 def stop_daemon() -> bool:
-    """Stop a running daemon. Returns True if stopped successfully."""
+    """Stop a running daemon. Returns True if stopped successfully.
+
+    Windows stops via ``taskkill /PID`` (force with ``/F``); the SIGTERM/
+    SIGKILL path is Unix-only. Liveness is always probed with ``_pid_alive``,
+    never ``os.kill`` — on Windows that would terminate the process (#55).
+    """
     pid = read_pid()
     if pid is None:
         return False
@@ -381,9 +398,7 @@ def stop_daemon() -> bool:
 
     for _ in range(20):
         time.sleep(0.5)
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, OSError):
+        if not _pid_alive(pid):
             PID_FILE.unlink(missing_ok=True)
             return True
 
