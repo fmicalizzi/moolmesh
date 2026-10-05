@@ -189,12 +189,61 @@ def resolve_registry_offset(
     return None, None
 
 
+def _mig_5_opencode_first_ingest_day(conn: sqlite3.Connection) -> None:
+    """Mark pre-#45 live OpenCode rows that predate the provider's first day.
+
+    OpenCode sessions first ingested LIVE (``historical = 0``) before #45 got
+    their activity clock on the install day, even though their events are up to
+    months older (issue #61): the live ingest epoch is the import moment, not
+    the work. This one-off migration marks ``historical = 1`` on rows that are
+    (a) OpenCode, (b) still live, (c) ingested on the provider's FIRST ingest
+    day — the local day of ``MIN(created_at)`` for OpenCode — and (d) whose
+    parsed event time is STRICTLY BEFORE that day. Bounded on purpose: only the
+    first-day window is examined, and a row with an unreadable timestamp is
+    left untouched (never guess). ``_historical_event_dt`` (the #53 definition,
+    imported lazily to keep the two stores' import direction one-way) parses
+    the mixed ISO/numeric timestamp formats.
+
+    Idempotent: rows are updated only once and a second run finds no live
+    first-day rows ahead of their own event time. Rows ingested later stay live.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "historical" not in columns:
+        return  # pre-#45 schema; migration 3 adds the column first
+    row = conn.execute(
+        "SELECT MIN(created_at) FROM events WHERE provider = 'opencode'"
+    ).fetchone()
+    if not row or row[0] is None:
+        return
+    from datetime import date, datetime, time as dtime, timedelta
+
+    first_day = date.fromtimestamp(float(row[0]))  # local install day
+    start = datetime.combine(first_day, dtime.min).timestamp()
+    end = datetime.combine(first_day + timedelta(days=1), dtime.min).timestamp()
+    rows = conn.execute(
+        """SELECT id, timestamp FROM events
+           WHERE provider = 'opencode' AND historical = 0
+             AND created_at >= ? AND created_at < ?""",
+        (start, end),
+    ).fetchall()
+    if not rows:
+        return
+    from hub.cache.workspace_store import _historical_event_dt
+
+    ids = [(eid,) for eid, ts in rows
+           if (dt := _historical_event_dt(ts, None)) is not None
+           and dt.timestamp() < start]
+    if ids:
+        conn.executemany("UPDATE events SET historical = 1 WHERE id = ?", ids)
+
+
 # Versioned, additive migrations for events.db — each runs exactly once.
 _EVENT_STORE_MIGRATIONS = [
     (1, "session_lifecycle", _mig_1_session_lifecycle),
     (2, "watcher_state", _mig_2_watcher_state),
     (3, "historical_flag", _mig_3_historical_flag),
     (4, "registry_path_key", _mig_4_registry_path_key),
+    (5, "opencode_first_ingest_day", _mig_5_opencode_first_ingest_day),
 ]
 
 
