@@ -2340,6 +2340,17 @@ class WorkspaceStore:
         children (subdirs/materials/config, role=nest). Degenerate/home-config
         roots (role=orphan) go to a separate ``unclassified`` list.
 
+        **Totals and state use ONE rule (#57):** the folded totals include
+        ``nest`` children exactly like ``project`` and ``collapse`` — the
+        derived state (``derive_project_states``) already reads every row with
+        a ``project_key``, so a project whose activity lives in a subfolder no
+        longer shows a state with 0 own sessions/days. No double count is
+        possible: each ``path_attributions`` edge belongs to exactly one
+        workspace (``UNIQUE(session_id, provider, file_path)``), and
+        ``active_days`` is a UNION of days across the group's workspaces — a day
+        shared by a project and its child counts once. A child keeps its own
+        visible row under the project as well, by design.
+
         Returns raw labels; masking is applied by the MCP read wrapper. Empty
         structure when the classification table is absent (never classified).
         """
@@ -2424,20 +2435,22 @@ class WorkspaceStore:
             })
             if not grp.get("project_label"):
                 grp["project_label"] = plabel
-            if role in ("project", "collapse"):
-                grp["_fold_wids"].append(wid)
-                if role == "collapse":
-                    grp["collapsed_harness"] += 1
-                elif role == "project":
-                    # The real project row carries the evidence the client
-                    # ladder reads (#29): git remote (→ org) and the on-disk
-                    # anchor path (→ parent-folder client). Harness/collapse
-                    # rows hold scratchpad paths, so never source it from them.
-                    if grp["_remote_url"] is None:
-                        grp["_remote_url"] = remote_url
-                    if grp["_anchor_path"] is None:
-                        grp["_anchor_path"] = root_path or dir_path
-            else:  # nest
+            # Totals include EVERY role that shares the project_key — project,
+            # collapsed harness and nest (#57), the same set the derived state
+            # reads. Distinct workspaces, unique edges: no double count.
+            grp["_fold_wids"].append(wid)
+            if role == "collapse":
+                grp["collapsed_harness"] += 1
+            elif role == "project":
+                # The real project row carries the evidence the client
+                # ladder reads (#29): git remote (→ org) and the on-disk
+                # anchor path (→ parent-folder client). Harness/collapse
+                # rows hold scratchpad paths, so never source it from them.
+                if grp["_remote_url"] is None:
+                    grp["_remote_url"] = remote_url
+                if grp["_anchor_path"] is None:
+                    grp["_anchor_path"] = root_path or dir_path
+            else:  # nest — folded into the totals AND shown as its own child
                 child = _agg([wid])
                 child.update({"workspace_key": wkey, "kind": kind,
                               "remote_url": remote_url, "root_path": root_path,
