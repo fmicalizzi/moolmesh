@@ -1757,6 +1757,25 @@ class WorkspaceStore:
         " AND session_id IS NOT NULL AND session_id != ''"
     )
 
+    # Shell tools put their COMMAND in ``events.file_path`` (#58): a command
+    # starting with an absolute binary path (``/usr/libexec/... --flag``) passed
+    # ``file_path LIKE '/%'`` and minted fake workspaces. Attribution ignores
+    # the file_path of these events BY TOOL NAME — never by text pattern, which
+    # would drop real folders with spaces. One entry per adapter carrier:
+    #   * Claude  ``Bash``               — command[:80] on the event
+    #   * OpenCode ``bash``              — command[:80] on the event
+    #   * Qwen    ``run_shell_command``  — command[:80] on the event
+    #   * Codex   ``shell``              — legacy function_call; command[:80]
+    #   * Codex   ``exec_command``       — its successor; today its file_path is
+    #     already NULL (the adapter no longer writes the command), but older
+    #     databases ingested live by previous adapters may carry a command row.
+    # Deliberately NOT listed: Codex ``exec`` / ``apply_patch`` / ``view_image``
+    # — since #40 those only store paths extracted from the patch (real files),
+    # and ``exec`` custom calls never put a command in file_path.
+    _SHELL_TOOLS = frozenset({
+        "Bash", "bash", "run_shell_command", "shell", "exec_command",
+    })
+
     @staticmethod
     def _read_max_event_id(events_db_path: str | Path) -> int:
         """``MAX(events.id)`` from events.db (read-only); 0 for an empty table."""
@@ -1811,9 +1830,11 @@ class WorkspaceStore:
 
         Two passes over the range:
 
-        1. File edges (``via='file'``) from absolute ``file_path`` values. Each
-           chunk first deletes the cwd edges of its sessions, in the same
-           transaction — a session never counts both ways.
+        1. File edges (``via='file'``) from absolute ``file_path`` values, minus
+           the shell-tool events whose ``file_path`` is the command itself
+           (#58, ``_SHELL_TOOLS``). Each chunk first deletes the cwd edges of
+           its sessions, in the same transaction — a session never counts both
+           ways.
         2. cwd fallback (#40, every provider): each ``(session, provider)`` in
            the range with no file edge anywhere in the table gets one
            ``via='cwd'`` edge per distinct qualifying cwd of its events in the
@@ -1822,17 +1843,24 @@ class WorkspaceStore:
         The scan also folds each edge's TWO clocks (#42/#56): the earliest event
         (``event_ts``, for the rollup's work day) and the latest event clock per
         the #53 rule (``activity_ts`` — live rows: ``created_at``; historical:
-        parsed event time).
+        parsed event time). On a FULL pass (``lo == 0``) it additionally
+        computes the shell-only keys — ``(session, provider, file_path)`` whose
+        every event is a shell tool — and deletes their stale edges, the
+        one-time cleanup of what earlier attribution runs minted (#58). The
+        caller's next ``build_rollup`` reconciles ``session_touches``.
 
         ``events.db`` is opened ``mode=ro``; this never writes to it.
         """
         uri = f"file:{events_db_path}?mode=ro"
         src = sqlite3.connect(uri, uri=True, timeout=5)
         rng, params = "id > ? AND id <= ?", (lo, hi)
+        full_pass = lo == 0
         # Per-edge clocks (#42/#56), folded in Python: timestamp formats are
         # mixed, so a SQL MIN()/MAX() over the raw strings would be wrong.
         # (session, provider, file_path) -> [cwd, event_ts, activity_ts]
         file_edges: dict[tuple[str, str, str], list] = {}
+        # key -> does ANY event of this edge come from a NON-shell tool?
+        edge_evidence: dict[tuple[str, str, str], bool] = {}
         # (session, provider, raw cwd) -> [event_ts, activity_ts]
         cwd_rows: dict[tuple[str, str, str], list] = {}
         try:
@@ -1841,17 +1869,22 @@ class WorkspaceStore:
             }
             hist_col = ", historical" if has_hist else ""
             for (session_id, provider, file_path, cwd, ts, created_at,
-                 *hist) in src.execute(
+                 tool_name, *hist) in src.execute(
                 f"""SELECT session_id, provider, file_path, cwd, timestamp,
-                           created_at{hist_col}
+                           created_at, tool_name{hist_col}
                     FROM events WHERE {rng} AND {self._ATTR_WHERE}""",
                 params,
             ):
                 key = (session_id, provider or "", file_path)
+                if (tool_name or "") in self._SHELL_TOOLS:
+                    # file_path is the command (#58): never an edge clock.
+                    edge_evidence.setdefault(key, False)
+                    continue
                 historical = bool(hist[0]) if has_hist else False
                 ets = _event_ts(ts, created_at)
                 ats_dt = _edge_activity_dt(ts, created_at, historical)
                 ats = ats_dt.isoformat(timespec="microseconds") if ats_dt else None
+                edge_evidence[key] = True
                 cell = file_edges.get(key)
                 if cell is None:
                     file_edges[key] = [cwd, ets, ats]
@@ -1885,6 +1918,15 @@ class WorkspaceStore:
                     cell[1] = _max_ts(cell[1], ats)
         finally:
             src.close()
+
+        # Shell-only keys (#58): stale edges minted by earlier passes from a
+        # command string. Only computed on a full pass — an incremental range
+        # does not see the edge's whole history. An edge with ANY non-shell
+        # event is real and survives.
+        shell_only = (
+            [k for k, real in edge_evidence.items() if not real]
+            if full_pass else []
+        )
 
         # Resolve identities with NO lock held and no open transaction.
         # An absolute file_path ignores cwd in _containing_dir, so keeping the
@@ -1930,6 +1972,27 @@ class WorkspaceStore:
             cwd_rows, {(r[0], r[1]) for r in resolved}, dir_cache, now
         )
 
+        # #58 cleanup: drop the stale edges a full pass proved shell-only. Same
+        # chunked rollback discipline as the upserts; the workspace rows are
+        # left in place (they may still own filesystem touches — #46 owns
+        # pruning orphans, this never deletes one).
+        shell_removed = 0
+        for i in range(0, len(shell_only), self._ATTRIBUTION_CHUNK):
+            chunk = shell_only[i:i + self._ATTRIBUTION_CHUNK]
+            with self._lock:
+                try:
+                    cur = self._conn.executemany(
+                        """DELETE FROM path_attributions
+                           WHERE session_id = ? AND provider = ? AND file_path = ?
+                             AND via = 'file'""",
+                        chunk,
+                    )
+                    shell_removed += cur.rowcount
+                    self._conn.commit()
+                except BaseException:
+                    self._conn.rollback()
+                    raise
+
         with self._lock:
             workspace_count = self._conn.execute(
                 "SELECT COUNT(*) FROM workspaces"
@@ -1941,6 +2004,7 @@ class WorkspaceStore:
             "workspaces": workspace_count,
             "directories": len(dir_cache),
             "skipped_non_absolute": skipped,
+            "shell_edges_removed": shell_removed,
         }
 
     def _attribute_cwd_fallback(
@@ -2054,7 +2118,7 @@ class WorkspaceStore:
         cursor = self.get_attribution_cursor()
         empty = {
             "attributed": 0, "cwd_attributed": 0, "directories": 0,
-            "skipped_non_absolute": 0,
+            "skipped_non_absolute": 0, "shell_edges_removed": 0,
             "cursor_from": cursor, "cursor_to": cursor, "reset": False,
         }
         if not os.path.exists(str(events_db_path)):
@@ -2078,6 +2142,7 @@ class WorkspaceStore:
             "cwd_attributed": result["cwd_attributed"],
             "directories": result["directories"],
             "skipped_non_absolute": result["skipped_non_absolute"],
+            "shell_edges_removed": result["shell_edges_removed"],
             "cursor_from": cursor,
             "cursor_to": hi,
             "reset": reset,
