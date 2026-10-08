@@ -6,6 +6,7 @@ from datetime import datetime
 
 from hub.adapters.base import BaseAdapter
 from hub.models.base import (
+    SHELL_TOOLS,
     MessageRole,
     Provider,
     SessionMeta,
@@ -88,11 +89,11 @@ class ClaudeAdapter(BaseAdapter):
         for block in entry.content_blocks:
             if block.type == "tool_use" and block.tool_name:
                 tool_name = block.tool_name
-                if block.tool_input:
+                # A shell tool's command is NEVER a path (#58, SHELL_TOOLS).
+                if block.tool_input and block.tool_name not in SHELL_TOOLS:
                     file_path = (
                         block.tool_input.get("file_path")
                         or block.tool_input.get("path")
-                        or block.tool_input.get("command", "")[:80]
                     )
                 break
 

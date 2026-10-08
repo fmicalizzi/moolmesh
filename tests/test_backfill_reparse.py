@@ -30,8 +30,11 @@ def _rollout(codex: Path, name: str, sid: str, age: float = 3 * DAY,
         {"type": "event_msg", "timestamp": "2026-03-25T10:00:05Z",
          "payload": {"type": "user_message", "message": f"hello {name}"}},
         {"type": "response_item", "timestamp": "2026-03-25T10:00:15Z",
-         "payload": {"type": "function_call", "call_id": "fc1", "name": "shell",
-                     "arguments": json.dumps({"command": f"cat /Users/test/cx/{name}.py"})}},
+         "payload": {"type": "custom_tool_call", "call_id": "fc1", "name": "apply_patch",
+                     "input": "*** Begin Patch\n"
+                              f"*** Add File: /Users/test/cx/{name}.py\n"
+                              "+x\n"
+                              "*** End Patch"}},
         {"type": "response_item", "timestamp": "2026-03-25T10:00:20Z",
          "payload": {"type": "message", "role": "assistant",
                      "content": [{"type": "output_text", "text": f"done {name}"}]}},

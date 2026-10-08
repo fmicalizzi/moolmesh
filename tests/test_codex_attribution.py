@@ -269,10 +269,10 @@ class TestCodexAdapterPaths:
         evt = self.adapter.to_event(_entry("apply_patch", patch), "proj")
         assert evt.file_path == long_path
 
-    def test_legacy_command_brief_kept_when_no_path(self):
+    def test_shell_command_is_never_a_file_path(self):
         args = json.dumps({"command": "git diff"})
         evt = self.adapter.to_event(_entry("shell", args, "function_call"), "proj")
-        assert evt.file_path == "git diff"
+        assert evt.file_path is None
 
     def test_real_path_replaces_command_brief(self):
         args = json.dumps({"command": "apply_patch <<EOF\n*** Begin Patch\n"

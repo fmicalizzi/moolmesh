@@ -272,18 +272,9 @@ class CodexAdapter(BaseAdapter):
             if paths:
                 # Untruncated: the workspace layer resolves this path.
                 file_path = paths[0]
-            elif entry.payload_type == "function_call":
-                # No touched path: keep the legacy brief of the command.
-                try:
-                    args = json.loads(fc.arguments)
-                    cmd = args.get("command", "")
-                    fp = args.get("file_path", "")
-                    file_path = (
-                        (cmd[:80] if isinstance(cmd, str) else "")
-                        or (fp[:80] if isinstance(fp, str) else "")
-                    )
-                except (json.JSONDecodeError, TypeError, AttributeError):
-                    file_path = fc.arguments[:80]
+            # No touched path → file_path stays None. A shell command is never
+            # a path (#58, SHELL_TOOLS); the legacy command brief was removed
+            # so the provider contract holds for every adapter.
 
         tokens_dict = None
         if entry.event_type == "token_count" and entry.token_total > 0:

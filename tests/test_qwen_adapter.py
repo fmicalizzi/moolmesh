@@ -141,7 +141,8 @@ class TestQwenAdapterToEvent:
         assert evt is not None
         assert evt.event_type == "tool_use"
         assert evt.tool_name == "run_shell_command"
-        assert "ls -la" in evt.file_path
+        # A shell command is never a path (#58): no touched path → None.
+        assert evt.file_path is None
 
     def test_tool_result_event(self):
         entry = QwenEntry(

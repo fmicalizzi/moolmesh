@@ -6,6 +6,7 @@ from datetime import datetime
 
 from hub.adapters.base import BaseAdapter
 from hub.models.base import (
+    SHELL_TOOLS,
     MessageRole,
     Provider,
     SessionMeta,
@@ -62,12 +63,9 @@ class QwenAdapter(BaseAdapter):
         if entry.function_calls:
             fc = entry.function_calls[0]
             tool_name = fc.name
-            # Extract command or path from args
-            file_path = (
-                fc.args.get("command", "")[:80]
-                or fc.args.get("file_path", "")[:80]
-                or str(fc.args)[:80]
-            )
+            # A shell tool's command is NEVER a path (#58, SHELL_TOOLS).
+            if fc.name not in SHELL_TOOLS:
+                file_path = fc.args.get("file_path") or fc.args.get("path")
 
         full_text = self._extract_full_text(entry)
 
