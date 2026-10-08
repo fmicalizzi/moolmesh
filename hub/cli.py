@@ -378,6 +378,8 @@ def cmd_discover(args: argparse.Namespace) -> None:
             "codex": discovery.discover_codex,
             "qwen": discovery.discover_qwen,
             "opencode": discovery.discover_opencode,
+            "cursor": discovery.discover_cursor,
+            "pi": discovery.discover_pi,
         }
         projects = provider_map[args.provider]()
     else:
@@ -1065,7 +1067,7 @@ def main() -> None:
                       help="Server port; pinned if given (default: 5200)")
     dash.add_argument("--host", default="localhost", help="Server host (default: localhost)")
     dash.add_argument("--project", help="Filter to project name (substring match)")
-    dash.add_argument("--providers", help="Comma-separated providers: claude,codex,qwen,opencode")
+    dash.add_argument("--providers", help="Comma-separated providers: claude,codex,qwen,opencode,cursor,pi")
     dash.add_argument("--log-level", default="INFO",
                       choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                       help="Logging level (default: INFO)")
@@ -1106,7 +1108,7 @@ def main() -> None:
     rep.add_argument("mode", nargs="?", default=None, choices=["auto"],
                      help="'auto': generate to ~/.moolmesh/reports/YYYY-MM-DD/")
     rep.add_argument("--project", help="Filter to project name (substring match)")
-    rep.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode", "cursor"], help="Filter by provider")
+    rep.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode", "cursor", "pi"], help="Filter by provider")
     rep.add_argument("--output", help="Output directory (default: reports/)")
     rep.add_argument("--daily", action="store_true", help="Only generate day-level reports (for auto mode)")
     rep.add_argument("--complete", action="store_true",
@@ -1114,15 +1116,15 @@ def main() -> None:
 
     # discover
     disc = subparsers.add_parser("discover", help="List discovered projects")
-    disc.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode", "cursor"], help="Filter by provider")
+    disc.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode", "cursor", "pi"], help="Filter by provider")
     disc.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
 
     # backfill
     bf = subparsers.add_parser(
         "backfill",
-        help="Import historical session files (claude, codex, qwen) into EventStore",
+        help="Import historical session files (claude, codex, qwen, pi) into EventStore",
     )
-    bf.add_argument("--provider", choices=["claude", "codex", "qwen", "all"], default="all",
+    bf.add_argument("--provider", choices=["claude", "codex", "qwen", "pi", "all"], default="all",
                     help="Provider to ingest (default: all file-based providers)")
     bf.add_argument("--since", metavar="YYYY-MM-DD",
                     help="Only files modified on/after this local date")
@@ -1206,7 +1208,7 @@ def main() -> None:
     # sessions
     sess = subparsers.add_parser("sessions", help="List sessions with metadata")
     sess.add_argument("--hours", type=int, default=24, help="Lookback window in hours (default: 24)")
-    sess.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode", "cursor"], help="Filter by provider")
+    sess.add_argument("--provider", choices=["claude", "codex", "qwen", "opencode", "cursor", "pi"], help="Filter by provider")
     sess.add_argument("--branch", help="Filter by git branch (exact match)")
     sess.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
 

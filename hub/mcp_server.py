@@ -54,7 +54,7 @@ def _get_schema() -> str:
     """Schema de la base de datos events.db."""
     return """CREATE TABLE events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider TEXT NOT NULL,      -- claude | codex | qwen | opencode
+    provider TEXT NOT NULL,      -- claude | codex | qwen | opencode | cursor | pi
     project TEXT NOT NULL,       -- nombre del proyecto
     event_type TEXT NOT NULL,    -- user | assistant | tool_use | tool_result | thinking | summary | reasoning | step-finish
     timestamp TEXT NOT NULL,     -- ISO 8601
@@ -1251,7 +1251,7 @@ if _mcp is not None:
         Devuelve input_tokens, output_tokens y cached_tokens por provider.
 
         Args:
-            provider: Filtrar por provider (claude, codex, qwen, opencode). None = todos.
+            provider: Filtrar por provider (claude, codex, qwen, opencode, cursor, pi). None = todos.
             since: Fecha ISO 8601 desde la cual contar (e.g. "2026-06-22"). None = todo el historial.
         """
         return _get_token_usage(EVENTS_DB, provider, since)

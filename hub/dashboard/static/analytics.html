@@ -71,9 +71,11 @@
   .c-claude { color:var(--accent); }
   .c-codex { color:var(--green); }
   .c-qwen { color:var(--yellow); }
+  .c-pi { color:var(--blue, #7FA8D9); }
   .bg-claude { background:var(--accent); }
   .bg-codex { background:var(--green); }
   .bg-qwen { background:var(--yellow); }
+  .bg-pi { background:var(--blue, #7FA8D9); }
 
   /* ── Loading ── */
   .loading { text-align:center; padding:40px; color:var(--muted); }
@@ -165,7 +167,7 @@
   let refreshTimer = null;
 
   const $ = id => document.getElementById(id);
-  const PCOLORS = { claude:'#C8B88A', codex:'#7A9E7E', qwen:'#D4B85C' };
+  const PCOLORS = { claude:'#C8B88A', codex:'#7A9E7E', qwen:'#D4B85C', pi:'#7FA8D9' };
   const TCOLORS = { user:'#C8B88A', assistant:'#7A9E7E', tool_use:'#D4A054', tool_result:'#5CA8A0', thinking:'#A88EC8', system:'#8B8B94', summary:'#8B8B94' };
   const PALETTE = ['#C8B88A','#7A9E7E','#D4A054','#5CA8A0','#A88EC8','#D4645C','#D4B85C','#8B8B94','#A88EC8','#C87898'];
 
@@ -357,9 +359,9 @@
     const y = v => pad.t + h - (v / maxVal) * h;
 
     // Stacked areas: claude bottom, codex middle, qwen top
-    const providers = ['claude','codex','qwen'];
-    const colors = { claude:'rgba(88,166,255,0.4)', codex:'rgba(63,185,80,0.4)', qwen:'rgba(227,179,65,0.4)' };
-    const strokes = { claude:'#C8B88A', codex:'#7A9E7E', qwen:'#D4B85C' };
+    const providers = ['claude','codex','qwen','pi'];
+    const colors = { claude:'rgba(88,166,255,0.4)', codex:'rgba(63,185,80,0.4)', qwen:'rgba(227,179,65,0.4)', pi:'rgba(127,168,217,0.4)' };
+    const strokes = { claude:'#C8B88A', codex:'#7A9E7E', qwen:'#D4B85C', pi:'#7FA8D9' };
 
     let svgContent = '';
 

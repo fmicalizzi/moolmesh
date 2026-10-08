@@ -185,7 +185,9 @@ class DashboardServer:
         self.event_store = EventStore()
 
         # Determine which providers to harvest
-        active = set(providers) if providers else {"claude", "codex", "qwen", "opencode", "cursor"}
+        active = set(providers) if providers else {
+            "claude", "codex", "qwen", "opencode", "cursor", "pi"
+        }
 
         # Harvesters — write directly to SQLite, push to sse_buffer
         self.watchers: list = []
@@ -213,6 +215,10 @@ class DashboardServer:
             from hub.watchers.cursor_watcher import CursorWatcher
             self.cursor_watcher = CursorWatcher(self.event_store, self.sse_buffer)
             self.watchers.append(("Cursor", self.cursor_watcher))
+        if "pi" in active:
+            from hub.watchers.pi_watcher import PiWatcher
+            self.pi_watcher = PiWatcher(self.event_store, self.sse_buffer)
+            self.watchers.append(("Pi", self.pi_watcher))
 
         # GitHarvester — runs in background for registered repos
         self.git_store: GitStore | None = None

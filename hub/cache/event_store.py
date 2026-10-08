@@ -1318,7 +1318,11 @@ class EventStore:
 
     @staticmethod
     def _pack_hourly(rows: list) -> list[dict]:
-        """Pack hourly rows into [{hour, claude, codex, qwen, total}]."""
+        """Pack hourly rows into ``[{hour, <provider>: count, ..., total}]``.
+
+        Provider keys are added on demand, so a new provider (e.g. ``pi``)
+        appears without a code change here.
+        """
         hours: dict[str, dict] = {}
         for hour, provider, count in rows:
             if hour not in hours:

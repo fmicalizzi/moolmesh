@@ -20,6 +20,7 @@
     --yellow: #D4B85C;
     --cyan: #5CA8A0;
     --magenta: #B898D8;
+    --blue: #7FA8D9;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -61,6 +62,7 @@
   .status-dot.active.qwen { background: var(--yellow); }
   .status-dot.active.opencode { background: var(--magenta, #B898D8); }
   .status-dot.active.cursor { background: var(--cyan, #56D4DD); }
+  .status-dot.active.pi { background: var(--blue); }
 
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
@@ -165,6 +167,7 @@
   .card-provider.qwen { background: rgba(227,179,65,0.15); color: var(--yellow); }
   .card-provider.opencode { background: rgba(184,152,216,0.15); color: var(--magenta, #B898D8); }
   .card-provider.cursor { background: rgba(86,212,221,0.15); color: var(--cyan, #56D4DD); }
+  .card-provider.pi { background: rgba(127,168,217,0.15); color: var(--blue); }
 
   .project-card .card-cwd {
     font-size: 10px;
@@ -205,6 +208,7 @@
   .card-bar-fill.codex { background: var(--green); }
   .card-bar-fill.qwen { background: var(--yellow); }
   .card-bar-fill.opencode { background: var(--magenta, #B898D8); }
+  .card-bar-fill.pi { background: var(--blue); }
 
   /* ── Tool Chart ── */
   .tool-row {
@@ -253,6 +257,7 @@
   .pt-val.codex { color: var(--green); }
   .pt-val.qwen { color: var(--yellow); }
   .pt-val.opencode { color: var(--magenta, #B898D8); }
+  .pt-val.pi { color: var(--blue); }
 
   .pt-bar { height: 4px; border-radius: 2px; margin-top: 3px; background: var(--bg-tertiary); overflow: hidden; }
   .pt-bar-fill { height: 100%; border-radius: 2px; }
@@ -260,6 +265,7 @@
   .pt-bar-fill.codex { background: var(--green); }
   .pt-bar-fill.qwen { background: var(--yellow); }
   .pt-bar-fill.opencode { background: var(--magenta, #B898D8); }
+  .pt-bar-fill.pi { background: var(--blue); }
 
   /* ── Right: Feed ── */
   .feed-area {
@@ -302,6 +308,7 @@
   .fbtn.on-codex { border-color: var(--green); color: var(--green); }
   .fbtn.on-qwen { border-color: var(--yellow); color: var(--yellow); }
   .fbtn.on-opencode { border-color: var(--magenta, #B898D8); color: var(--magenta, #B898D8); }
+  .fbtn.on-pi { border-color: var(--blue); color: var(--blue); }
 
   #feed {
     flex: 1;
@@ -333,6 +340,7 @@
   .prov.codex { background: rgba(63,185,80,0.15); color: var(--green); }
   .prov.qwen { background: rgba(227,179,65,0.15); color: var(--yellow); }
   .prov.opencode { background: rgba(184,152,216,0.15); color: var(--magenta, #B898D8); }
+  .prov.pi { background: rgba(127,168,217,0.15); color: var(--blue); }
   .ev .proj { font-size: 9px; color: var(--cyan); border: 1px solid rgba(57,210,192,0.25); background: rgba(57,210,192,0.06); padding: 0 5px; border-radius: 3px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ev .etype { font-size: 10px; min-width: 65px; }
   .t-user { color: var(--accent); }
@@ -370,6 +378,7 @@
   .tl-bar .tl-codex { background: var(--green); }
   .tl-bar .tl-qwen { background: var(--yellow); }
   .tl-bar .tl-opencode { background: var(--magenta, #B898D8); }
+  .tl-bar .tl-pi { background: var(--blue); }
 
   .tl-segment {
     width: 100%;
@@ -399,6 +408,7 @@
     <div class="provider-status"><div class="status-dot" id="dot-codex"></div><span>Codex</span></div>
     <div class="provider-status"><div class="status-dot" id="dot-qwen"></div><span>Qwen</span></div>
     <div class="provider-status"><div class="status-dot" id="dot-opencode"></div><span>OpenCode</span></div>
+    <div class="provider-status"><div class="status-dot" id="dot-pi"></div><span>Pi</span></div>
     <div class="conn err" id="conn">disconnected</div>
   </div>
 </header>
@@ -424,6 +434,7 @@
         <div class="pt-item"><div class="pt-label">Codex</div><div class="pt-val codex" id="pt-codex">0</div><div class="pt-bar"><div class="pt-bar-fill codex" id="ptb-codex" style="width:0"></div></div></div>
         <div class="pt-item"><div class="pt-label">Qwen</div><div class="pt-val qwen" id="pt-qwen">0</div><div class="pt-bar"><div class="pt-bar-fill qwen" id="ptb-qwen" style="width:0"></div></div></div>
         <div class="pt-item"><div class="pt-label">OpenCode</div><div class="pt-val opencode" id="pt-opencode">0</div><div class="pt-bar"><div class="pt-bar-fill opencode" id="ptb-opencode" style="width:0"></div></div></div>
+        <div class="pt-item"><div class="pt-label">Pi</div><div class="pt-val pi" id="pt-pi">0</div><div class="pt-bar"><div class="pt-bar-fill pi" id="ptb-pi" style="width:0"></div></div></div>
       </div>
     </div>
 
@@ -456,6 +467,7 @@
         <button class="fbtn" data-f="codex" onclick="setFilter('codex')">Codex</button>
         <button class="fbtn" data-f="qwen" onclick="setFilter('qwen')">Qwen</button>
         <button class="fbtn" data-f="opencode" onclick="setFilter('opencode')">OpenCode</button>
+        <button class="fbtn" data-f="pi" onclick="setFilter('pi')">Pi</button>
       </div>
       <span id="feed-count">0</span>
     </div>
@@ -637,7 +649,7 @@
   }
 
   function renderProviderTokens(pt) {
-    const providers = ['claude','codex','qwen','opencode'];
+    const providers = ['claude','codex','qwen','opencode','pi'];
     let total = 0;
     const vals = {};
     for (const p of providers) {
@@ -668,8 +680,8 @@
     if (!tlData.length) return;
     const now = Date.now()/1000;
     const bins = 30; // 30 bars = 2s each
-    const provs = ['claude','codex','qwen','opencode'];
-    const counts = Array.from({length:bins}, () => ({claude:0, codex:0, qwen:0, opencode:0}));
+    const provs = ['claude','codex','qwen','opencode','pi'];
+    const counts = Array.from({length:bins}, () => ({claude:0, codex:0, qwen:0, opencode:0, pi:0}));
     for (const d of tlData) {
       const age = now - d.t;
       const idx = Math.min(bins-1, Math.floor(age/2));

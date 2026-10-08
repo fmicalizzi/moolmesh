@@ -10,6 +10,7 @@
     --text: #D4D4D8; --muted: #8B8B94; --accent: #C8B88A;
     --green: #7A9E7E; --orange: #D4A054; --red: #D4645C;
     --purple: #A88EC8; --yellow: #D4B85C; --cyan: #5CA8A0;
+    --blue: #7FA8D9;
   }
   * { margin:0; padding:0; box-sizing:border-box; }
   body { background:var(--bg); color:var(--text); font-family:'SF Mono','Cascadia Code','Fira Code',monospace; font-size:13px; line-height:1.5; overflow-x:hidden; }
@@ -128,7 +129,8 @@
   .prod-legend i { width:9px; height:9px; border-radius:2px; display:inline-block; }
   .lg-claude { background:var(--cyan); } .lg-codex { background:var(--green); }
   .lg-opencode { background:var(--purple); } .lg-qwen { background:var(--orange); }
-  .lg-cursor { background:var(--yellow); } .lg-other { background:var(--muted); }
+  .lg-cursor { background:var(--yellow); } .lg-pi { background:var(--blue); }
+  .lg-other { background:var(--muted); }
   .prod-scale { display:inline-flex; align-items:center; gap:3px; margin-left:auto; }
   .prod-scale i { width:11px; height:11px; border-radius:2px; display:inline-block; background:var(--cyan); }
   /* Folder-monitoring indicator (#27) — capa de carpetas apagable. */
@@ -277,9 +279,9 @@ function metaStr(r){ return `${r.session_touches||0}s / ${r.fs_touches||0}f / ${
 // provider; shade = session volume vs the window's busiest day. Hand-rolled
 // inline SVG, zero-dep. hide_project_names is honored server-side (labels come
 // already masked; we never fall back to project_key).
-const PROV_COLOR = {claude:'var(--cyan)', codex:'var(--green)', opencode:'var(--purple)', qwen:'var(--orange)', cursor:'var(--yellow)'};
+const PROV_COLOR = {claude:'var(--cyan)', codex:'var(--green)', opencode:'var(--purple)', qwen:'var(--orange)', cursor:'var(--yellow)', pi:'var(--blue)'};
 function provColor(p){ return PROV_COLOR[p] || 'var(--muted)'; }
-function provClass(p){ return ['claude','codex','opencode','qwen','cursor'].includes(p) ? 'lg-'+p : 'lg-other'; }
+function provClass(p){ return ['claude','codex','opencode','qwen','cursor','pi'].includes(p) ? 'lg-'+p : 'lg-other'; }
 function ymd(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 function windowDaysList(n){
   const out=[]; const t=new Date(); t.setHours(0,0,0,0);

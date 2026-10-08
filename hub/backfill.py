@@ -3,8 +3,8 @@
 The live watchers only tail files modified within ``MAX_AGE_HOURS`` (12 h), so
 history from before the install — or from a daemon outage longer than the
 window — was never read. ``run_backfill`` walks ALL session files of the
-file-based providers (claude, codex, qwen; opencode/cursor read a whole SQLite
-DB and are unaffected) and ingests them through the watcher's own path:
+file-based providers (claude, codex, qwen, pi; opencode/cursor read a whole
+SQLite DB and are unaffected) and ingests them through the watcher's own path:
 ``_parse_and_adapt`` → ``store_with_offset`` with offsets in ``file_registry``.
 
 * Resumable: each file restarts from its stored offset (0 new bytes = no-op),
@@ -42,17 +42,17 @@ from hub.cloudfiles import PlaceholderSkipper, is_cloud_placeholder
 
 _log = logging.getLogger("moolmesh.backfill")
 
-FILE_PROVIDERS = ("claude", "codex", "qwen")
+FILE_PROVIDERS = ("claude", "codex", "qwen", "pi")
 
 
 def backfill(store: EventStore | None = None, **kwargs) -> dict[str, int]:
     """Legacy no-op stub kept for scripts importing it; use ``run_backfill``."""
-    return {"claude": 0, "codex": 0, "qwen": 0, "total": 0}
+    return {"claude": 0, "codex": 0, "qwen": 0, "pi": 0, "total": 0}
 
 
 def gap_fill(store: EventStore | None = None, **kwargs) -> dict[str, int]:
     """Legacy no-op stub kept for scripts importing it; use ``run_backfill``."""
-    return {"claude": 0, "codex": 0, "qwen": 0, "total": 0}
+    return {"claude": 0, "codex": 0, "qwen": 0, "pi": 0, "total": 0}
 
 
 @dataclass
@@ -186,6 +186,9 @@ def make_watcher(provider: str, store: EventStore | None, bases: dict[str, Path 
     if provider == "qwen":
         from hub.watchers.qwen_watcher import QwenWatcher
         return QwenWatcher(store, None, qwen_base=bases.get("qwen"))
+    if provider == "pi":
+        from hub.watchers.pi_watcher import PiWatcher
+        return PiWatcher(store, None, pi_base=bases.get("pi"))
     raise ValueError(f"unsupported provider for backfill: {provider}")
 
 
