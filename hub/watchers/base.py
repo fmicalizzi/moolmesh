@@ -14,9 +14,13 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from hub.cache.event_store import EventStore, file_fingerprint, registry_path
+
+_log = logging.getLogger("moolmesh.watcher")
 
 
 class BaseHarvester(ABC):
@@ -55,6 +59,14 @@ class BaseHarvester(ABC):
     # key every daemon start differently and re-read from rowid 0. They set
     # this and are keyed by ``<provider>:<path>`` instead (#50).
     STABLE_KEY: bool = False
+    # Resilience (issue #65): a file that fails this many consecutive cycles is
+    # quarantined (with backoff) so one poisoned file cannot occupy every poll;
+    # it is retried after the backoff and reported via ``quarantined_files``.
+    QUARANTINE_AFTER: int = 5
+    QUARANTINE_BACKOFF: float = 60.0
+    # A watcher with no completed cycle for this many RESCAN_INTERVALs is
+    # reported as stalled by /health (never a silent outage).
+    HEALTH_STALL_FACTOR: float = 3.0
 
     def __init__(self, store: EventStore, sse_buffer: collections.deque | None = None):
         self._store = store
@@ -65,6 +77,16 @@ class BaseHarvester(ABC):
         # Old files to ingest quietly after a daemon outage (#45), oldest first.
         self._catchup_queue: collections.deque[Path] = collections.deque()
         self.catchup_skipped: list[tuple[str, Path]] = []  # (reason, path)
+        # Health/resilience state (issue #65). Paths are never put in a
+        # message: last_error carries only the exception type + the file, and
+        # the file is masked at snapshot time under hide_project_names.
+        self._started_at: float | None = None
+        self._last_cycle_at: float | None = None
+        self._last_error: dict[str, str] | None = None
+        self._file_failures: dict[Path, int] = {}
+        self._quarantine_until: dict[Path, float] = {}
+        self._logged_file_error: dict[Path, str] = {}
+        self._logged_loop_error: str | None = None
 
     @property
     @abstractmethod
@@ -117,7 +139,11 @@ class BaseHarvester(ABC):
     def start(self) -> None:
         """Start harvesting in a daemon thread."""
         self._running = True
-        self._thread = threading.Thread(target=self._harvest_loop, daemon=True)
+        self._started_at = time.time()
+        self._thread = threading.Thread(
+            target=self._harvest_loop, name=f"{self.provider_name}-watcher",
+            daemon=True,
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -125,31 +151,146 @@ class BaseHarvester(ABC):
         if self._thread:
             self._thread.join(timeout=5)
 
+    @property
+    def alive(self) -> bool:
+        """True while the harvesting thread is alive."""
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def running(self) -> bool:
+        """True while the watcher was started and not stopped."""
+        return self._running
+
+    @property
+    def last_cycle_at(self) -> float | None:
+        """Wall-clock epoch of the last completed loop iteration."""
+        return self._last_cycle_at
+
+    @property
+    def last_error(self) -> dict[str, str] | None:
+        """Last error as ``{"type": ..., "file": ...}`` (never a message)."""
+        return self._last_error
+
+    @property
+    def quarantined_files(self) -> int:
+        """Files currently in quarantine (failures >= N, backoff not expired)."""
+        now = time.time()
+        return sum(1 for until in self._quarantine_until.values() if until > now)
+
+    def status_snapshot(self, *, hide_project_names: bool = False) -> dict[str, Any]:
+        """Health snapshot for /health and ``mool daemon status`` (issue #65).
+
+        Additive: ``alive`` (thread lives), ``stalled`` (no completed cycle in
+        ``HEALTH_STALL_FACTOR × RESCAN_INTERVAL``), ``last_cycle_at`` (ISO),
+        ``last_error`` (exception TYPE + file, never a message; the file is
+        masked when ``hide_project_names`` is on) and ``quarantined_files``.
+        """
+        now = time.time()
+        last_cycle = self._last_cycle_at
+        stalled = False
+        if self._running:
+            reference = last_cycle if last_cycle is not None else self._started_at
+            if reference is not None:
+                stalled = (now - reference) > self.HEALTH_STALL_FACTOR * self.RESCAN_INTERVAL
+        last_error = None
+        if self._last_error:
+            path = self._last_error.get("file") or ""
+            if path and hide_project_names:
+                from hub.config import masked_label
+                path = masked_label(path, True)
+            last_error = {"type": self._last_error.get("type", ""), "file": path}
+        return {
+            "alive": self.alive,
+            "running": self._running,
+            "stalled": stalled,
+            "last_cycle_at": (
+                datetime.fromtimestamp(last_cycle, tz=timezone.utc).isoformat()
+                if last_cycle is not None else None
+            ),
+            "last_error": last_error,
+            "quarantined_files": self.quarantined_files,
+        }
+
+    def note_thread_death(self) -> None:
+        """Record that the harvesting thread died (called by the supervisor)."""
+        if not self._last_error:
+            self._last_error = {"type": "ThreadDied", "file": ""}
+
     def _harvest_loop(self) -> None:
-        """Main loop: discover, read, parse, store, sleep, repeat."""
+        """Main loop: discover, read, parse, store, sleep, repeat.
+
+        The whole iteration is guarded: no exception — from discovery, a
+        provider parser, the store or the catch-up queue — may kill the
+        thread and leave the provider silently unharvested (#65). Per-file
+        failures are handled in ``_harvest_file``; only truly unexpected
+        failures land here, logged once per error type.
+        """
         last_rescan = 0.0
         if self.CATCHUP:
             self._plan_catchup()
 
         while self._running:
-            now = time.monotonic()
+            try:
+                now = time.monotonic()
 
-            # Rescan for new/removed files periodically
-            if now - last_rescan >= self.RESCAN_INTERVAL:
-                self._rescan()
-                last_rescan = now
+                # Rescan for new/removed files periodically
+                if now - last_rescan >= self.RESCAN_INTERVAL:
+                    self._rescan()
+                    last_rescan = now
 
-            # Process all watched files
-            for path, fingerprint in list(self._watched_files.items()):
-                if not self._running:
-                    break
-                self._harvest_file(path, fingerprint)
+                # Process all watched files
+                for path, fingerprint in list(self._watched_files.items()):
+                    if not self._running:
+                        break
+                    self._harvest_file(path, fingerprint)
 
-            if self._catchup_queue:
-                self._drain_catchup(self.CATCHUP_FILES_PER_CYCLE)
+                if self._catchup_queue:
+                    self._drain_catchup(self.CATCHUP_FILES_PER_CYCLE)
+            except Exception as exc:  # noqa: BLE001 — the loop must survive
+                self._note_loop_error(exc)
 
+            self._last_cycle_at = time.time()
             # Sleep between cycles
             time.sleep(self.POLL_INTERVAL)
+
+    def _note_loop_error(self, exc: BaseException) -> None:
+        """Record a loop-level failure, logging once per error type."""
+        err_type = type(exc).__name__
+        self._last_error = {"type": err_type, "file": ""}
+        if self._logged_loop_error != err_type:
+            self._logged_loop_error = err_type
+            _log.warning(
+                "%s harvest loop iteration failed (%s); retrying next cycle",
+                self.provider_name, err_type, exc_info=exc,
+            )
+
+    def _note_file_error(self, path: Path, exc: BaseException) -> None:
+        """Record a per-file failure; log once per (file, error type) (#65)."""
+        err_type = type(exc).__name__
+        self._last_error = {"type": err_type, "file": str(path)}
+        failures = self._file_failures.get(path, 0) + 1
+        self._file_failures[path] = failures
+        if self._logged_file_error.get(path) != err_type:
+            self._logged_file_error[path] = err_type
+            _log.warning(
+                "%s harvest error (%s) in %s; will retry next cycle",
+                self.provider_name, err_type, path, exc_info=exc,
+            )
+        if failures >= self.QUARANTINE_AFTER:
+            self._quarantine_until[path] = time.time() + self.QUARANTINE_BACKOFF
+            if failures == self.QUARANTINE_AFTER:
+                _log.warning(
+                    "%s quarantined %s for %.0fs after %d consecutive failures",
+                    self.provider_name, path, self.QUARANTINE_BACKOFF, failures,
+                )
+
+    def _clear_file_error(self, path: Path) -> None:
+        """A file recovered: forget its failures/quarantine/log-once mark."""
+        self._file_failures.pop(path, None)
+        self._quarantine_until.pop(path, None)
+        self._logged_file_error.pop(path, None)
+        if self._last_error and self._last_error.get("file") == str(path):
+            self._last_error = None
 
     def _rescan(self) -> None:
         """Discover files, register new ones, unregister stale ones."""
@@ -189,7 +330,7 @@ class BaseHarvester(ABC):
         try:
             self._store.set_watcher_cycle(self.provider_name, time.time())
         except Exception:
-            logging.getLogger("moolmesh.watcher").warning(
+            _log.warning(
                 "could not persist %s watcher cycle", self.provider_name, exc_info=True
             )
 
@@ -221,7 +362,7 @@ class BaseHarvester(ABC):
             skipper = PlaceholderSkipper()
             files = self.discover_files(since=cutoff, skip_dir=skipper)
         except Exception:
-            logging.getLogger("moolmesh.watcher").warning(
+            _log.warning(
                 "%s catch-up planning failed", self.provider_name, exc_info=True
             )
             return
@@ -238,7 +379,7 @@ class BaseHarvester(ABC):
         old.sort()
         self._catchup_queue.extend(f for _, f in old)
         if old:
-            logging.getLogger("moolmesh.watcher").info(
+            _log.info(
                 "%s catch-up: %d files modified while the daemon was down",
                 self.provider_name, len(old),
             )
@@ -260,17 +401,34 @@ class BaseHarvester(ABC):
                 continue
             try:
                 self.harvest_history_file(path, fp)
-            except Exception:
-                logging.getLogger("moolmesh.watcher").warning(
-                    "%s catch-up failed for %s", self.provider_name, path, exc_info=True
-                )
+                self._clear_file_error(path)
+            except OSError:
+                continue  # vanished mid-drain: not a poisoned file
+            except Exception as exc:  # noqa: BLE001 — one file never stops the drain
+                self._note_file_error(path, exc)
         if not self._catchup_queue:
             self._record_cycle()
 
     def _harvest_file(self, path: Path, fingerprint: str) -> None:
-        """Read new data from one file, store atomically."""
+        """Read new data from one file, store atomically.
+
+        Never raises (issue #65): a get_offset / parse / store failure is
+        recorded and logged once per (file, error type) and retried next
+        cycle. After ``QUARANTINE_AFTER`` consecutive failures the file is
+        skipped for ``QUARANTINE_BACKOFF`` seconds so it cannot occupy every
+        poll; it is retried afterwards and reported in the health snapshot.
+        """
+        if self._quarantine_until.get(path, 0.0) > time.time():
+            return  # in backoff; retried when it expires
+
         # Get offset from SQLite (persistent across restarts)
-        offset = self._stored_offset(fingerprint, path)
+        try:
+            offset = self._stored_offset(fingerprint, path)
+        except OSError:
+            return  # unreadable file (e.g. vanished): not a data error
+        except Exception as exc:  # noqa: BLE001
+            self._note_file_error(path, exc)
+            return
         if offset is None:
             offset = 0  # New file — read from beginning (this IS the backfill)
 
@@ -278,20 +436,24 @@ class BaseHarvester(ABC):
             events, new_offset = self._parse_and_adapt(path, offset)
         except OSError:
             return
-        except Exception:
-            logging.getLogger("moolmesh.watcher").warning(
-                "harvest error in %s: %s", path, __import__("traceback").format_exc()
-            )
+        except Exception as exc:  # noqa: BLE001
+            self._note_file_error(path, exc)
             return
 
         if new_offset == offset and not events:
+            self._clear_file_error(path)
             return  # No new data
 
         # Atomic: store events + update offset in one transaction
         # Returns only newly-inserted events with their SQLite IDs
-        stored = self._store.store_with_offset(
-            events, fingerprint, self.provider_name, str(path), new_offset
-        )
+        try:
+            stored = self._store.store_with_offset(
+                events, fingerprint, self.provider_name, str(path), new_offset
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._note_file_error(path, exc)
+            return
+        self._clear_file_error(path)
 
         # Push stored events (with IDs) to SSE buffer for broadcast
         if self._sse_buffer is not None and stored:
