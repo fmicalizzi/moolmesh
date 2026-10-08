@@ -315,6 +315,10 @@ class BaseHarvester(ABC):
             if fp:
                 self._harvest_file(path, fp)
             self._watched_files.pop(path, None)
+            # Forget per-file error state so it cannot linger (#65).
+            self._file_failures.pop(path, None)
+            self._quarantine_until.pop(path, None)
+            self._logged_file_error.pop(path, None)
 
         self._record_cycle()
 
