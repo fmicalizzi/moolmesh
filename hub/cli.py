@@ -238,12 +238,17 @@ def _print_daemon_status() -> int:
     except Exception:
         pass
 
-    # Show monitored repos
+    # Show monitored repos (masked under hide_project_names, like every other
+    # human surface — the names must not leak through daemon status).
     try:
-        from hub.config import load_config
+        from hub.config import load_config, masked_label
         config = load_config()
         if config.repos:
-            print(f"  Repos:  {', '.join(f'{r.owner}/{r.repo}' for r in config.repos)}")
+            labels = [
+                masked_label(f"{r.owner}/{r.repo}", config.hide_project_names)
+                for r in config.repos
+            ]
+            print(f"  Repos:  {', '.join(labels)}")
     except Exception:
         pass
 
@@ -334,10 +339,13 @@ def _print_daemon_status_json() -> int:
         pass
 
     try:
-        from hub.config import load_config
+        from hub.config import load_config, masked_label
         config = load_config()
         if config.repos:
-            result["repos"] = [f"{r.owner}/{r.repo}" for r in config.repos]
+            result["repos"] = [
+                masked_label(f"{r.owner}/{r.repo}", config.hide_project_names)
+                for r in config.repos
+            ]
     except Exception:
         pass
 
