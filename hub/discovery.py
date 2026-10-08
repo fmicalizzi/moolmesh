@@ -11,6 +11,7 @@ from pathlib import Path
 
 from hub.models.base import Provider
 from hub.parsers.cursor_parser import decode_project_name, default_cursor_base
+from hub.parsers.pi_parser import default_pi_base
 from hub.log import get as get_logger
 from hub.sqlite_ro import connect_ro
 
@@ -47,6 +48,7 @@ class ProjectDiscovery:
         qwen_base: Path | None = None,
         opencode_base: Path | None = None,
         cursor_base: Path | None = None,
+        pi_base: Path | None = None,
         skip_dir: Callable[[Path], bool] | None = None,
     ):
         home = Path.home()
@@ -61,6 +63,7 @@ class ProjectDiscovery:
             home / ".local" / "share" / "opencode" / "opencode.db"
         )
         self.cursor_base = cursor_base or default_cursor_base()
+        self.pi_base = pi_base or default_pi_base()
 
     def _skip(self, path: Path) -> bool:
         return self._skip_dir is not None and self._skip_dir(path)
@@ -74,6 +77,7 @@ class ProjectDiscovery:
         projects.extend(self.discover_qwen())
         projects.extend(self.discover_opencode())
         projects.extend(self.discover_cursor())
+        projects.extend(self.discover_pi())
         return projects
 
     def discover_claude(self) -> list[DiscoveredProject]:
@@ -325,6 +329,69 @@ class ProjectDiscovery:
                 )
             )
         return projects
+
+    def discover_pi(self) -> list[DiscoveredProject]:
+        """Discover Pi sessions under ``~/.pi/agent/sessions/<encoded-cwd>/``.
+
+        The encoded folder name is lossy (``/``, ``_`` and ``-`` all become
+        ``-``), so the real cwd is read from each file's session header (line 1)
+        and sessions are grouped by it. Files whose header is unreadable land in
+        a single ``pi-sessions`` bucket, like Codex's fallback. The whole tree is
+        walked with ``skip_dir`` pruning (cloud-only dirs are never listed).
+        """
+        from collections import defaultdict
+
+        projects: list[DiscoveredProject] = []
+        sessions_dir = self.pi_base / "sessions"
+        if not sessions_dir.is_dir() or self._skip(sessions_dir):
+            return projects
+
+        by_cwd: dict[str, list[Path]] = defaultdict(list)
+        for root, dirs, files in os.walk(sessions_dir):
+            if self._skip_dir is not None:
+                # Prune in place so os.walk never lists a skipped directory.
+                dirs[:] = [d for d in dirs if not self._skip(Path(root) / d)]
+            for f in files:
+                if not f.endswith(".jsonl"):
+                    continue
+                path = Path(root) / f
+                cwd = self._read_pi_cwd(path)
+                by_cwd[cwd or "pi-sessions"].append(path)
+
+        for cwd, files in sorted(by_cwd.items()):
+            if cwd == "pi-sessions":
+                name, path = "pi-sessions", str(sessions_dir)
+            else:
+                name = self.extract_project_name(cwd)
+                path = cwd
+            projects.append(
+                DiscoveredProject(
+                    name=name,
+                    path=path,
+                    provider=Provider.PI,
+                    session_dir=sessions_dir,
+                    session_files=sorted(files),
+                    encoded_name=f"pi-{name}",
+                )
+            )
+        return projects
+
+    @staticmethod
+    def _read_pi_cwd(path: Path) -> str:
+        """The cwd from a Pi session header (line 1); '' when unreadable."""
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                head = f.readline().strip()
+            data = json.loads(head)
+        except (OSError, json.JSONDecodeError):
+            return ""
+        if (
+            isinstance(data, dict)
+            and data.get("type") == "session"
+            and isinstance(data.get("cwd"), str)
+        ):
+            return data["cwd"]
+        return ""
 
     def find_active_sessions(
         self, provider: Provider | None = None, minutes: int = 10

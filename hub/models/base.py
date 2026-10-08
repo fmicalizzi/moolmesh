@@ -15,6 +15,15 @@ class Provider(str, Enum):
     QWEN = "qwen"
     OPENCODE = "opencode"
     CURSOR = "cursor"
+    PI = "pi"
+
+
+# Tool names whose ``file_path`` is a shell command, never a file (#58).
+# Single source of truth: adapters must not mint a command as a path, and the
+# workspace attribution pass ignores any legacy row that still carries one.
+SHELL_TOOLS = frozenset({
+    "Bash", "bash", "run_shell_command", "shell", "exec_command",
+})
 
 
 class MessageRole(str, Enum):

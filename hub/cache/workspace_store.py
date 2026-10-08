@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hub.log import get as get_logger
+from hub.models.base import SHELL_TOOLS
 from hub.correlation.workspace_resolver import (
     WorkspaceIdentity,
     resolve_dir,
@@ -1772,9 +1773,10 @@ class WorkspaceStore:
     # Deliberately NOT listed: Codex ``exec`` / ``apply_patch`` / ``view_image``
     # — since #40 those only store paths extracted from the patch (real files),
     # and ``exec`` custom calls never put a command in file_path.
-    _SHELL_TOOLS = frozenset({
-        "Bash", "bash", "run_shell_command", "shell", "exec_command",
-    })
+    # Single source of truth: ``hub.models.base.SHELL_TOOLS`` (#58). The
+    # adapters never mint a shell command as a path, and this pass still
+    # ignores any legacy row that carries one.
+    _SHELL_TOOLS = SHELL_TOOLS
 
     @staticmethod
     def _read_max_event_id(events_db_path: str | Path) -> int:
