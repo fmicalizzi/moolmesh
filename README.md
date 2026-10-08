@@ -119,6 +119,36 @@ That's it. MoolMesh auto-discovers your AI sessions immediately. No configuratio
 
 ---
 
+## Updating
+
+```bash
+# pipx (recommended)
+pipx upgrade moolmesh --pip-args=--no-cache-dir
+
+# pip inside a virtual environment
+python -m pip install --upgrade --no-cache-dir moolmesh
+
+# uv tool
+uv tool upgrade moolmesh
+```
+
+Then restart the daemon so it runs the new version:
+
+```bash
+mool daemon restart
+```
+
+`--no-cache-dir` skips the local pip cache: right after a release, a cached
+wheel (or a lagging mirror) can make the upgrade resolve the previous version.
+
+**Windows:** a running daemon can lock files inside the pipx venv and make
+`pipx upgrade` fail or apply only partially — stop it first
+(`mool daemon stop`), upgrade, then `mool daemon start`. If you installed with
+Scoop or another tool manager, use its own upgrade (`scoop update moolmesh`,
+`uv tool upgrade moolmesh`).
+
+---
+
 ## Production Install
 
 For system-wide access (run `mool` from any directory):
