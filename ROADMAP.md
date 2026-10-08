@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: October 2026 — v1.24.0
+Last updated: October 2026 — v1.24.1
 
 ---
 
@@ -198,6 +198,7 @@ The fixes from the portfolio data audit ([#36](https://github.com/fmicalizzi/moo
 - **Install-day OpenCode rows** ([#61](https://github.com/fmicalizzi/moolmesh/issues/61)) are dated by their event time.
 - **Noise out of projects:** temp/system folders and app bundles are "unclassified" (still visible).
 - A one-time cursor reset re-derives everything on the daemon's first cycle.
+- **v1.24.1** ([#65](https://github.com/fmicalizzi/moolmesh/issues/65)): hotfix. Codex sub-agent sessions no longer crash ingestion, writes always roll back, watcher threads can't die silently (catch, quarantine, self-restart), and `/health` reports per-watcher state with a `degraded` status.
 
 ---
 

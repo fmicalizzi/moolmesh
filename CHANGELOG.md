@@ -6,6 +6,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.24.1] — 2026-10-08
+
+Urgent hotfix (#65). A new Codex session format (sub-agent sessions, codex-cli
+0.161+) could crash a write and leave the shared database connection mid-transaction.
+That **silently killed the Codex and OpenCode watchers** while `/health` kept saying
+"healthy". Watchers can no longer die, and their health is now visible. No new
+dependencies, no schema migration.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+  `--no-cache-dir` avoids pip's cached package index, which can hide a release for
+  a while right after it's published (#63).
+- **Nothing is lost.** Watchers resume from their saved offsets, and the catch-up
+  (v1.23) ingests session files that left the 12 h live window while a watcher was
+  down. To be sure, run `mool backfill` once after the restart. It is idempotent.
+
+### Fixed
+- **#65 — Codex sub-agent sessions crashed ingestion.** Their `session_meta.source`
+  is an object, not a string. `source` is now stored as a stable short string
+  (`subagent:thread_spawn`), and any non-scalar value bound for a scalar column is
+  coerced at the parser **and** at the store. The sub-agent's parent is recorded
+  (session metadata plus a `subagent` session link), so `get_session_chain` returns
+  the parent. A sub-agent rollout that replays its parent's metadata no longer
+  attributes the child's events to the parent.
+- **#65 — a failed write poisoned the shared connection.** Every EventStore write
+  now rolls back on error, so the connection is never left mid-transaction.
+- **#65 / #52 — a watcher thread could die silently.**
+  - Per-file errors are caught, logged once per file and error type, and retried
+    next cycle.
+  - A file that fails 5 times in a row is quarantined with a backoff, and reported.
+  - The harvest loop survives any exception.
+  - A thread that dies anyway is restarted by an internal supervisor.
+
+### Added
+- **Watcher health.** `/health` gains an additive `watchers` block per provider:
+  `alive`, `last_cycle_at`, `last_error` (exception type only) and
+  `quarantined_files`. The status becomes **`degraded`** when an enabled watcher is
+  dead or stalled, and stays `healthy` otherwise.
+- `mool daemon status` shows one line per watcher and exits **1** when the daemon is
+  degraded. `--json` includes the block.
+
+---
+
 ## [1.24.0] — 2026-10-05
 
 "Honest portfolio": the fixes that came out of the portfolio data audit (#36).
