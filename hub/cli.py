@@ -1941,10 +1941,12 @@ def _print_portfolio_grouped(grouped: dict, json_output: bool) -> None:
 
     orphans = grouped.get("unclassified", [])
     if orphans:
+        subtype_labels = {"container": "contenedor (ruta interna)"}  # #64
         print(f"\n  {bold('Sin clasificar / herramientas')} ({len(orphans)}):")
         for o in orphans:
             olabel = masked_label(o.get("dir_path") or o.get("root_path") or "", hide)
-            print(dim(f"    · [{o['subtype']}] {olabel}"))
+            subtype = subtype_labels.get(o["subtype"], o["subtype"])
+            print(dim(f"    · [{subtype}] {olabel}"))
 
 
 def cmd_workspace_list(args: argparse.Namespace) -> None:

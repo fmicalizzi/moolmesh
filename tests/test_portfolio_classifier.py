@@ -6,6 +6,7 @@ must not split a hyphenated name, and the grouped read (harness folding at read
 time, collapsed_harness count, nested children, recursive masking).
 """
 
+import os
 import sqlite3
 
 import pytest
@@ -14,8 +15,10 @@ from hub.cache.portfolio_classifier import (
     Anchor,
     anchor_path,
     classify,
+    container_root,
     fs_decode,
     index_real_dir,
+    is_container_internal_path,
     path_encode,
 )
 from hub.cache.workspace_store import WorkspaceStore
@@ -33,10 +36,11 @@ UUID = "005784b6-3bf5-423a-a467-6b7d1d86b7a1"
 
 
 def _classify(kind, dir_path=None, root_path=None, remote_url=None,
-              session_cwds=None, enc_index=None):
+              session_cwds=None, enc_index=None, exists=os.path.exists):
     return classify(
         kind, remote_url, root_path, dir_path,
         session_cwds=session_cwds or {}, enc_index=enc_index or {}, home=HOME,
+        exists=exists,
     )
 
 
@@ -243,6 +247,111 @@ class TestTempRoots:
         assert [o["subtype"] for o in g["unclassified"]] == ["temporary"]
         assert g["unclassified"][0]["session_touches"] == 1  # visible, not dropped
         store.close()
+
+
+# ── D2 noise (#64): container-internal roots are never projects ──────────
+
+def _absent(_p: str) -> bool:
+    return False
+
+
+class TestContainerRoot:
+    @pytest.mark.parametrize("path,root", [
+        ("/app", "/app"),
+        ("/app/server", "/app"),
+        ("/workspace", "/workspace"),
+        ("/workspace/src", "/workspace"),
+        ("/workspaces", "/workspaces"),
+        ("/workspaces/myapp", "/workspaces/myapp"),
+        ("/workspaces/myapp/src/deep", "/workspaces/myapp"),
+        ("/usr/src/app", "/usr/src/app"),
+        ("/usr/src/app/lib", "/usr/src/app"),
+        ("/usr/src/other", None),
+        ("/code", "/code"),
+        ("/code/api", "/code"),
+        ("/src", "/src"),
+        ("/src/index.js", "/src"),
+        ("/project", "/project"),
+        ("/project/backend", "/project"),
+        ("/data/repo", None),
+        (f"{CLAUDE}/app", None),
+    ])
+    def test_container_root(self, path, root):
+        assert container_root(path) == root
+
+    def test_is_container_internal_path_needs_absence(self):
+        assert is_container_internal_path("/app/server", exists=_absent) is True
+        assert is_container_internal_path(
+            "/app/server", exists=lambda p: p == "/app") is False
+        assert is_container_internal_path("/data/repo", exists=_absent) is False
+
+
+class TestContainerPaths:
+    @pytest.mark.parametrize("d", [
+        "/app",
+        "/app/server",
+        "/app/packages/plugins",
+        "/workspace/src",
+        "/workspaces/acme",
+        "/workspaces/acme/apps/web",
+        "/usr/src/app",
+        "/usr/src/app/server",
+        "/code",
+        "/code/api",
+        "/src",
+        "/project/backend",
+    ])
+    def test_gitless_absent_container_root_is_D2_container(self, d):
+        c = _classify("path_hash", dir_path=d, exists=_absent)
+        assert (c.category, c.subtype, c.role) == ("D", "container", "orphan"), d
+        assert c.project_key is None and c.resolved_via == "noise"
+
+    def test_existing_container_root_is_untouched(self):
+        # The host really has /app → it may be a real directory: classify as
+        # before (a project root, with its subdirs nesting under it).
+        def exists(p: str) -> bool:
+            return p == "/app"
+
+        c = _classify("path_hash", dir_path="/app", exists=exists)
+        assert (c.category, c.role) == ("root", "project")
+        c = _classify("path_hash", dir_path="/app/server", exists=exists)
+        assert c.role == "nest"
+
+    def test_devcontainer_subtree_is_scoped_to_its_workspace_root(self):
+        def exists(p: str) -> bool:
+            return p == "/workspaces/acme"
+
+        # The real devcontainer subtree stays untouched...
+        c = _classify("path_hash", dir_path="/workspaces/acme/src", exists=exists)
+        assert c.role != "orphan"
+        # ...while an absent sibling is a container path.
+        c = _classify("path_hash", dir_path="/workspaces/gone/src", exists=exists)
+        assert (c.subtype, c.role) == ("container", "orphan")
+
+    def test_non_container_gitless_paths_unchanged(self):
+        c = _classify("path_hash", dir_path="/data", exists=_absent)
+        assert c.role == "project"
+        c = _classify("path_hash", dir_path="/data/repo", exists=_absent)
+        assert c.role == "nest"
+        c = _classify("path_hash", dir_path=f"{CLAUDE}/myproj", exists=_absent)
+        assert c.role == "project"
+
+    def test_git_workspaces_never_change(self):
+        for kind, kwargs in (
+            ("git_remote", {"remote_url": "github.com/me/app", "root_path": "/app"}),
+            ("git_root", {"root_path": "/app"}),
+        ):
+            c = _classify(kind, exists=_absent, **kwargs)
+            assert c.category == "root" and c.role == "project", kind
+            assert c.project_key.startswith(kind + ":"), kind
+
+    def test_harness_of_a_container_session_is_not_a_project(self):
+        # A session run from /app inside a container: collapsing its harness
+        # folder must not re-mint the container path as a project.
+        d = f"/private/tmp/claude-501/-app/{UUID}/scratchpad"
+        c = _classify("path_hash", dir_path=d, session_cwds={UUID: "/app"},
+                      exists=_absent)
+        assert (c.subtype, c.role) == ("container", "orphan")
 
 
 class TestNoiseGuarantees:

@@ -26,8 +26,12 @@ The taxonomy (epic #24), one rule each:
     project even though ``anchor_path`` would mint one below the skipped system
     segments: OS temp dirs (``/tmp/**``, ``/private/tmp/**``,
     ``/var/folders/**``, ``/private/var/**`` — subtype ``temporary``) and app
-    bundles (``/Applications/**``, ``*.app`` — subtype ``app_bundle``). Only
-    gitless (``path_hash``) dirs: a git repo is a project wherever it lives.
+    bundles (``/Applications/**``, ``*.app`` — subtype ``app_bundle``). Also
+    D2 (#64): conventional container workdirs (``/app``, ``/workspace``,
+    ``/workspaces/<x>``, ``/usr/src/app``, ``/code``, ``/src``, ``/project``)
+    that do not exist on this host — subtype ``container``, "contenedor (ruta
+    interna)"; if the path DOES exist it is left alone. Only gitless
+    (``path_hash``) dirs: a git repo is a project wherever it lives.
 
 Collapse (A) resolves the real project two ways, in order:
 
@@ -117,6 +121,48 @@ def noise_subtype(abspath: str) -> str | None:
     if is_app_bundle_path(abspath):
         return "app_bundle"
     return None
+
+
+# Conventional container workdirs (issue #64). A gitless workspace that sits
+# under one of these AND whose root does not exist on this host ran inside a
+# container — the host cannot resolve ``.git`` there, so the resolver minted a
+# ``path_hash``. It is displayed under "sin clasificar / herramientas" with
+# subtype ``container``, never anchored as a project. A path that DOES exist is
+# untouched: it may be a real directory that happens to live at ``/app``.
+_CONTAINER_ROOTS = ("app", "workspace", "code", "src", "project")
+
+
+def container_root(abspath: str) -> str | None:
+    """The container root of ``abspath``, or ``None`` for anything else.
+
+    Recognizes ``/app``, ``/workspace``, ``/workspaces/<x>`` (devcontainers),
+    ``/usr/src/app``, ``/code``, ``/src`` and ``/project``. The returned root
+    is the directory whose existence decides the question — for a devcontainer
+    path that is ``/workspaces/<x>``, so one real devcontainer subtree never
+    hides the others.
+    """
+    parts = _split(abspath)
+    if not parts:
+        return None
+    first = parts[0]
+    if first == "usr":
+        return "/usr/src/app" if parts[:3] == ["usr", "src", "app"] else None
+    if first == "workspaces":
+        return "/" + "/".join(parts[:2]) if len(parts) >= 2 else "/workspaces"
+    if first in _CONTAINER_ROOTS:
+        return "/" + first
+    return None
+
+
+def is_container_internal_path(abspath: str, exists=os.path.exists) -> bool:
+    """True for a container workdir root that is absent from this machine."""
+    root = container_root(abspath)
+    return root is not None and not exists(root)
+
+
+def container_subtype(abspath: str, exists=os.path.exists) -> str | None:
+    """``"container"`` for a container-internal path (issue #64), else ``None``."""
+    return "container" if is_container_internal_path(abspath, exists) else None
 
 
 def path_encode(abspath: str) -> str:
@@ -261,7 +307,7 @@ class Classification:
     """The classification of one workspace (a row of ``workspace_classification``)."""
 
     category: str      # root | A | B | C | D
-    subtype: str       # project | harness | subdir | materials | config | home_config | degenerate | temporary | app_bundle
+    subtype: str       # project | harness | subdir | materials | config | home_config | degenerate | temporary | app_bundle | container
     role: str          # project | collapse | nest | orphan
     project_key: str | None
     project_label: str | None
@@ -272,11 +318,18 @@ def _orphan(subtype: str, via: str) -> Classification:
     return Classification("D", subtype, "orphan", None, None, via)
 
 
-def _noise_of(anchor: Anchor, path: str) -> Classification | None:
-    """D2 orphan when ``path`` is a gitless never-a-project dir (#36), else ``None``."""
+def _noise_of(
+    anchor: Anchor, path: str, exists=os.path.exists
+) -> Classification | None:
+    """D2 orphan when ``path`` is a gitless never-a-project dir (#36/#64).
+
+    Temp dirs and app bundles (#36) plus container-internal roots (#64) are
+    displayed but never anchored as projects. Only ``path_hash`` (gitless)
+    workspaces qualify: a git repo is a project wherever it lives.
+    """
     if not anchor.key.startswith("path_hash:"):
         return None
-    sub = noise_subtype(path)
+    sub = noise_subtype(path) or container_subtype(path, exists)
     return _orphan(sub, "noise") if sub else None
 
 
@@ -289,12 +342,14 @@ def classify(
     session_cwds: dict[str, str],
     enc_index: dict[str, Anchor],
     home: str,
+    exists=os.path.exists,
 ) -> Classification:
     """Classify one workspace into the #24 taxonomy.
 
     ``session_cwds`` maps session-uuid → real cwd (from events.db, read-only).
     ``enc_index`` maps ``path_encode(real_dir)`` → its resolved :class:`Anchor`,
-    for the decode fallback. ``home`` is the user's home directory.
+    for the decode fallback. ``home`` is the user's home directory. ``exists``
+    is the host existence check (injectable for the container rule, #64).
     """
     # 1. Git workspaces are always real project roots.
     if kind in ("git_remote", "git_root"):
@@ -310,7 +365,7 @@ def classify(
     m = _SCRATCH.match(d + "/")
     if m:
         return _collapse_from_encoded(
-            m.group("enc"), m.group("uuid"), session_cwds, enc_index
+            m.group("enc"), m.group("uuid"), session_cwds, enc_index, exists
         )
 
     # 3. Any other /private/tmp/claude-* path is harness *tooling* (bundled
@@ -323,20 +378,31 @@ def classify(
     if d.startswith(proj_root):
         seg = d[len(proj_root):].split("/", 1)[0]
         if seg.startswith("-"):
-            return _collapse_from_encoded(seg, None, session_cwds, enc_index)
+            return _collapse_from_encoded(seg, None, session_cwds, enc_index, exists)
 
     # 5. D2 — home-level dotfolders and tooling (~/.config, ~/.claude/plugins…).
     if d.startswith(home + "/."):
         return _orphan("home_config", "home_dot")
 
-    # 6. Real dir under a container → project root, or a nested child.
+    # 6. D2 (#64) — a gitless container workdir root that does not exist on
+    #    this host: the work is real but the identity is the container's, so it
+    #    is visible, never anchored as a project. Checked before the anchor
+    #    walk because container names (``workspace``, ``src``, ``code``) are
+    #    skipped as mere container segments and would classify as degenerate.
+    if kind == "path_hash":
+        sub = container_subtype(d, exists)
+        if sub:
+            return _orphan(sub, "noise")
+
+    # 7. Real dir under a container → project root, or a nested child.
     anchor = anchor_of_realpath(d)
     if anchor is None:
         return _orphan("degenerate", "degenerate")
 
-    # 7. D2 — temp dirs and app bundles are never projects (#36). Gitless
-    #    only: a dir whose anchor resolved to a git repo keeps nesting under it.
-    noise = _noise_of(anchor, d)
+    # 8. D2 — temp dirs, app bundles (#36) and container-internal roots (#64)
+    #    are never projects. Gitless only: a dir whose anchor resolved to a git
+    #    repo keeps nesting under it.
+    noise = _noise_of(anchor, d, exists)
     if noise:
         return noise
 
@@ -363,6 +429,7 @@ def _collapse_from_encoded(
     uuid: str | None,
     session_cwds: dict[str, str],
     enc_index: dict[str, Anchor],
+    exists=os.path.exists,
 ) -> Classification:
     """Resolve a harness folder to the real project it collapses onto.
 
@@ -378,19 +445,19 @@ def _collapse_from_encoded(
             if anchor is not None:
                 # A harness whose real project is itself noise (a session run
                 # from /tmp/x) must not re-mint that noise as a project (#36).
-                return _noise_of(anchor, cwd) or Classification(
+                return _noise_of(anchor, cwd, exists) or Classification(
                     "A", "harness", "collapse", anchor.key, anchor.label, "session_cwd")
 
     anchor = enc_index.get(enc)
     if anchor is not None:
-        return _noise_of(anchor, anchor.path) or Classification(
+        return _noise_of(anchor, anchor.path, exists) or Classification(
             "A", "harness", "collapse", anchor.key, anchor.label, "encode_match")
 
     decoded = fs_decode(enc)
     if decoded is not None:
         anchor = anchor_of_realpath(decoded)
         if anchor is not None:
-            return _noise_of(anchor, decoded) or Classification(
+            return _noise_of(anchor, decoded, exists) or Classification(
                 "A", "harness", "collapse", anchor.key, anchor.label, "fs_decode")
 
     # Last resort: keep the harness folder collapsed onto a synthetic project

@@ -312,6 +312,8 @@ const STATE_BASIS = {
   open_issues:          'quieto con issues abiertos colgando',
   quiescent_no_outcome: 'quieto, nada abierto, sin outcome medible',
 };
+// Spanish display names for unclassified subtypes (#64); unknown ones render raw.
+const SUBTYPE_LABEL = {container:'contenedor (ruta interna)'};
 function ageStr(d){
   if (d == null) return '';
   if (d < 1) return 'hoy';
@@ -744,7 +746,7 @@ async function loadPortfolio(){
     const orphans = data.unclassified||[];
     if (orphans.length){
       html += `<details class="unclassified"><summary>Sin clasificar / herramientas (${orphans.length})</summary><ul>` +
-        orphans.map(o => `<li>[${esc(o.subtype)}] ${esc(label(o))}</li>`).join('') + `</ul></details>`;
+        orphans.map(o => `<li>[${esc(SUBTYPE_LABEL[o.subtype] || o.subtype)}] ${esc(label(o))}</li>`).join('') + `</ul></details>`;
     }
     body.innerHTML = html;
   } catch(e){ body.innerHTML = '<div class="empty">Error al cargar.</div>'; }

@@ -206,7 +206,8 @@ CREATE TABLE IF NOT EXISTS delivery_candidates (
 CREATE TABLE IF NOT EXISTS workspace_classification (
     workspace_id INTEGER PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
     category TEXT NOT NULL,        -- root | A | B | C | D
-    subtype TEXT NOT NULL,         -- project | harness | subdir | materials | config | home_config | degenerate
+    subtype TEXT NOT NULL,         -- project | harness | subdir | materials | config | home_config
+                                   -- | degenerate | temporary | app_bundle | container (#64)
     role TEXT NOT NULL,            -- project | collapse | nest | orphan
     project_key TEXT,              -- canonical project group (join handle; NULL for orphan)
     project_label TEXT,            -- project group display name (masked at read)
