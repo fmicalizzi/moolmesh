@@ -312,6 +312,13 @@ class CodexAdapter(BaseAdapter):
         return event, paths
 
     def to_session_meta(self, entry: CodexEntry, project: str) -> SessionMeta | None:
+        metadata: dict[str, Any] = {}
+        if entry.parent_session_id:
+            # Additive record of the sub-agent parent (#65). The hard link
+            # itself is a row in session_links, created by the watcher.
+            metadata["parent_session_id"] = entry.parent_session_id
+        if entry.agent_meta:
+            metadata["subagent"] = entry.agent_meta
         return SessionMeta(
             id=entry.session_id,
             provider=Provider.CODEX,
@@ -320,6 +327,7 @@ class CodexAdapter(BaseAdapter):
             model=entry.model_provider or "",
             cli_version=entry.cli_version or "",
             source=entry.source or "",
+            metadata=metadata,
         )
 
     def _map_role(self, entry: CodexEntry) -> MessageRole | None:

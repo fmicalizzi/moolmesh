@@ -10,13 +10,62 @@ from hub.models.codex import CodexEntry, CodexFunctionCall, CodexFunctionOutput
 from hub.parsers.base import BaseParser
 
 
+def _scalar(value: Any, *, max_len: int = 200) -> str:
+    """Coerce any JSON value to a short string for a scalar model field (#65).
+
+    String values pass through untouched; ``None``/missing become ``""``;
+    numbers and booleans stringify; anything else (dict/list) becomes compact,
+    key-sorted JSON truncated to ``max_len`` — never a raw object destined for
+    a SQLite TEXT column.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    try:
+        text = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+    except (TypeError, ValueError):
+        return ""
+    return text[:max_len]
+
+
+def _source_label(value: Any) -> str:
+    """Short, stable label for ``session_meta.payload.source`` (#65).
+
+    ``source`` is a string in older rollouts and an object in the new
+    sub-agent ones (``{"subagent": {"thread_spawn": {...}}}``). An object
+    becomes ``"subagent:thread_spawn"`` — key-sorted so a re-parse (and the
+    dedupe fingerprint) is stable — falling back to the outer key, then to
+    short JSON.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in sorted(value, key=str):
+            inner = value[key]
+            if isinstance(inner, dict) and inner:
+                for sub in sorted(inner, key=str):
+                    return f"{key}:{sub}"
+            return _scalar(key, max_len=80)
+        return _scalar(value, max_len=80)
+    return _scalar(value, max_len=80)
+
+
 class CodexParser(BaseParser):
 
     def __init__(self):
         # Session context propagated from session_meta to all subsequent
         # entries, keyed per file: one watcher parser tails many rollouts, and
         # a chunk read from offset > 0 carries no session_meta of its own.
-        self._session_ctx: dict[str, dict[str, str]] = {}
+        self._session_ctx: dict[str, dict[str, Any]] = {}
 
     def parse_file(self, path: Path) -> list[CodexEntry]:
         # Use a local context — thread-safe, no shared state between calls
@@ -76,7 +125,7 @@ class CodexParser(BaseParser):
                 entries.append(entry)
         return entries, new_offset
 
-    def _seed_session_ctx(self, path: Path, ctx: dict[str, str]) -> None:
+    def _seed_session_ctx(self, path: Path, ctx: dict[str, Any]) -> None:
         """Fill ``ctx`` from the rollout's first line (``session_meta``, per ``can_parse``)."""
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -88,22 +137,34 @@ class CodexParser(BaseParser):
             if entry is not None:
                 self._apply_session_ctx(entry, ctx=ctx)
 
-    def _apply_session_ctx(self, entry: CodexEntry, ctx: dict[str, str]) -> None:
-        """Store context from session_meta, propagate to all other entries."""
+    def _apply_session_ctx(self, entry: CodexEntry, ctx: dict[str, Any]) -> None:
+        """Store context from session_meta, propagate to all other entries.
+
+        First ``session_meta`` wins the identity context: sub-agent rollouts
+        replay the parent's ``session_meta`` as a SECOND line (#65), and letting
+        it overwrite ``session_id``/``source`` would attribute the sub-agent's
+        own events to the parent (and drop the ``subagent`` label). The replayed
+        meta entry itself is still parsed and upserted under its own id.
+        """
         if entry.event_type == "session_meta":
-            ctx.update({
-                "session_id": entry.session_id,
-                "cwd": entry.cwd,
-                "cli_version": entry.cli_version,
-                "model_provider": entry.model_provider,
-                "source": entry.source,
-            })
+            if not ctx.get("session_id"):
+                ctx.update({
+                    "session_id": entry.session_id,
+                    "cwd": entry.cwd,
+                    "cli_version": entry.cli_version,
+                    "model_provider": entry.model_provider,
+                    "source": entry.source,
+                    "parent_session_id": entry.parent_session_id,
+                    "agent_meta": entry.agent_meta,
+                })
         else:
             entry.session_id = ctx.get("session_id", "")
             entry.cwd = ctx.get("cwd", "")
             entry.cli_version = ctx.get("cli_version", "")
             entry.model_provider = ctx.get("model_provider", "")
             entry.source = ctx.get("source", "")
+            entry.parent_session_id = ctx.get("parent_session_id", "")
+            entry.agent_meta = ctx.get("agent_meta")
 
     @staticmethod
     def can_parse(path: Path) -> bool:
@@ -130,14 +191,21 @@ class CodexParser(BaseParser):
 
         match event_type:
             case "session_meta":
+                # New sub-agent rollouts carry non-scalar fields (source,
+                # base_instructions, context_window, git, ...). Scalar model
+                # fields get scalars only; `source` gets a short stable label
+                # and the parent link is captured for `session_links` (#65).
+                parent, agent_meta = self._subagent_info(payload)
                 return CodexEntry(
                     event_type=event_type,
                     timestamp=timestamp,
-                    session_id=payload.get("id", ""),
-                    cwd=payload.get("cwd", ""),
-                    cli_version=payload.get("cli_version", ""),
-                    model_provider=payload.get("model_provider", ""),
-                    source=payload.get("source", ""),
+                    session_id=_scalar(payload.get("id", "")),
+                    cwd=_scalar(payload.get("cwd", "")),
+                    cli_version=_scalar(payload.get("cli_version", "")),
+                    model_provider=_scalar(payload.get("model_provider", "")),
+                    source=_source_label(payload.get("source", "")),
+                    parent_session_id=parent,
+                    agent_meta=agent_meta,
                     raw=raw,
                 )
 
@@ -247,6 +315,35 @@ class CodexParser(BaseParser):
 
             case _:
                 return None
+
+    @staticmethod
+    def _subagent_info(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Parent thread id and agent details from a sub-agent ``session_meta``.
+
+        The parent comes from ``payload.parent_thread_id`` with a fallback to
+        ``source.subagent.thread_spawn.parent_thread_id`` (the new format).
+        Returns ``("", {})`` for ordinary sessions.
+        """
+        spawn: dict[str, Any] = {}
+        source = payload.get("source")
+        if isinstance(source, dict):
+            subagent = source.get("subagent")
+            if isinstance(subagent, dict):
+                candidate = subagent.get("thread_spawn")
+                if isinstance(candidate, dict):
+                    spawn = candidate
+        parent = _scalar(payload.get("parent_thread_id")) or _scalar(
+            spawn.get("parent_thread_id")
+        )
+        meta: dict[str, Any] = {}
+        for key in ("agent_path", "agent_nickname", "agent_role"):
+            value = _scalar(spawn.get(key))
+            if value:
+                meta[key] = value
+        depth = spawn.get("depth")
+        if isinstance(depth, int) and not isinstance(depth, bool):
+            meta["depth"] = depth
+        return parent, meta
 
     def _parse_response_item(
         self, timestamp: str, payload: dict[str, Any], raw: dict

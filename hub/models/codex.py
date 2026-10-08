@@ -33,6 +33,11 @@ class CodexEntry:
     model_provider: str = ""
     source: str = ""
 
+    # Sub-agent sessions (#65): parent thread id and a small dict with the
+    # agent path/nickname/role/depth, used for session_links + session metadata.
+    parent_session_id: str = ""
+    agent_meta: dict[str, Any] | None = None
+
     # response_item fields
     payload_type: str = ""  # "message", "function_call", "custom_tool_call", "*_output", "reasoning"
     role: str = ""  # "user", "assistant", "developer"

@@ -65,4 +65,16 @@ class CodexWatcher(BaseHarvester):
                 meta = self._adapter.to_session_meta(entry, project)
                 if meta:
                     self._store.upsert_session(meta.to_dict(), entry.timestamp)
+                # Sub-agent session (#65): record the parent → child link in
+                # the existing session_links table, additively and idempotent
+                # (INSERT OR IGNORE on the unique key). The parent session may
+                # not be ingested yet; the link is still valid.
+                if entry.parent_session_id and entry.parent_session_id != entry.session_id:
+                    link_meta = dict(entry.agent_meta or {})
+                    self._store.link_sessions(
+                        entry.parent_session_id, "codex",
+                        entry.session_id, "codex",
+                        link_type="subagent",
+                        metadata=link_meta or None,
+                    )
         return events, new_offset
