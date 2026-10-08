@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+_log = logging.getLogger("moolmesh.event_store")
 
 # Default location for the database
 DEFAULT_DB_PATH = Path.home() / ".moolmesh" / "events.db"
@@ -261,18 +265,79 @@ def file_fingerprint(path: Path) -> str:
         return ""
 
 
+# Scalar columns of ``events`` / ``sessions``. Every writer funnels provider
+# data through ``_scalar``/``_normalize_event`` first, so a format change (a
+# dict where a string used to be) can never surface as
+# ``sqlite3.ProgrammingError: type 'dict' is not supported`` and take down the
+# watcher thread with it (issue #65).
+_EVENT_SCALAR_KEYS = (
+    "provider", "project", "event_type", "timestamp", "summary",
+    "session_id", "tool_name", "file_path", "model", "cwd",
+)
+_SCALAR_MAX_LEN = 2000
+
+
+def _scalar(value: Any) -> Any:
+    """Coerce any JSON value for a scalar column.
+
+    ``None`` and strings pass through; numbers/booleans stringify; dicts and
+    lists become compact, key-sorted JSON (stable across re-parses) truncated
+    to a bounded length. Never raises.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    try:
+        text = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            default=str,
+        )
+    except (TypeError, ValueError):
+        return ""
+    return text[:_SCALAR_MAX_LEN]
+
+
+def _tokens_json(value: Any) -> str | None:
+    """``json.dumps`` of a tokens payload, or None when absent/unserializable."""
+    if not value:
+        return None
+    try:
+        return json.dumps(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_event(event: dict[str, Any]) -> dict[str, Any]:
+    """A copy of ``event`` whose scalar columns hold only scalars (#65).
+
+    The fingerprint is computed from the normalized copy, so a dict that used
+    to crash the write now both stores and dedupes deterministically.
+    """
+    normalized = dict(event)
+    for key in _EVENT_SCALAR_KEYS:
+        value = normalized.get(key)
+        if value is not None and not isinstance(value, str):
+            normalized[key] = _scalar(value)
+    return normalized
+
+
 def _compute_fingerprint(event_dict: dict[str, Any]) -> str:
     """Compute a unique fingerprint for deduplication.
 
     Uses provider + session_id + timestamp + event_type + summary
-    to uniquely identify an event.
+    to uniquely identify an event. Callers pass an event normalized by
+    ``_normalize_event`` so the fingerprint is stable regardless of value
+    shape.
     """
     key = "|".join([
-        event_dict.get("provider", ""),
-        event_dict.get("session_id") or "",
-        event_dict.get("timestamp", ""),
-        event_dict.get("event_type", ""),
-        event_dict.get("summary", ""),
+        str(event_dict.get("provider", "") or ""),
+        str(event_dict.get("session_id") or ""),
+        str(event_dict.get("timestamp", "") or ""),
+        str(event_dict.get("event_type", "") or ""),
+        str(event_dict.get("summary", "") or ""),
     ])
     return hashlib.md5(key.encode()).hexdigest()
 
@@ -281,7 +346,7 @@ def _insert_event_row(
     conn: sqlite3.Connection, e: dict[str, Any], now: float, historical: bool = False
 ) -> int:
     """INSERT OR IGNORE one event (+ its full text); 1 if inserted, else 0."""
-    tokens = e.get("tokens")
+    e = _normalize_event(e)
     cursor = conn.execute(
         """INSERT OR IGNORE INTO events
            (provider, project, event_type, timestamp, summary,
@@ -291,7 +356,7 @@ def _insert_event_row(
         (
             e.get("provider", ""), e.get("project", ""), e.get("event_type", ""),
             e.get("timestamp", ""), e.get("summary", ""), e.get("session_id"),
-            json.dumps(tokens) if tokens else None, e.get("tool_name"),
+            _tokens_json(e.get("tokens")), e.get("tool_name"),
             e.get("file_path"), e.get("model"), e.get("cwd"),
             _compute_fingerprint(e), now, 1 if historical else 0,
         ),
@@ -515,23 +580,64 @@ class EventStore:
             )
             self._conn.commit()
 
+    @contextlib.contextmanager
+    def _write(self) -> Iterator[sqlite3.Connection]:
+        """Run one write unit on the shared connection, leaving it clean (#65).
+
+        Acquires the store lock, discards any transaction a previous failure
+        left open, commits on success and rolls back on ANY exception — even
+        KeyboardInterrupt — so ``conn.in_transaction`` is always False
+        afterwards and the next writer never hits "cannot start a transaction
+        within a transaction".
+        """
+        with self._lock:
+            conn = self._get_conn()
+            if conn.in_transaction:
+                self._rollback_quiet(conn)
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                self._rollback_quiet(conn)
+                raise
+
+    @staticmethod
+    def _rollback_quiet(conn: sqlite3.Connection) -> None:
+        """Roll back ignoring an already-broken connection."""
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+
     def upsert_session(self, meta: dict[str, Any], timestamp: str) -> None:
         """Insert or update session metadata.
 
         Uses INSERT ON CONFLICT DO UPDATE to merge new info without losing
         previously-stored fields (e.g. git_branch from an earlier event).
+        Scalar columns are defensively coerced (#65): a provider sending a
+        dict where a string used to be must not become a binding error.
         """
         import time
         now = time.time()
-        sid = meta.get("id", "")
+        sid = _scalar(meta.get("id", "")) or ""
         if not sid:
             return
         # Never persist an empty string as a timestamp: an empty first entry
         # (common on Claude summary/meta lines) must not freeze first_event_at
         # at "" forever — store NULL so a later valid timestamp can fill it.
-        ts = timestamp or None
-        with self._lock:
-            conn = self._get_conn()
+        ts = _scalar(timestamp) or None
+        metadata = meta.get("metadata")
+        metadata_json = None
+        if metadata:
+            try:
+                metadata_json = json.dumps(metadata, default=str)
+            except (TypeError, ValueError):
+                metadata_json = None
+        try:
+            cost = float(meta.get("cost", 0.0))
+        except (TypeError, ValueError):
+            cost = 0.0
+        with self._write() as conn:
             conn.execute("""
                 INSERT INTO sessions
                     (id, provider, project, title, cwd, git_branch, model,
@@ -564,23 +670,22 @@ class EventStore:
                     metadata_json = COALESCE(excluded.metadata_json, sessions.metadata_json)
             """, (
                 sid,
-                meta.get("provider", ""),
-                meta.get("project", ""),
-                meta.get("title", ""),
-                meta.get("cwd", ""),
-                meta.get("git_branch", ""),
-                meta.get("model", ""),
-                meta.get("cli_version", ""),
-                meta.get("source", ""),
-                meta.get("cost", 0.0),
+                _scalar(meta.get("provider", "")) or "",
+                _scalar(meta.get("project", "")) or "",
+                _scalar(meta.get("title", "")) or "",
+                _scalar(meta.get("cwd", "")) or "",
+                _scalar(meta.get("git_branch", "")) or "",
+                _scalar(meta.get("model", "")) or "",
+                _scalar(meta.get("cli_version", "")) or "",
+                _scalar(meta.get("source", "")) or "",
+                cost,
                 1 if meta.get("is_sidechain") else 0,
                 ts,
                 ts,
-                meta.get("initial_prompt", ""),
-                json.dumps(meta.get("metadata")) if meta.get("metadata") else None,
+                _scalar(meta.get("initial_prompt", "")) or "",
+                metadata_json,
                 now,
             ))
-            conn.commit()
 
     def refresh_session_stats(self, provider: str, session_ids: set[str] | list[str]) -> None:
         """Recompute event_count and first/last event time from ``events``.
@@ -595,8 +700,7 @@ class EventStore:
         ids = [s for s in session_ids if s]
         if not ids or not provider:
             return
-        with self._lock:
-            conn = self._get_conn()
+        with self._write() as conn:
             for sid in ids:
                 conn.execute("""
                     UPDATE sessions SET
@@ -616,7 +720,6 @@ class EventStore:
                         ), '')
                     WHERE id = :sid AND provider = :p
                 """, {"sid": sid, "p": provider})
-            conn.commit()
 
     def mark_session_ended(
         self, session_id: str, provider: str, ended_at: str, reason: str
@@ -631,14 +734,12 @@ class EventStore:
         """
         if not session_id or not provider:
             return
-        with self._lock:
-            conn = self._get_conn()
+        with self._write() as conn:
             conn.execute("""
                 UPDATE sessions
                 SET is_active = 0, ended_at = ?, ended_reason = ?
                 WHERE id = ? AND provider = ? AND ended_at IS NULL
-            """, (ended_at or None, reason, session_id, provider))
-            conn.commit()
+            """, (_scalar(ended_at) or None, _scalar(reason) or "", session_id, provider))
 
     def get_sessions(
         self,
@@ -805,11 +906,10 @@ class EventStore:
     def store(self, event_dict: dict[str, Any]) -> None:
         """Store a single event."""
         import time
-        tokens = event_dict.get("tokens")
-        tokens_json = json.dumps(tokens) if tokens else None
+        event_dict = _normalize_event(event_dict)
+        tokens_json = _tokens_json(event_dict.get("tokens"))
         fingerprint = _compute_fingerprint(event_dict)
-        with self._lock:
-            conn = self._get_conn()
+        with self._write() as conn:
             cursor = conn.execute(
                 """INSERT OR IGNORE INTO events
                    (provider, project, event_type, timestamp, summary,
@@ -838,7 +938,6 @@ class EventStore:
                     "INSERT OR IGNORE INTO event_content (event_id, full_text) VALUES (?, ?)",
                     (cursor.lastrowid, full_text),
                 )
-            conn.commit()
 
     def store_batch(self, events: list[dict[str, Any]]) -> None:
         """Store multiple events in a single transaction.
@@ -850,10 +949,9 @@ class EventStore:
             return
         import time
         now = time.time()
-        with self._lock:
-            conn = self._get_conn()
-            for e in events:
-                tokens = e.get("tokens")
+        with self._write() as conn:
+            for raw in events:
+                e = _normalize_event(raw)
                 cursor = conn.execute(
                     """INSERT OR IGNORE INTO events
                        (provider, project, event_type, timestamp, summary,
@@ -867,7 +965,7 @@ class EventStore:
                         e.get("timestamp", ""),
                         e.get("summary", ""),
                         e.get("session_id"),
-                        json.dumps(tokens) if tokens else None,
+                        _tokens_json(e.get("tokens")),
                         e.get("tool_name"),
                         e.get("file_path"),
                         e.get("model"),
@@ -882,7 +980,6 @@ class EventStore:
                         "INSERT OR IGNORE INTO event_content (event_id, full_text) VALUES (?, ?)",
                         (cursor.lastrowid, full_text),
                     )
-            conn.commit()
 
     def load_recent(self, limit: int = 500) -> list[dict[str, Any]]:
         """Load the most recent N live events, including their SQLite IDs.
@@ -1240,21 +1337,20 @@ class EventStore:
         if not fingerprint:
             return None
         with self._lock:
-            conn = self._get_conn()
-            rows = conn.execute(
+            rows = self._get_conn().execute(
                 "SELECT file_path, last_offset, updated_at FROM file_registry"
                 " WHERE fingerprint = ?",
                 (fingerprint,),
             ).fetchall()
             offset, adopt_from = resolve_registry_offset(rows, file_path)
-            if adopt_from is not None:
-                import time
+        if adopt_from is not None:
+            import time
+            with self._write() as conn:
                 conn.execute(
                     """UPDATE file_registry SET file_path = ?, updated_at = ?
                        WHERE fingerprint = ? AND file_path = ?""",
                     (registry_path(file_path), time.time(), fingerprint, adopt_from),
                 )
-                conn.commit()
         return offset
 
     def is_legacy_offset(self, fingerprint: str, file_path: str | Path) -> bool | None:
@@ -1268,13 +1364,11 @@ class EventStore:
 
     def clear_legacy_offset(self, fingerprint: str, file_path: str | Path) -> None:
         """Mark a row as re-read from 0 under the (fingerprint, path) key (#50)."""
-        with self._lock:
-            conn = self._get_conn()
+        with self._write() as conn:
             conn.execute(
                 "UPDATE file_registry SET legacy = 0 WHERE fingerprint = ? AND file_path = ?",
                 (fingerprint, registry_path(file_path)),
             )
-            conn.commit()
 
     def latest_offset_for_path(self, provider: str, file_path: str | Path) -> int | None:
         """Most recently written offset of ``file_path`` under ANY key.
@@ -1295,8 +1389,8 @@ class EventStore:
     def save_offset(self, fingerprint: str, provider: str, file_path: str, offset: int) -> None:
         """Save or update the byte offset for a file."""
         import time
-        with self._lock:
-            self._get_conn().execute(
+        with self._write() as conn:
+            conn.execute(
                 """INSERT INTO file_registry (fingerprint, provider, file_path, last_offset, updated_at)
                    VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(fingerprint, file_path) DO UPDATE SET
@@ -1304,7 +1398,6 @@ class EventStore:
                        updated_at = excluded.updated_at""",
                 (fingerprint, provider, registry_path(file_path), offset, time.time()),
             )
-            self._get_conn().commit()
 
     def get_watcher_cycle(self, provider: str) -> float | None:
         """Wall-clock time of the provider watcher's last completed cycle (#45)."""
@@ -1317,8 +1410,7 @@ class EventStore:
     def set_watcher_cycle(self, provider: str, at: float) -> None:
         """Persist the provider watcher's last completed cycle (#45)."""
         import time
-        with self._lock:
-            conn = self._get_conn()
+        with self._write() as conn:
             conn.execute(
                 """INSERT INTO watcher_state (provider, last_cycle_at, updated_at)
                    VALUES (?, ?, ?)
@@ -1327,7 +1419,6 @@ class EventStore:
                        updated_at = excluded.updated_at""",
                 (provider, at, time.time()),
             )
-            conn.commit()
 
     def store_with_offset(
         self,
@@ -1352,9 +1443,9 @@ class EventStore:
             return []
         import time
         now = time.time()
+        normalized = [_normalize_event(e) for e in events]
         rows = []
-        for e in events:
-            tokens = e.get("tokens")
+        for e in normalized:
             rows.append((
                 e.get("provider", ""),
                 e.get("project", ""),
@@ -1362,7 +1453,7 @@ class EventStore:
                 e.get("timestamp", ""),
                 e.get("summary", ""),
                 e.get("session_id"),
-                json.dumps(tokens) if tokens else None,
+                _tokens_json(e.get("tokens")),
                 e.get("tool_name"),
                 e.get("file_path"),
                 e.get("model"),
@@ -1375,7 +1466,7 @@ class EventStore:
         result_events = []
         with self._lock:
             conn = self._get_conn()
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             try:
                 for i, row in enumerate(rows):
                     cursor = conn.execute(
@@ -1387,7 +1478,7 @@ class EventStore:
                         row,
                     )
                     if cursor.rowcount > 0:
-                        ev = dict(events[i])
+                        ev = dict(normalized[i])
                         ev["id"] = cursor.lastrowid
                         full_text = ev.pop("full_text", None)
                         if full_text and cursor.lastrowid:
@@ -1407,11 +1498,24 @@ class EventStore:
                                updated_at = excluded.updated_at""",
                         (fingerprint, provider, registry_path(file_path), new_offset, now),
                     )
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
+                conn.commit()
+            except BaseException:
+                self._rollback_quiet(conn)
                 raise
         return result_events
+
+    @staticmethod
+    def _begin_immediate(conn: sqlite3.Connection) -> None:
+        """Start an explicit write transaction, clearing any leaked one first.
+
+        A previous failure could have left the shared connection inside a
+        transaction; ``BEGIN IMMEDIATE`` would then raise "cannot start a
+        transaction within a transaction" and the watcher would die with it
+        (#65). Rolling back first makes the next write always recoverable.
+        """
+        if conn.in_transaction:
+            EventStore._rollback_quiet(conn)
+        conn.execute("BEGIN IMMEDIATE")
 
     def replace_session_events(
         self,
@@ -1436,7 +1540,7 @@ class EventStore:
         inserted = 0
         with self._lock:
             conn = self._get_conn()
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             try:
                 conn.execute(
                     f"""DELETE FROM event_content WHERE event_id IN (
@@ -1463,9 +1567,9 @@ class EventStore:
                            VALUES (?, ?, ?, ?, ?)""",
                         (fp, provider, registry_path(path), off, now),
                     )
-                conn.execute("COMMIT")
+                conn.commit()
             except BaseException:
-                conn.execute("ROLLBACK")
+                self._rollback_quiet(conn)
                 raise
         return inserted
 
@@ -1479,11 +1583,14 @@ class EventStore:
         confidence: float = 1.0,
         metadata: dict[str, Any] | None = None,
     ) -> bool:
-        """Create a link between two sessions. Returns True if created, False if duplicate."""
+        """Create a link between two sessions. Returns True if created, False if duplicate.
+
+        Any failure rolls the shared connection back (``_write``) and returns
+        False with a logged warning — never a leaked transaction (#65).
+        """
         import time
-        with self._lock:
-            conn = self._get_conn()
-            try:
+        try:
+            with self._write() as conn:
                 cursor = conn.execute("""
                     INSERT OR IGNORE INTO session_links
                         (source_session, source_provider, target_session, target_provider,
@@ -1496,10 +1603,13 @@ class EventStore:
                     json.dumps(metadata) if metadata else None,
                     time.time(),
                 ))
-                conn.commit()
                 return cursor.rowcount > 0
-            except Exception:
-                return False
+        except Exception:
+            _log.warning(
+                "link_sessions failed (%s -> %s)", source_session, target_session,
+                exc_info=True,
+            )
+            return False
 
     def get_session_chain(self, session_id: str) -> list[dict[str, Any]]:
         """Get all sessions linked to the given session (predecessors and successors)."""
