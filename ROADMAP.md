@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: October 2026 — v1.24.1
+Last updated: October 2026 — v1.25.0
 
 ---
 
@@ -199,6 +199,12 @@ The fixes from the portfolio data audit ([#36](https://github.com/fmicalizzi/moo
 - **Noise out of projects:** temp/system folders and app bundles are "unclassified" (still visible).
 - A one-time cursor reset re-derives everything on the daemon's first cycle.
 - **v1.24.1** ([#65](https://github.com/fmicalizzi/moolmesh/issues/65)): hotfix. Codex sub-agent sessions no longer crash ingestion, writes always roll back, watcher threads can't die silently (catch, quarantine, self-restart), and `/health` reports per-watcher state with a `degraded` status.
+
+### v1.25 — Pi provider + provider template
+
+- **Pi** ([#66](https://github.com/fmicalizzi/moolmesh/issues/66)) joins Claude Code, Codex, OpenCode, Qwen and Cursor: a tree-aware incremental parser (all branches, deduped by id), file paths for workspace attribution, tokens and cost, registered in the daemon, backfill, catch-up, CLI/MCP and the dashboard.
+- **Provider template:** `docs/PROVIDERS.md` plus a provider contract test, so the next providers (Aider, Goose…) are cheaper to add.
+- Shell commands are never stored as file paths (all providers); container-internal roots (`/app`…) are "unclassified" ([#64](https://github.com/fmicalizzi/moolmesh/issues/64)); README "Updating" with `--no-cache-dir` ([#63](https://github.com/fmicalizzi/moolmesh/issues/63)).
 
 ---
 

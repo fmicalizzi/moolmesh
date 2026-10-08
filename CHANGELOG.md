@@ -6,6 +6,63 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.25.0] — 2026-10-08
+
+MoolMesh now observes the **Pi** coding agent (#66), with a tested template for
+adding providers. Also: container-internal paths no longer pose as projects (#64),
+a documented upgrade path that avoids pip's cache (#63), and `mool daemon status`
+honors `hide_project_names`. No new dependencies, no schema migration.
+
+### Upgrade notes
+- Upgrade and restart as usual (see the new README "Updating" section):
+  `pipx upgrade moolmesh --pip-args=--no-cache-dir` (or
+  `python -m pip install --upgrade --no-cache-dir moolmesh`), then
+  `mool daemon restart`.
+- To import your existing Pi history: `mool backfill --provider pi`. Sessions
+  modified in the last 12 h are picked up live.
+
+### Added
+- **#66 — Pi provider.** Reads `~/.pi/agent/sessions/**.jsonl`; honors
+  `PI_CODING_AGENT_DIR`, and on Windows reads `%USERPROFILE%\.pi\agent\sessions`.
+  The parser is incremental and tree-aware: every entry is ingested once (deduped by
+  id) across all branches, the parent id is kept, and the active leaf is recorded.
+  - `read` / `edit` / `write` paths become absolute, untruncated file paths for
+    workspace attribution.
+  - `bash` is a shell tool, so its command never lands in `file_path`.
+  - Tokens map to the common schema, with cache read/write; per-message `cost` is
+    kept.
+  - Pi is registered everywhere: daemon (with watcher health), `mool backfill`,
+    catch-up, CLI/MCP provider filters, and the dashboard (never color-only).
+- **Provider template.** `docs/PROVIDERS.md` is a checklist for adding a provider,
+  built from the Pi implementation. A **provider contract test** checks every
+  provider's fixture for the minimum event fields, absolute-or-null `file_path`, and
+  no shell command in `file_path`.
+- **#63 — README "Updating" section** with `--no-cache-dir` for pip/pipx (pip's
+  cached index can hide a fresh release) and the daemon restart.
+
+### Changed
+- **Shell commands are never stored as `file_path`**, for any provider. Claude,
+  Codex and Qwen used to keep a shortened command there. The command still lives in
+  the event summary, and fingerprints are unchanged. This removes commands from
+  "hot files" views and from attribution (completes #58).
+- **#64 (part 1) — container-internal roots** (`/app`, `/workspace`,
+  `/workspaces/*`, `/usr/src/app`, `/code`, `/src`, `/project`) that don't exist on
+  the host are now "unclassified · contenedor (ruta interna)": still visible, no
+  longer a project. Mapping them to the real project with config aliases comes in a
+  later release.
+
+### Fixed
+- `mool daemon status` listed registered repo names even with
+  `hide_project_names = true`; it now masks them.
+- `mool discover --provider cursor` raised `KeyError`.
+
+### Known follow-ups
+EventStore fingerprint can collapse parallel tool results with identical summary
+and timestamp; Pi's active-branch linearization isn't yet wired into export and
+detail (#67).
+
+---
+
 ## [1.24.1] — 2026-10-08
 
 Urgent hotfix (#65). A new Codex session format (sub-agent sessions, codex-cli
