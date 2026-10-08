@@ -147,6 +147,8 @@ class DashboardServer:
     """Orchestrates harvesters and HTTP server."""
 
     MAX_RECENT = 500
+    # How often the supervisor checks that every watcher thread is alive (#65).
+    SUPERVISOR_INTERVAL = 5.0
 
     def __init__(
         self,
@@ -167,6 +169,9 @@ class DashboardServer:
         self._sse_lock = threading.Lock()
         self.sse_clients: list[collections.deque] = []
         self.project_filter = project_filter
+        # Watcher supervisor (#65): restarts a provider thread that died.
+        self._supervisor_stop = threading.Event()
+        self._supervisor_thread: threading.Thread | None = None
 
         # Stats
         self.stats = {
@@ -360,6 +365,14 @@ class DashboardServer:
             time.sleep(0.1)
             print(f"  {name}: watching {watcher.watched_count} files")
 
+        # Watcher supervisor (#65): a dead provider thread is restarted and
+        # logged instead of leaving that provider silently unharvested.
+        self._supervisor_stop.clear()
+        self._supervisor_thread = threading.Thread(
+            target=self._supervise_watchers, name="WatcherSupervisor", daemon=True,
+        )
+        self._supervisor_thread.start()
+
         # Start GitHarvester if configured
         if self.git_harvester:
             self.git_harvester.start()
@@ -434,19 +447,71 @@ class DashboardServer:
         )
 
     def _moolmesh_answers_on(self, port: int) -> bool:
-        """True when ``port`` answers /health as a healthy MoolMesh."""
+        """True when ``port`` answers /health as a MoolMesh (healthy or degraded).
+
+        ``degraded`` (a watcher died or stalled, #65) still means the port is
+        owned by a running MoolMesh: starting a second daemon there must keep
+        raising ``AlreadyRunningError`` instead of auto-incrementing.
+        """
         import http.client
         try:
             import json as _json
             from urllib.request import urlopen
             with urlopen(f"http://{self.host}:{port}/health", timeout=2) as resp:
                 health = _json.loads(resp.read())
-            return health.get("status") == "healthy"
+            return health.get("status") in ("healthy", "degraded")
         except (OSError, ValueError, http.client.HTTPException):
             return False
 
+    def _supervise_watchers(self) -> None:
+        """Restart provider watcher threads that died unexpectedly (#65).
+
+        The loop guards already make deaths unlikely; if one still happens
+        (a BaseException, or a bug in the guard itself), the provider would be
+        silently unharvested forever. The supervisor notices, records the
+        death on the watcher (surfaced by /health as ThreadDied), logs it and
+        starts a fresh thread.
+        """
+        import logging
+        log = logging.getLogger("moolmesh.supervisor")
+        while not self._supervisor_stop.wait(self.SUPERVISOR_INTERVAL):
+            for label, watcher in self.watchers:
+                if not watcher.running or watcher.alive:
+                    continue
+                try:
+                    watcher.note_thread_death()
+                    watcher.start()
+                    log.warning("%s watcher thread died; restarted it", label)
+                except Exception:
+                    log.error("could not restart the %s watcher", label, exc_info=True)
+
+    def watchers_health(self) -> tuple[dict[str, dict], bool]:
+        """Per-provider watcher snapshots + overall degraded flag (#65).
+
+        A running watcher is unhealthy when its thread is dead or when it has
+        not completed a cycle for more than ``HEALTH_STALL_FACTOR`` rescan
+        intervals. Additive to /health: when every watcher is fine the overall
+        status stays "healthy".
+        """
+        try:
+            from hub.config import load_config
+            hide = bool(load_config().hide_project_names)
+        except Exception:
+            hide = False
+        snapshots: dict[str, dict] = {}
+        degraded = False
+        for _label, watcher in self.watchers:
+            snapshot = watcher.status_snapshot(hide_project_names=hide)
+            snapshots[watcher.provider_name] = snapshot
+            if snapshot["running"] and (snapshot["stalled"] or not snapshot["alive"]):
+                degraded = True
+        return snapshots, degraded
+
     def _shutdown(self, server) -> None:
         """Stop every background thread, then close the stores they write to."""
+        self._supervisor_stop.set()
+        if self._supervisor_thread:
+            self._supervisor_thread.join(timeout=5)
         for _, watcher in self.watchers:
             watcher.stop()
         if self.git_harvester:
@@ -672,12 +737,17 @@ class DashboardServer:
                     case "/health":
                         from hub import __version__
                         uptime = int(time.monotonic() - server_ref._start_time)
+                        # Additive watcher block (#65): "healthy" stays the
+                        # normal value; "degraded" means a running watcher is
+                        # dead or stalled, so a silent outage is impossible.
+                        watchers, degraded = server_ref.watchers_health()
                         self._serve_json({
-                            "status": "healthy",
+                            "status": "degraded" if degraded else "healthy",
                             "pid": os.getpid(),
                             "version": __version__,
                             "uptime_seconds": uptime,
                             "events_count": server_ref.stats["total_events"],
+                            "watchers": watchers,
                         })
                     case _:
                         self.send_error(404)

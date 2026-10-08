@@ -182,13 +182,24 @@ def cmd_daemon(args: argparse.Namespace) -> None:
             _launch_daemon(args, restarted=True)
 
         case "status":
-            _print_daemon_status()
+            # Exit 1 when a watcher is degraded (dead/stalled) — documented in
+            # the subcommand help and _print_daemon_status (#65).
+            code = _print_daemon_status()
+            if code:
+                raise SystemExit(code)
 
         case _:
             print("Uso: mool daemon {start|stop|status|restart}")
 
 
-def _print_daemon_status() -> None:
+def _print_daemon_status() -> int:
+    """Print daemon + per-watcher status.
+
+    Returns the CLI exit code: 0 when the daemon is not running, running and
+    healthy, or when /health is unreachable; 1 when the daemon reports
+    ``degraded`` (a watcher thread died or stalled, issue #65) so scripts can
+    react.
+    """
     import json
     from urllib.request import urlopen
     from hub.daemon import daemon_status
@@ -196,7 +207,7 @@ def _print_daemon_status() -> None:
     info = daemon_status()
     if info is None:
         print(yellow("MoolMesh daemon is not running"))
-        return
+        return 0
 
     uptime = info["uptime_seconds"]
     if uptime >= 3600:
@@ -210,12 +221,20 @@ def _print_daemon_status() -> None:
     print(f"  PID:    {info['pid']}")
     print(f"  Uptime: {uptime_str}")
 
-    # Query the running daemon for live stats
+    code = 0
+    # Query the running daemon for live stats + watcher health (#65)
     try:
         with urlopen("http://localhost:5200/health", timeout=2) as resp:
             health = json.loads(resp.read())
         print(f"  Port:   {5200}")
         print(f"  Events: {health.get('events_count', 0):,}")
+        status = health.get("status", "healthy")
+        if status == "degraded":
+            print(f"  Status: {red('degraded')} (a watcher is dead or stalled)")
+            code = 1
+        else:
+            print(f"  Status: {green('healthy')}")
+        _print_watcher_status(health.get("watchers") or {})
     except Exception:
         pass
 
@@ -233,16 +252,62 @@ def _print_daemon_status() -> None:
         print(dim(f"  Log:    {log_kb / 1024:.1f} MB"))
     else:
         print(dim(f"  Log:    {log_kb:.0f} KB"))
+    return code
+
+
+def _print_watcher_status(watchers: dict) -> None:
+    """One line per provider watcher: liveness, last cycle, error, quarantine."""
+    if not watchers:
+        return
+    print("  Watchers:")
+    for provider in sorted(watchers):
+        w = watchers[provider] or {}
+        if not w.get("alive", True) or w.get("stalled"):
+            state = red("DEAD" if not w.get("alive", True) else "STALLED")
+        else:
+            state = green("alive")
+        last = _humanize_age(w.get("last_cycle_at"))
+        extra = ""
+        err = w.get("last_error")
+        if err:
+            file_part = f" ({err.get('file')})" if err.get("file") else ""
+            extra += f"  {yellow('error:')} {err.get('type', '?')}{file_part}"
+        quarantined = w.get("quarantined_files", 0)
+        if quarantined:
+            extra += f"  {yellow(f'quarantined: {quarantined}')}"
+        print(f"    {provider:10} {state:14} last cycle: {last}{extra}")
+
+
+def _humanize_age(iso: str | None) -> str:
+    """``"12s ago"`` from an ISO timestamp; ``"never"`` when absent."""
+    if not iso:
+        return "never"
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return "?"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
+    if seconds >= 3600:
+        return f"{seconds // 3600}h ago"
+    if seconds >= 60:
+        return f"{seconds // 60}m ago"
+    return f"{seconds}s ago"
 
 
 def cmd_status(args: argparse.Namespace) -> None:
     if getattr(args, "json_output", False):
-        _print_daemon_status_json()
+        code = _print_daemon_status_json()
     else:
-        _print_daemon_status()
+        code = _print_daemon_status()
+    if code:
+        raise SystemExit(code)
 
 
-def _print_daemon_status_json() -> None:
+def _print_daemon_status_json() -> int:
+    """JSON variant of ``_print_daemon_status``; same exit-code contract."""
     import json as _json
     from urllib.request import urlopen
     from hub.daemon import daemon_status
@@ -250,16 +315,21 @@ def _print_daemon_status_json() -> None:
     info = daemon_status()
     if info is None:
         print(_json.dumps({"running": False}))
-        return
+        return 0
 
     result = {"running": True, "pid": info["pid"], "uptime_seconds": info["uptime_seconds"]}
 
+    code = 0
     try:
         with urlopen("http://localhost:5200/health", timeout=2) as resp:
             health = _json.loads(resp.read())
         result["port"] = 5200
         result["events_count"] = health.get("events_count", 0)
         result["version"] = health.get("version")
+        result["status"] = health.get("status", "healthy")
+        result["watchers"] = health.get("watchers") or {}
+        if result["status"] == "degraded":
+            code = 1
     except Exception:
         pass
 
@@ -272,6 +342,7 @@ def _print_daemon_status_json() -> None:
         pass
 
     print(_json.dumps(result))
+    return code
 
 
 def cmd_report(args: argparse.Namespace) -> None:
@@ -1013,7 +1084,9 @@ def main() -> None:
                          help="Stay in the foreground instead of double-forking")
 
     daemon_sub.add_parser("stop", help="Stop daemon")
-    daemon_sub.add_parser("status", help="Show daemon status")
+    daemon_sub.add_parser(
+        "status", help="Show daemon status (exit 1 when a watcher is degraded)"
+    )
 
     d_restart = daemon_sub.add_parser("restart", help="Restart daemon")
     d_restart.add_argument("--port", type=int, default=None,
