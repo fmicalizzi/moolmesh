@@ -697,7 +697,8 @@ class EventStore:
         stored range with the events' range; never narrows it (session_meta
         lines can date a session without producing an event).
         """
-        ids = [s for s in session_ids if s]
+        ids = [_scalar(s) or "" for s in session_ids]
+        ids = [s for s in ids if s]
         if not ids or not provider:
             return
         with self._write() as conn:
