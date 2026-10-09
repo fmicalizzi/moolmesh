@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: October 2026 — v1.25.0
+Last updated: October 2026 — v1.26.0
 
 ---
 
@@ -205,6 +205,15 @@ The fixes from the portfolio data audit ([#36](https://github.com/fmicalizzi/moo
 - **Pi** ([#66](https://github.com/fmicalizzi/moolmesh/issues/66)) joins Claude Code, Codex, OpenCode, Qwen and Cursor: a tree-aware incremental parser (all branches, deduped by id), file paths for workspace attribution, tokens and cost, registered in the daemon, backfill, catch-up, CLI/MCP and the dashboard.
 - **Provider template:** `docs/PROVIDERS.md` plus a provider contract test, so the next providers (Aider, Goose…) are cheaper to add.
 - Shell commands are never stored as file paths (all providers); container-internal roots (`/app`…) are "unclassified" ([#64](https://github.com/fmicalizzi/moolmesh/issues/64)); README "Updating" with `--no-cache-dir` ([#63](https://github.com/fmicalizzi/moolmesh/issues/63)).
+
+### v1.26 — Team & order
+
+The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/issues/36)):
+- a "· equipo" mark when only other people's commits keep a project hot (`[user] emails`; nothing per person exposed);
+- registered-but-inactive repos folded, plus "no medido" ([#60](https://github.com/fmicalizzi/moolmesh/issues/60));
+- local-config ordering: `project_aliases` (including container paths, [#64](https://github.com/fmicalizzi/moolmesh/issues/64)), `reference_containers`, `temporary_containers`;
+- a majority-org client rung;
+- full-history `mool repo sync --all-registered --all`, with "desde <fecha>" labels while history is partial ([#59](https://github.com/fmicalizzi/moolmesh/issues/59)).
 
 ---
 

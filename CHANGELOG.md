@@ -6,6 +6,73 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.26.0] — 2026-10-08
+
+"Team & order": the remaining decisions from the portfolio audit (#36). The portfolio
+now tells when a project moves only because of other people's commits, folds
+structural noise without hiding it, and lets you order your own tree with local
+config. Plus full git/GitHub history on demand (#59). No new dependencies.
+
+### Upgrade notes
+- Upgrade and restart as usual:
+  - `pipx upgrade moolmesh --pip-args=--no-cache-dir` (or
+    `python -m pip install --upgrade --no-cache-dir moolmesh`);
+  - then `mool daemon restart`.
+- **All new behavior is opt-in through `~/.moolmesh/config.toml`** (see the README).
+  With an empty config, only the generic rules below apply.
+- Config changes are picked up on the daemon's next classification refresh (up to
+  1 h), or immediately with `mool workspace classify`.
+- When adding keys, merge them into the existing `[workspace]` and `[user]` tables;
+  don't add a second `[workspace]` header. Note that `mool repo add` rewrites
+  `config.toml` in canonical form, so comments are not preserved.
+- To ingest the full history of your registered repos once:
+  `mool repo sync --all-registered --all`. The GitHub part requires a token.
+
+### Added
+- **Team-activity mark (#36, decision 1A).** `[user] emails = [...]`. When a
+  project's hot state (activo/enfriándose) is sustained only by commits from other
+  people, the state chip reads "· equipo". Local sessions and filesystem touches
+  always count as yours. Nothing per person is exposed anywhere; the team dimension
+  stays latent.
+- **Order by config (#36 decisions 3/4/5, #64 part 2)**, all in `[workspace]`,
+  empty by default, read layer only:
+  - `project_aliases`: fold a moved or renamed folder, a duplicate, or a container
+    path such as `/app` into the canonical project (history, state, outcome).
+    Missing targets only warn.
+  - `reference_containers`: folders of cloned/reference repos go to a
+    "Contenedores / referencia" section and no longer make their parent "activo".
+  - `temporary_containers`: their direct children go to a folded "Temporal"
+    section that keeps state and history.
+- **Client ladder rung (decision 4d).** A folder without git whose child repos
+  belong, by strict majority, to one known org is attributed to that client.
+  `client_overrides` still wins over everything.
+- **`mool repo sync --all-registered [--all | --days N]`** syncs every registered
+  repo in one go. It is resumable, keeps going when a repo fails, prints a summary,
+  and exits ≠ 0 on errors. `--all` now also pages GitHub issues/PRs without the
+  1,000-item cap (#59).
+
+### Changed
+- **Registered repos with no activity** are folded into "registrados sin actividad
+  (N)" per client and don't count in client KPIs. A GitHub remote that isn't
+  registered shows **"no medido"**, distinct from "sin repo" and from "0 entregado"
+  (#60).
+- **Outcome is labeled "desde <fecha>"** instead of "all-time" when a repo's
+  history isn't fully ingested (tracked with an additive `repos.history_complete`
+  flag) (#59).
+- **More generic system roots are "unclassified"** (`/usr/**`, `/var/**`,
+  `~/Library/**`), and `Proyectos` and `work` are treated as generic container
+  names like `Projects` (a project at `~/work/<name>` is labeled `<name>`).
+- **Neutral example data (#68):** tests, docstrings and docs no longer use
+  realistic org or folder names. An opt-in test guard checks the tracked tree
+  against a local denylist file (`MOOLMESH_PRIVACY_DENYLIST`) that never lives in
+  the repo.
+- Nodes whose folder no longer exists on disk are marked as such (informative).
+
+### Known follow-ups
+"Mi actividad %" (decision 1B); propagating the team mark to client chips.
+
+---
+
 ## [1.25.0] — 2026-10-08
 
 MoolMesh now observes the **Pi** coding agent (#66), with a tested template for
