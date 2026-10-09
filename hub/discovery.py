@@ -471,13 +471,13 @@ class ProjectDiscovery:
     def extract_project_name(decoded_path: str) -> str:
         """Extract a meaningful multi-component name from a project path.
 
-        Strips common prefixes (home, Downloads, Claude, etc.) and returns
+        Strips common prefixes (home, Downloads, work, Claude, etc.) and returns
         enough trailing components to be descriptive, similar to how Claude
         encodes project directories.
 
-        '/Users/franco/Downloads/Claude/ddtyi/YAAHub' -> 'ddtyi/YAAHub'
-        '/Users/franco/Downloads/Claude/eventsmx/front/stack' -> 'eventsmx/front/stack'
-        '/Users/franco/Downloads/Claude/acuernavaca' -> 'acuernavaca'
+        '/Users/u/work/globex/WidgetHub' -> 'globex/WidgetHub'
+        '/Users/u/work/acme/front/stack' -> 'acme/front/stack'
+        '/Users/u/work/solo-project' -> 'solo-project'
         '/Users/franco/Downloads/data/2026/04/.../0000' -> 'data-batch-0000'
         """
         if not decoded_path or decoded_path == "/":
@@ -504,8 +504,9 @@ class ProjectDiscovery:
 
         # Now strip common intermediate dirs
         strip_dirs = {
-            "Downloads", "Documents", "Projects", "repos", "src", "code",
-            "Desktop", "workspace", "Programming", "GitHub", "GitHub Projects",
+            "Downloads", "Documents", "Projects", "Proyectos", "work", "repos",
+            "src", "code", "Desktop", "workspace", "Programming", "GitHub",
+            "GitHub Projects",
         }
         while parts and parts[0] in strip_dirs:
             parts = parts[1:]
@@ -555,14 +556,14 @@ class ProjectDiscovery:
     def short_cwd(cwd: str, depth: int = 3) -> str:
         """Shorten a CWD to last N meaningful path components.
 
-        '/Users/franco/Downloads/Claude/tools/live-monitor' -> 'tools/live-monitor'
+        '/Users/u/work/tools/live-monitor' -> 'tools/live-monitor'
         """
         if not cwd:
             return ""
         parts = ProjectDiscovery._split_path(cwd)
         meaningful = parts
         for i, p in enumerate(parts):
-            if p in ("Downloads", "Documents", "Projects", "repos", "src", "code"):
+            if p in ("Downloads", "Documents", "Projects", "work", "repos", "src", "code"):
                 meaningful = parts[i + 1 :]
                 break
             if p == "Claude" and i > 0:

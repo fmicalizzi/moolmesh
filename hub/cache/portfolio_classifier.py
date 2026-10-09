@@ -16,7 +16,7 @@ The taxonomy (epic #24), one rule each:
     so it **collapses** onto that project (its activity folds in at read time).
   * **B. Deep subdir of a real project** — nests under the nearest real
     ancestor (the project anchor).
-  * **C. Materials / reports / exports** (non-dot folders like ``yaahub-ops``,
+  * **C. Materials / reports / exports** (non-dot folders like ``acme-ops``,
     ``reportes/inprocess``) — kept and shown, nested under the project.
   * **D. Config dotfolders + degenerate roots** — D1: a ``.``-prefixed dir
     *inside* a project nests under it but de-prioritized as config; D2:
@@ -24,14 +24,17 @@ The taxonomy (epic #24), one rule each:
     degenerate/system roots (``/``, ``/tmp``, ``~``, containers) go to the
     collapsed "sin clasificar / herramientas" section. Also D2 (#36), never a
     project even though ``anchor_path`` would mint one below the skipped system
-    segments: OS temp dirs (``/tmp/**``, ``/private/tmp/**``,
-    ``/var/folders/**``, ``/private/var/**`` — subtype ``temporary``) and app
-    bundles (``/Applications/**``, ``*.app`` — subtype ``app_bundle``). Also
-    D2 (#64): conventional container workdirs (``/app``, ``/workspace``,
-    ``/workspaces/<x>``, ``/usr/src/app``, ``/code``, ``/src``, ``/project``)
-    that do not exist on this host — subtype ``container``, "contenedor (ruta
-    interna)"; if the path DOES exist it is left alone. Only gitless
-    (``path_hash``) dirs: a git repo is a project wherever it lives.
+    segments: OS temp/system dirs (``/tmp/**``, ``/private/tmp/**``,
+    ``/var/**``, ``/private/var/**``, ``/usr/**``, ``~/Library/**`` — subtype
+    ``temporary``) and app bundles (``/Applications/**``, ``*.app`` — subtype
+    ``app_bundle``). Also D2 (#64): conventional container workdirs (``/app``,
+    ``/workspace``, ``/workspaces/<x>``, ``/usr/src/app``, ``/code``, ``/src``,
+    ``/project``) that do not exist on this host — subtype ``container``,
+    "contenedor (ruta interna)"; if the path DOES exist it is left alone. Only
+    gitless (``path_hash``) dirs: a git repo is a project wherever it lives.
+    Also D2 (decisión 4c, #36): owner-declared ``reference_containers`` — the
+    folder and its children are never projects (subtype ``reference``), matched
+    textually so it works even when the folder no longer exists.
 
 Collapse (A) resolves the real project two ways, in order:
 
@@ -40,7 +43,7 @@ Collapse (A) resolves the real project two ways, in order:
   2. **Encoded-name decode (fallback)** — for session storage (no uuid) or a
      scratchpad whose session left no cwd. The naive ``replace('-','/')`` decode
      is LOSSY (Claude encodes every non-alphanumeric char — ``/`` AND ``_`` AND
-     ``-`` — to ``-``, so ``coep-services`` and ``_eventsmx`` are ambiguous). We
+     ``-`` — to ``-``, so ``widget-services`` and ``_acme`` are ambiguous). We
      resolve it exactly by matching the encoded segment against the *forward*
      encoding of directories we already know are real (``encode_match``), and
      only as a last resort walk the filesystem to disambiguate (``fs_decode``).
@@ -63,8 +66,9 @@ from hub.correlation.workspace_resolver import resolve_dir
 _HOME_ANCHORS = {"Users", "Volumes", "home", "root"}
 _SYS_ROOTS = {"private", "tmp", "var", "usr", "opt", "etc", "bin", "sbin",
               "System", "Library", "Applications", "dev", "cores"}
-_STRIP = {"Downloads", "Documents", "Projects", "repos", "src", "code", "Desktop",
-          "workspace", "Programming", "GitHub", "GitHub Projects", "Claude", "Temporal"}
+_STRIP = {"Downloads", "Documents", "Projects", "Proyectos", "work", "repos",
+          "src", "code", "Desktop", "workspace", "Programming", "GitHub",
+          "GitHub Projects", "Claude", "Temporal"}
 
 # Non-dot subdir names that read as deliverable *materials* (category C) rather
 # than a plain source subdir (category B). Both nest and render the same; the
@@ -85,16 +89,48 @@ def _split(p: str) -> list[str]:
     return [x for x in p.replace("\\", "/").split("/") if x]
 
 
-# OS temp roots (#36). ``_SYS_ROOTS`` only strips the leading segments, so
-# ``/tmp/x`` or ``/var/folders/…/T/y`` would otherwise anchor as a project.
-# ``/var/folders`` is listed on its own: ``/var/www`` and friends are not temp.
-_TEMP_ROOTS = (("tmp",), ("private", "tmp"), ("var", "folders"), ("private", "var"))
+# OS temp and system roots (#36, R4 of decisión 3). ``_SYS_ROOTS`` only strips
+# the leading segments, so ``/tmp/x`` or ``/var/folders/…/T/y`` would otherwise
+# anchor as a project. ``/var`` covers ``/var/folders`` (macOS) and ``/var/www``;
+# ``/private/var`` is its macOS symlink target; ``/usr`` is system tooling, same
+# judgement. ``~/Library/**`` is handled separately (it needs ``home``).
+_TEMP_ROOTS = (("tmp",), ("private", "tmp"), ("var",), ("private", "var"),
+               ("usr",))
+
+
+def config_path(p: str) -> str:
+    """Normalize a config-supplied path (``~`` and Windows separators, #64p2).
+
+    Pure and platform-safe: expands ``~``, folds ``\\`` to the local separator,
+    and normpaths/strips a trailing separator so containment tests are exact.
+    Never touches the filesystem.
+    """
+    p = os.path.expanduser(str(p).strip())
+    if os.sep == "/" and "\\" in p:
+        p = p.replace("\\", "/")
+    return os.path.normpath(p).rstrip("/") or "/"
+
+
+def is_under(path: str, root: str) -> bool:
+    """True when ``path`` IS ``root`` or sits below it (component-exact)."""
+    path = config_path(path)
+    root = config_path(root)
+    if path == root:
+        return True
+    return path.startswith(root.rstrip("/") + "/")
 
 
 def is_temp_path(abspath: str) -> bool:
-    """True for a path at or below an OS temp root (see ``_TEMP_ROOTS``)."""
+    """True for a path at or below an OS temp/system root (see ``_TEMP_ROOTS``)."""
     parts = _split(abspath)
     return any(tuple(parts[: len(r)]) == r for r in _TEMP_ROOTS)
+
+
+def is_home_library_path(abspath: str, home: str | None) -> bool:
+    """True for ``~/Library/**`` (R4 of decisión 3) — never ``/Library``."""
+    if not home:
+        return False
+    return is_under(config_path(abspath), config_path(home) + "/Library")
 
 
 def is_app_bundle_path(abspath: str) -> bool:
@@ -114,12 +150,30 @@ def is_app_bundle_path(abspath: str) -> bool:
     return False
 
 
-def noise_subtype(abspath: str) -> str | None:
+def noise_subtype(abspath: str, home: str | None = None) -> str | None:
     """The D2 subtype of a gitless dir that is never a project, else ``None``."""
     if is_temp_path(abspath):
         return "temporary"
+    if is_home_library_path(abspath, home):
+        return "temporary"
     if is_app_bundle_path(abspath):
         return "app_bundle"
+    return None
+
+
+def org_of_remote(remote_url: str | None) -> str | None:
+    """Owner org from a normalized ``github.com/<owner>/<repo>`` remote.
+
+    Shared with the client ladder (rung 4d, decisión 4d); returns ``None`` for
+    anything that is not a hosted remote.
+    """
+    if not remote_url:
+        return None
+    parts = [p for p in remote_url.split("/") if p]
+    if len(parts) >= 3:
+        return parts[1]
+    if len(parts) == 2:
+        return parts[0]
     return None
 
 
@@ -171,10 +225,10 @@ def path_encode(abspath: str) -> str:
     Forward-only and total (unlike decoding, which is ambiguous). Verified
     against ground-truth pairs on a real machine:
 
-        /Users/u/Downloads/Claude/_eventsmx/fiestados
-            → -Users-u-Downloads-Claude--eventsmx-fiestados
-        /Users/u/Downloads/Claude/PRODUCCIONES/LACNIC
-            → -Users-u-Downloads-Claude-PRODUCCIONES-LACNIC
+        /Users/u/work/_acme/shop
+            → -Users-u-work--acme-shop
+        /Users/u/work/SHARED-WORKSPACE/project-x
+            → -Users-u-work-SHARED-WORKSPACE-project-x
     """
     return re.sub(r"[^A-Za-z0-9]", "-", abspath)
 
@@ -249,8 +303,8 @@ def fs_decode(encoded: str) -> str | None:
 
     Descends from ``/`` matching, at each level, the child directory whose
     forward encoding is a prefix of the remaining encoded string — choosing the
-    LONGEST such child so a hyphenated name (``coep-services``) is never split
-    into ``coep/services`` when the real dir exists. Returns the reconstructed
+    LONGEST such child so a hyphenated name (``widget-services``) is never split
+    into ``widget/services`` when the real dir exists. Returns the reconstructed
     absolute path, or ``None`` if the walk cannot proceed (dir gone, ambiguous).
     Touches disk read-only; never mutates.
     """
@@ -319,18 +373,26 @@ def _orphan(subtype: str, via: str) -> Classification:
 
 
 def _noise_of(
-    anchor: Anchor, path: str, exists=os.path.exists
+    anchor: Anchor, path: str, exists=os.path.exists, home: str | None = None
 ) -> Classification | None:
     """D2 orphan when ``path`` is a gitless never-a-project dir (#36/#64).
 
-    Temp dirs and app bundles (#36) plus container-internal roots (#64) are
-    displayed but never anchored as projects. Only ``path_hash`` (gitless)
-    workspaces qualify: a git repo is a project wherever it lives.
+    Temp/system dirs (``/tmp``, ``/var``, ``/usr``, ``~/Library``) and app
+    bundles (#36) plus container-internal roots (#64) are displayed but never
+    anchored as projects. Only ``path_hash`` (gitless) workspaces qualify: a git
+    repo is a project wherever it lives.
     """
     if not anchor.key.startswith("path_hash:"):
         return None
-    sub = noise_subtype(path) or container_subtype(path, exists)
+    sub = noise_subtype(path, home) or container_subtype(path, exists)
     return _orphan(sub, "noise") if sub else None
+
+
+def _workspace_path(kind: str, root_path: str | None, dir_path: str | None) -> str:
+    """The on-disk path a workspace row represents (git root or plain dir)."""
+    if kind in ("git_remote", "git_root"):
+        return (root_path or "").rstrip("/")
+    return (dir_path or "").rstrip("/")
 
 
 def classify(
@@ -343,6 +405,7 @@ def classify(
     enc_index: dict[str, Anchor],
     home: str,
     exists=os.path.exists,
+    reference_paths: tuple[str, ...] = (),
 ) -> Classification:
     """Classify one workspace into the #24 taxonomy.
 
@@ -350,14 +413,26 @@ def classify(
     ``enc_index`` maps ``path_encode(real_dir)`` → its resolved :class:`Anchor`,
     for the decode fallback. ``home`` is the user's home directory. ``exists``
     is the host existence check (injectable for the container rule, #64).
+
+    ``reference_paths`` (decisión 4c, #36) are owner-configured reference
+    containers: the folder AND its children are never projects — they surface in
+    the "contenedores / referencia" section. The match is textual over stored
+    paths, so it works even when the folder no longer exists on disk.
     """
+    d = _workspace_path(kind, root_path, dir_path)
+
+    # 0. Reference containers (decisión 4c) win over everything: a folder the
+    #    owner declared "this only holds clones/references" is never a project,
+    #    and neither is anything under it — even a git clone.
+    if reference_paths and d and any(is_under(d, r) for r in reference_paths):
+        return _orphan("reference", "reference")
+
     # 1. Git workspaces are always real project roots.
     if kind in ("git_remote", "git_root"):
         label = remote_url or ProjectDiscovery.extract_project_name(root_path or "")
         return Classification("root", "project", "project", _git_key(kind, remote_url, root_path),
                               label, "self")
 
-    d = (dir_path or "").rstrip("/")
     if not d:
         return _orphan("degenerate", "degenerate")
 
@@ -365,7 +440,7 @@ def classify(
     m = _SCRATCH.match(d + "/")
     if m:
         return _collapse_from_encoded(
-            m.group("enc"), m.group("uuid"), session_cwds, enc_index, exists
+            m.group("enc"), m.group("uuid"), session_cwds, enc_index, exists, home
         )
 
     # 3. Any other /private/tmp/claude-* path is harness *tooling* (bundled
@@ -378,7 +453,7 @@ def classify(
     if d.startswith(proj_root):
         seg = d[len(proj_root):].split("/", 1)[0]
         if seg.startswith("-"):
-            return _collapse_from_encoded(seg, None, session_cwds, enc_index, exists)
+            return _collapse_from_encoded(seg, None, session_cwds, enc_index, exists, home)
 
     # 5. D2 — home-level dotfolders and tooling (~/.config, ~/.claude/plugins…).
     if d.startswith(home + "/."):
@@ -399,10 +474,10 @@ def classify(
     if anchor is None:
         return _orphan("degenerate", "degenerate")
 
-    # 8. D2 — temp dirs, app bundles (#36) and container-internal roots (#64)
-    #    are never projects. Gitless only: a dir whose anchor resolved to a git
-    #    repo keeps nesting under it.
-    noise = _noise_of(anchor, d, exists)
+    # 8. D2 — temp/system dirs, app bundles (#36) and container-internal roots
+    #    (#64) are never projects. Gitless only: a dir whose anchor resolved to
+    #    a git repo keeps nesting under it.
+    noise = _noise_of(anchor, d, exists, home)
     if noise:
         return noise
 
@@ -430,6 +505,7 @@ def _collapse_from_encoded(
     session_cwds: dict[str, str],
     enc_index: dict[str, Anchor],
     exists=os.path.exists,
+    home: str | None = None,
 ) -> Classification:
     """Resolve a harness folder to the real project it collapses onto.
 
@@ -445,26 +521,26 @@ def _collapse_from_encoded(
             if anchor is not None:
                 # A harness whose real project is itself noise (a session run
                 # from /tmp/x) must not re-mint that noise as a project (#36).
-                return _noise_of(anchor, cwd, exists) or Classification(
+                return _noise_of(anchor, cwd, exists, home) or Classification(
                     "A", "harness", "collapse", anchor.key, anchor.label, "session_cwd")
 
     anchor = enc_index.get(enc)
     if anchor is not None:
-        return _noise_of(anchor, anchor.path, exists) or Classification(
+        return _noise_of(anchor, anchor.path, exists, home) or Classification(
             "A", "harness", "collapse", anchor.key, anchor.label, "encode_match")
 
     decoded = fs_decode(enc)
     if decoded is not None:
         anchor = anchor_of_realpath(decoded)
         if anchor is not None:
-            return _noise_of(anchor, decoded, exists) or Classification(
+            return _noise_of(anchor, decoded, exists, home) or Classification(
                 "A", "harness", "collapse", anchor.key, anchor.label, "fs_decode")
 
     # Last resort: keep the harness folder collapsed onto a synthetic project
     # from its encoded name (never orphaned — its work still belongs to a
     # project we simply could not pin to a real path) — unless even the lossy
     # decode reads as noise (#36).
-    sub = noise_subtype(enc.replace("-", "/"))
+    sub = noise_subtype(enc.replace("-", "/"), home)
     if sub:
         return _orphan(sub, "noise")
     label = ProjectDiscovery.extract_project_name(enc.replace("-", "/"))

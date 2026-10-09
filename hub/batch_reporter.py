@@ -3,7 +3,7 @@
 Two modes:
   1. _all/ — reporte general con todos los mensajes (full/week/day)
   2. Per-project — agrupado por NOMBRE de proyecto (unifica providers)
-     YAAHub/ contiene sesiones de Claude + Qwen juntas
+     widget-services/ contiene sesiones de Claude + Qwen juntas
 """
 
 from __future__ import annotations
@@ -199,7 +199,7 @@ def generate_report(
       reports/
         _all/                        <- reporte general
           full/  week/  day/
-        YAAHub/                      <- por proyecto (claude+qwen unificados)
+        widget-services/             <- por proyecto (claude+qwen unificados)
           full/  week/  day/
         services/
           full/  week/

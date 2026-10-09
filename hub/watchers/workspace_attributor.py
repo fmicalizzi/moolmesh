@@ -137,7 +137,25 @@ class WorkspaceAttributor:
                 self._store.detect_delivery_candidates(
                     self._events_db_path, self._github_db_path
                 )
-                self._store.classify_workspaces(self._events_db_path)
+                # `[workspace]` ordering config (decisión 3/4/5): aliases and
+                # reference containers apply in the read layer (classification).
+                # A config read failure must not kill the cycle — classify with
+                # no ordering rather than skip the refresh.
+                aliases: dict[str, str] = {}
+                refs: list[str] = []
+                try:
+                    from hub.config import load_config
+                    cfg = load_config()
+                    aliases = dict(cfg.project_aliases)
+                    refs = list(cfg.reference_containers)
+                except Exception:  # noqa: BLE001 — never break the refresh
+                    _log.warning("workspace config unavailable for classify",
+                                 exc_info=True)
+                self._store.classify_workspaces(
+                    self._events_db_path,
+                    project_aliases=aliases,
+                    reference_containers=refs,
+                )
             except Exception as exc:  # noqa: BLE001
                 _log.error("workspace portfolio refresh failed", exc_info=True)
                 self.last_attribution_error = type(exc).__name__

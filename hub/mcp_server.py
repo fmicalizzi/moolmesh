@@ -505,6 +505,79 @@ def _hide_project_names() -> bool:
         return False
 
 
+def _user_emails() -> list[str]:
+    """Owner commit emails from ``[user]`` (issue #36, decisión 1A).
+
+    Lazy like ``_hide_project_names``; any failure (missing config, import
+    error) returns ``[]`` — with no emails nothing is ever marked ``team_only``,
+    so a broken read degrades to the previous behavior, never a wrong claim.
+    """
+    try:
+        from hub.config import load_config
+        return list(load_config().user_emails)
+    except Exception:
+        return []
+
+
+def _temporary_containers() -> list[str]:
+    """Owner-declared temporary containers from ``[workspace]`` (decisión 3).
+
+    Their direct children render in their own "Temporal" section. Lazy like the
+    other config reads; a failure degrades to no sectioning.
+    """
+    try:
+        from hub.config import load_config
+        return list(load_config().temporary_containers)
+    except Exception:
+        return []
+
+
+def _registered_remote_keys(github_db: str) -> set[str]:
+    """Registered repo identities (``github.com/owner/repo``, lowercased).
+
+    The canonical key of a ``repos`` row in ``github.db`` (read-only). Used to
+    tell a registered GitHub project (measurable outcome) from a remote that was
+    never registered ("no medido", issue #60) — never a per-person signal.
+    Returns ``set()`` when the DB/table is absent.
+    """
+    if not os.path.exists(github_db):
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{github_db}?mode=ro", uri=True, timeout=5)
+    except sqlite3.OperationalError:
+        return set()
+    try:
+        rows = conn.execute("SELECT owner, repo_name FROM repos").fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    finally:
+        conn.close()
+    return {
+        f"github.com/{owner}/{repo}".lower()
+        for owner, repo in rows if owner and repo
+    }
+
+
+def _annotate_github_measured_projects(
+    projects: list[dict[str, Any]], registered: set[str],
+) -> None:
+    """Mark each project ``has_remote`` (GitHub) and ``registered`` in place.
+
+    Tri-state honesty for the delivery column (#60): registered → counts are a
+    real read; a GitHub remote that is NOT registered → "no medido" (distinct
+    from "— sin repo" and from a measured "0 entregado"). Both are booleans with
+    no names — masking is unaffected.
+    """
+    for p in projects:
+        pk = p.get("project_key") or ""
+        if pk.startswith("git_remote:github.com/"):
+            p["has_remote"] = True
+            p["registered"] = pk[len("git_remote:"):].lower() in registered
+        else:
+            p["has_remote"] = False
+            p["registered"] = False
+
+
 def _mask_workspace_rows(rows: list[dict[str, Any]], hide: bool) -> list[dict[str, Any]]:
     """Mask the human display fields of workspace rows when ``hide`` is set.
 
@@ -718,11 +791,16 @@ def _mask_grouped(grouped: dict[str, Any], hide: bool) -> dict[str, Any]:
         c["client_label"] = masked_label(c.get("client_label") or "", hide)
         for p in c.get("projects", []):
             _mask_project(p)
+        for p in c.get("inactive", []):
+            _mask_project(p)
     for p in grouped.get("projects", []):
         _mask_project(p)
     for p in grouped.get("external", []):
         _mask_project(p)
+    for p in grouped.get("temporary", []):
+        _mask_project(p)
     grouped["unclassified"] = _mask_workspace_rows(grouped.get("unclassified", []), hide)
+    grouped["reference"] = _mask_workspace_rows(grouped.get("reference", []), hide)
     return grouped
 
 
@@ -742,7 +820,8 @@ def _get_portfolio_grouped(
     workspace.db or the classification table is absent (never classified). Masked
     when ``hide_project_names`` is set.
     """
-    empty = {"projects": [], "unclassified": [], "summary": {}}
+    empty = {"projects": [], "unclassified": [], "reference": [],
+             "temporary": [], "summary": {}}
     if not os.path.exists(db_path):
         return empty
     if events_db is None:
@@ -753,18 +832,26 @@ def _get_portfolio_grouped(
     from hub.cache.workspace_store import WorkspaceStore
     store = WorkspaceStore(Path(db_path))
     try:
-        grouped = store.get_portfolio_grouped(since)
+        grouped = store.get_portfolio_grouped(
+            since, temporary_containers=_temporary_containers())
         try:
-            states = store.derive_project_states(events_db, github_db)
+            states = store.derive_project_states(
+                events_db, github_db, own_emails=_user_emails()
+            )
         except Exception:
             _log.exception("derive_project_states failed; states omitted")
             states = {}
-        for p in grouped.get("projects", []):
+        for p in grouped.get("projects", []) + grouped.get("temporary", []):
             st = states.get(p.get("project_key"))
             if st:
                 p["state"] = st
     finally:
         store.close()
+
+    # Registered-vs-remote honesty (#60): annotate BEFORE the client tier so the
+    # folding (registrados sin actividad) and the "no medido" column both see it.
+    _annotate_github_measured_projects(
+        grouped.get("projects", []), _registered_remote_keys(github_db))
 
     # Third tier (#29): client/org hierarchy over the flat projects. Resolve the
     # effective client config — auto-seed only when the owner identity is known
@@ -847,6 +934,7 @@ def _portfolio_production(
     today: str | None = None,
     hide: bool | None = None,
     github_db: str | None = None,
+    own_emails: list[str] | None = None,
 ) -> dict[str, Any]:
     """Per-project production over time — the honest-metric chart (#24 Stage 2).
 
@@ -1024,6 +1112,7 @@ def _portfolio_production(
     # effort view.
     outcome: dict[str, Any] = {}
     states: dict[str, Any] = {}
+    coverage: dict[str, Any] = {}
     try:
         from pathlib import Path
         from hub.cache.workspace_store import WorkspaceStore
@@ -1035,10 +1124,18 @@ def _portfolio_production(
             outcome = store.read_github_outcome(workspace_db, github_db)
             try:
                 states = store.derive_project_states(
-                    events_db, github_db, session_ingest=activity)
+                    events_db, github_db, session_ingest=activity,
+                    own_emails=own_emails)
             except Exception:
                 _log.exception("derive_project_states failed; states omitted")
                 states = {}
+            # #59: per-project history coverage — where the git history is
+            # partial, the UI labels outcome totals "desde <fecha>".
+            try:
+                coverage = store.read_history_coverage(workspace_db, github_db)
+            except Exception:
+                _log.exception("read_history_coverage failed; coverage omitted")
+                coverage = {}
         finally:
             store.close()
     except Exception:
@@ -1060,10 +1157,17 @@ def _portfolio_production(
             "last_day": g["last_day"],
             "days": g["days"],
         }
+        cov = coverage.get(pk)
+        if cov:
+            row["outcome_complete"] = bool(cov.get("complete"))
+            row["outcome_since"] = cov.get("since")
         st = states.get(pk)
         if st:
             row["state"] = st
         projects.append(row)
+    # Registered-vs-remote honesty (#60): a GitHub remote never registered shows
+    # "no medido" instead of "— sin repo" — a third, distinct state.
+    _annotate_github_measured_projects(projects, _registered_remote_keys(github_db))
     # Hottest (most-recent activity) on top; ties broken by session volume.
     projects.sort(key=lambda p: (p["last_day"], p["sessions"]), reverse=True)
 
@@ -1088,7 +1192,8 @@ def _get_portfolio_production(
     if github_db is None:
         github_db = GITHUB_DB
     return _portfolio_production(events_db, workspace_db, days, today=today,
-                                 github_db=github_db)
+                                 github_db=github_db,
+                                 own_emails=_user_emails())
 
 
 def _get_workspace_activity(

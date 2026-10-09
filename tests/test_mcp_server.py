@@ -102,12 +102,12 @@ def test_db(tmp_path):
             "Read" if i % 3 == 0 else "Edit" if i % 3 == 1 else "Bash",
             f"hub/server.py" if i % 2 == 0 else f"hub/cli.py",
             "claude-opus-4-6",
-            "/Users/test/project",
+            "/Users/u/project",
             None, now - (30 - i) * 60,
         ))
     for i in range(15):
         events.append((
-            "opencode", "/Users/test/Downloads/Claude/ddtyi/YAAHub", "tool_use",
+            "opencode", "/Users/u/work/globex/WidgetHub", "tool_use",
             _ts(30 + i),
             f"glob apps/api/*.ts",
             "ses-oc-001",
@@ -115,19 +115,19 @@ def test_db(tmp_path):
             "glob" if i % 2 == 0 else "Read",
             "apps/api/route.ts",
             "claude-sonnet-4-6",
-            "/Users/test/YAAHub",
+            "/Users/u/WidgetHub",
             None, now - (15 - i) * 60,
         ))
     for i in range(5):
         events.append((
-            "codex", "eventsmx/backend", "user",
+            "codex", "acme/backend", "user",
             _ts(45 + i),
             f"Fix the login bug in auth.py",
             "ses-codex-001",
             json.dumps({"input": 1000, "output": 800}),
             None, None,
             "gpt-5",
-            "/Users/test/eventsmx",
+            "/Users/u/acme",
             None, now - 7200 + i * 60,
         ))
 
@@ -269,7 +269,7 @@ class TestGetToolStats:
 
     def test_filter_by_project(self, test_db):
         from hub.mcp_server import _get_tool_stats
-        tools = _get_tool_stats(test_db, project="YAAHub")
+        tools = _get_tool_stats(test_db, project="WidgetHub")
         for t in tools:
             assert t["count"] > 0
 

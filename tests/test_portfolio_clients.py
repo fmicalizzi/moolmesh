@@ -23,23 +23,23 @@ def _proj(key, label, *, remote=None, anchor=None, sess=0, fs=0, git=0,
     }
 
 
-CLIENT_ORGS = {"eventsmx", "ddtyi"}
-PERSONAL = {"fmicalizzi"}
+CLIENT_ORGS = {"acme", "globex"}
+PERSONAL = {"ownerhandle"}
 
 
 class TestResolveClient:
     def test_git_org_groups_into_client(self):
         ref = resolve_client(
-            "git_remote:github.com/eventsmx/fiestados",
-            "github.com/eventsmx/fiestados", None,
+            "git_remote:github.com/acme/shop",
+            "github.com/acme/shop", None,
             client_orgs=CLIENT_ORGS, personal_orgs=PERSONAL, overrides={})
         assert ref["bucket"] == "client"
-        assert ref["client_key"] == "client:eventsmx"
+        assert ref["client_key"] == "client:acme"
 
     def test_personal_org_stays_loose(self):
         ref = resolve_client(
-            "git_remote:github.com/fmicalizzi/moolmesh",
-            "github.com/fmicalizzi/moolmesh", None,
+            "git_remote:github.com/ownerhandle/tool",
+            "github.com/ownerhandle/tool", None,
             client_orgs=CLIENT_ORGS, personal_orgs=PERSONAL, overrides={})
         assert ref["bucket"] == "personal"
         assert ref["client_key"] is None
@@ -52,27 +52,27 @@ class TestResolveClient:
         assert ref["bucket"] == "external"
 
     def test_gitless_parent_folder_matches_client(self):
-        # /Downloads/Claude/ddtyi/inter-areas → parent folder ddtyi → client.
+        # /work/globex/inter-areas → parent folder globex → client.
         ref = resolve_client(
             "path_hash:abc", None,
-            "/Users/u/Downloads/Claude/ddtyi/inter-areas",
+            "/Users/u/work/globex/inter-areas",
             client_orgs=CLIENT_ORGS, personal_orgs=PERSONAL, overrides={})
         assert ref["bucket"] == "client"
-        assert ref["client_key"] == "client:ddtyi"
+        assert ref["client_key"] == "client:globex"
 
     def test_gitless_materials_folder_reconciles_onto_git_client(self):
-        # The non-git _eventsmx materials folder normalizes onto client eventsmx.
+        # The non-git _acme materials folder normalizes onto client acme.
         ref = resolve_client(
             "path_hash:xyz", None,
-            "/Users/u/Downloads/Claude/_eventsmx",
+            "/Users/u/work/_acme",
             client_orgs=CLIENT_ORGS, personal_orgs=PERSONAL, overrides={})
         assert ref["bucket"] == "client"
-        assert ref["client_key"] == "client:eventsmx"
+        assert ref["client_key"] == "client:acme"
 
-    def test_producciones_is_shared_not_client(self):
+    def test_shared_workspace_is_shared_not_client(self):
         ref = resolve_client(
-            "git_root:/Users/u/Downloads/Claude/PRODUCCIONES", None,
-            "/Users/u/Downloads/Claude/PRODUCCIONES",
+            "git_root:/Users/u/work/SHARED-WORKSPACE", None,
+            "/Users/u/work/SHARED-WORKSPACE",
             client_orgs=CLIENT_ORGS, personal_orgs=PERSONAL, overrides={})
         assert ref["bucket"] == "shared"
         assert ref["client_key"] is None
@@ -80,10 +80,10 @@ class TestResolveClient:
     def test_case_insensitive_git_org(self):
         # A key/remote that survived un-normalized still matches lowercased org.
         ref = resolve_client(
-            "git_remote:github.com/EventsMX/fiestados",
-            "github.com/EventsMX/fiestados", None,
+            "git_remote:github.com/Acme/shop",
+            "github.com/Acme/shop", None,
             client_orgs=CLIENT_ORGS, personal_orgs=PERSONAL, overrides={})
-        assert ref["client_key"] == "client:eventsmx"
+        assert ref["client_key"] == "client:acme"
 
     def test_manual_override_wins(self):
         ref = resolve_client(
@@ -97,8 +97,8 @@ class TestResolveClient:
 
 class TestGroupByClient:
     def test_flat_when_no_config(self):
-        projects = [_proj("git_remote:github.com/eventsmx/x",
-                          "x", remote="github.com/eventsmx/x")]
+        projects = [_proj("git_remote:github.com/acme/x",
+                          "x", remote="github.com/acme/x")]
         h = group_by_client(projects, client_orgs=set(), personal_orgs=set(),
                             overrides={})
         assert h["clients"] == []
@@ -107,12 +107,12 @@ class TestGroupByClient:
 
     def test_groups_client_loose_and_external(self):
         projects = [
-            _proj("git_remote:github.com/eventsmx/a", "a",
-                  remote="github.com/eventsmx/a", sess=3, last="2026-01-02"),
-            _proj("git_remote:github.com/eventsmx/b", "b",
-                  remote="github.com/eventsmx/b", sess=2, last="2026-01-03"),
-            _proj("git_remote:github.com/fmicalizzi/m", "m",
-                  remote="github.com/fmicalizzi/m", sess=1),
+            _proj("git_remote:github.com/acme/a", "a",
+                  remote="github.com/acme/a", sess=3, last="2026-01-02"),
+            _proj("git_remote:github.com/acme/b", "b",
+                  remote="github.com/acme/b", sess=2, last="2026-01-03"),
+            _proj("git_remote:github.com/ownerhandle/m", "m",
+                  remote="github.com/ownerhandle/m", sess=1),
             _proj("git_remote:github.com/homebrew/brew", "brew",
                   remote="github.com/homebrew/brew"),
         ]
@@ -120,19 +120,19 @@ class TestGroupByClient:
                             personal_orgs=PERSONAL, overrides={})
         assert len(h["clients"]) == 1
         c = h["clients"][0]
-        assert c["client_key"] == "client:eventsmx"
+        assert c["client_key"] == "client:acme"
         assert len(c["projects"]) == 2
         assert c["session_touches"] == 5
-        assert len(h["projects"]) == 1        # fmicalizzi loose
+        assert len(h["projects"]) == 1        # ownerhandle loose
         assert h["projects"][0]["client_bucket"] == "personal"
         assert len(h["external"]) == 1        # homebrew
 
     def test_active_days_unioned_not_summed(self):
         projects = [
-            _proj("git_remote:github.com/eventsmx/a", "a",
-                  remote="github.com/eventsmx/a", days=["2026-01-01", "2026-01-02"]),
-            _proj("git_remote:github.com/eventsmx/b", "b",
-                  remote="github.com/eventsmx/b", days=["2026-01-02", "2026-01-03"]),
+            _proj("git_remote:github.com/acme/a", "a",
+                  remote="github.com/acme/a", days=["2026-01-01", "2026-01-02"]),
+            _proj("git_remote:github.com/acme/b", "b",
+                  remote="github.com/acme/b", days=["2026-01-02", "2026-01-03"]),
         ]
         h = group_by_client(projects, client_orgs=CLIENT_ORGS,
                             personal_orgs=PERSONAL, overrides={})
@@ -141,13 +141,13 @@ class TestGroupByClient:
 
     def test_client_inherits_hottest_state_and_sums_outcome(self):
         projects = [
-            _proj("git_remote:github.com/eventsmx/a", "a",
-                  remote="github.com/eventsmx/a",
+            _proj("git_remote:github.com/acme/a", "a",
+                  remote="github.com/acme/a",
                   state={"state": "pausado", "last_activity": "2026-01-01",
                          "merged_prs": 2, "closed_issues": 1, "open_issues": 0,
                          "outcome_measurable": True}),
-            _proj("git_remote:github.com/eventsmx/b", "b",
-                  remote="github.com/eventsmx/b",
+            _proj("git_remote:github.com/acme/b", "b",
+                  remote="github.com/acme/b",
                   state={"state": "activo", "last_activity": "2026-02-01",
                          "merged_prs": 3, "closed_issues": 0, "open_issues": 5,
                          "outcome_measurable": True}),
@@ -160,20 +160,20 @@ class TestGroupByClient:
         assert h["clients"][0]["outcome"] == {
             "merged_prs": 5, "closed_issues": 1, "open_issues": 5}
 
-    def test_producciones_stays_top_level_own_node(self):
+    def test_shared_workspace_stays_top_level_own_node(self):
         projects = [
-            _proj("git_root:/x/Claude/PRODUCCIONES", "PRODUCCIONES",
-                  anchor="/x/Downloads/Claude/PRODUCCIONES"),
-            _proj("git_remote:github.com/eventsmx/a", "a",
-                  remote="github.com/eventsmx/a"),
+            _proj("git_root:/x/Claude/SHARED-WORKSPACE", "SHARED-WORKSPACE",
+                  anchor="/x/work/SHARED-WORKSPACE"),
+            _proj("git_remote:github.com/acme/a", "a",
+                  remote="github.com/acme/a"),
         ]
         h = group_by_client(projects, client_orgs=CLIENT_ORGS,
                             personal_orgs=PERSONAL, overrides={})
         loose_labels = {p["project_label"] for p in h["projects"]}
-        assert "PRODUCCIONES" in loose_labels
+        assert "SHARED-WORKSPACE" in loose_labels
         # Never absorbed into a client node.
         for c in h["clients"]:
-            assert all(p["project_label"] != "PRODUCCIONES"
+            assert all(p["project_label"] != "SHARED-WORKSPACE"
                        for p in c["projects"])
 
 
@@ -197,16 +197,16 @@ class TestSuggestClientOrgs:
     def test_union_of_github_owners_and_multi_project_orgs(self, tmp_path):
         gdb = tmp_path / "github.db"
         wdb = tmp_path / "workspace.db"
-        # github.db owners: EventsMX, avillegas (case-normalized).
-        self._github_db(str(gdb), ["EventsMX", "avillegas"])
-        # workspace orgs: eventsmx×2, ddtyi×2, homebrew×1.
+        # github.db owners: Acme, initech (case-normalized).
+        self._github_db(str(gdb), ["Acme", "initech"])
+        # workspace orgs: acme×2, globex×2, homebrew×1.
         self._workspace_db(str(wdb), [
-            "github.com/eventsmx/a", "github.com/eventsmx/b",
-            "github.com/ddtyi/x", "github.com/ddtyi/y",
+            "github.com/acme/a", "github.com/acme/b",
+            "github.com/globex/x", "github.com/globex/y",
             "github.com/homebrew/brew",
         ])
         seed = suggest_client_orgs(str(wdb), str(gdb))
-        assert seed == ["avillegas", "ddtyi", "eventsmx"]  # homebrew excluded (1)
+        assert seed == ["acme", "globex", "initech"]  # homebrew excluded (1)
 
     def test_empty_when_dbs_absent(self, tmp_path):
         assert suggest_client_orgs(str(tmp_path / "no.db"),
@@ -236,10 +236,10 @@ class TestMcpIntegration:
     def _grouped(self):
         return {
             "projects": [
-                _proj("git_remote:github.com/eventsmx/a", "eventsmx/a",
-                      remote="github.com/eventsmx/a", sess=3, days=["2026-01-01"]),
-                _proj("git_remote:github.com/fmicalizzi/m", "fmicalizzi/m",
-                      remote="github.com/fmicalizzi/m", sess=1),
+                _proj("git_remote:github.com/acme/a", "acme/a",
+                      remote="github.com/acme/a", sess=3, days=["2026-01-01"]),
+                _proj("git_remote:github.com/ownerhandle/m", "ownerhandle/m",
+                      remote="github.com/ownerhandle/m", sess=1),
                 _proj("git_remote:github.com/homebrew/brew", "homebrew/brew",
                       remote="github.com/homebrew/brew"),
             ],
@@ -254,11 +254,11 @@ class TestMcpIntegration:
 
     def test_apply_hierarchy_uses_explicit_config(self, monkeypatch):
         from hub.mcp_server import _apply_client_hierarchy
-        self._patch_config(monkeypatch, personal_orgs=["fmicalizzi"],
-                          client_orgs=["eventsmx"])
+        self._patch_config(monkeypatch, personal_orgs=["ownerhandle"],
+                          client_orgs=["acme"])
         out = _apply_client_hierarchy(self._grouped(), "/no/ws.db", "/no/gh.db")
-        assert [c["client_key"] for c in out["clients"]] == ["client:eventsmx"]
-        assert len(out["projects"]) == 1                       # fmicalizzi loose
+        assert [c["client_key"] for c in out["clients"]] == ["client:acme"]
+        assert len(out["projects"]) == 1                       # ownerhandle loose
         assert len(out["external"]) == 1                       # homebrew
         assert out["summary"]["clients"] == 1
         assert out["summary"]["external"] == 1
@@ -275,19 +275,19 @@ class TestMcpIntegration:
 
     def test_client_label_masked(self, monkeypatch):
         from hub.mcp_server import _apply_client_hierarchy, _mask_grouped
-        self._patch_config(monkeypatch, personal_orgs=["fmicalizzi"],
-                          client_orgs=["eventsmx"])
+        self._patch_config(monkeypatch, personal_orgs=["ownerhandle"],
+                          client_orgs=["acme"])
         out = _apply_client_hierarchy(self._grouped(), "/no/ws.db", "/no/gh.db")
         masked = _mask_grouped(out, hide=True)
         c = masked["clients"][0]
         assert c["client_label"].startswith("hidden:")   # NAME masked
-        assert c["client_key"] == "client:eventsmx"       # JOIN HANDLE intact
+        assert c["client_key"] == "client:acme"       # JOIN HANDLE intact
         # Nested project labels masked too; keys survive.
         assert masked["clients"][0]["projects"][0]["project_label"].startswith(
             "hidden:")
 
 
 def test_norm_org_strips_underscore_and_case():
-    assert _norm_org("_EventsMX") == "eventsmx"
-    assert _norm_org("DDTYI") == "ddtyi"
+    assert _norm_org("_Acme") == "acme"
+    assert _norm_org("GLOBEX") == "globex"
     assert _norm_org(None) == ""

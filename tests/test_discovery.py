@@ -12,16 +12,16 @@ class TestExtractProjectName:
     """Test extract_project_name() with known paths."""
 
     def test_simple_project(self):
-        result = ProjectDiscovery.extract_project_name("/Users/franco/Downloads/Claude/acuernavaca")
-        assert result == "acuernavaca"
+        result = ProjectDiscovery.extract_project_name("/Users/u/work/solo-project")
+        assert result == "solo-project"
 
     def test_nested_project(self):
-        result = ProjectDiscovery.extract_project_name("/Users/franco/Downloads/Claude/ddtyi/YAAHub")
-        assert result == "ddtyi/YAAHub"
+        result = ProjectDiscovery.extract_project_name("/Users/u/work/globex/WidgetHub")
+        assert result == "globex/WidgetHub"
 
     def test_deep_path(self):
-        result = ProjectDiscovery.extract_project_name("/Users/franco/Downloads/Claude/eventsmx/front/stack")
-        assert result == "eventsmx/front/stack"
+        result = ProjectDiscovery.extract_project_name("/Users/u/work/acme/front/stack")
+        assert result == "acme/front/stack"
 
     def test_root_path(self):
         result = ProjectDiscovery.extract_project_name("/")
@@ -32,7 +32,7 @@ class TestExtractProjectName:
         assert result == "unknown"
 
     def test_strips_users_prefix(self):
-        result = ProjectDiscovery.extract_project_name("/Users/testuser/Downloads/Claude/myproject")
+        result = ProjectDiscovery.extract_project_name("/Users/u/work/myproject")
         assert result == "myproject"
 
     def test_strips_claude_prefix(self):
@@ -40,7 +40,7 @@ class TestExtractProjectName:
         assert result == "tools/live-monitor"
 
     def test_very_deep_path(self):
-        result = ProjectDiscovery.extract_project_name("/Users/testuser/Downloads/Claude/a/b/c/d/e")
+        result = ProjectDiscovery.extract_project_name("/Users/u/work/a/b/c/d/e")
         assert result == "c/d/e"  # keeps last 3
 
     def test_volumes_path(self):
@@ -50,13 +50,13 @@ class TestExtractProjectName:
 
     def test_strips_temporal_prefix(self):
         result = ProjectDiscovery.extract_project_name(
-            "/Users/franco/Downloads/Claude/Temporal/LACNIC"
+            "/Users/u/work/Temporal/project-x"
         )
-        assert result == "LACNIC"
+        assert result == "project-x"
 
     def test_strips_temporal_nested(self):
         result = ProjectDiscovery.extract_project_name(
-            "/Users/franco/Downloads/Claude/Temporal/retail/qr/tracker"
+            "/Users/u/work/Temporal/retail/qr/tracker"
         )
         assert result == "retail/qr/tracker"
 
@@ -92,10 +92,9 @@ class TestEncodeProjectPath:
 
 class TestShortCwd:
     def test_shorten_path(self):
-        result = ProjectDiscovery.short_cwd("/Users/franco/Downloads/Claude/tools/live-monitor")
-        # short_cwd strips at "Downloads", so remaining is "Claude/tools/live-monitor"
-        # depth=3 keeps last 3: "Claude/tools/live-monitor"
-        assert result == "Claude/tools/live-monitor"
+        result = ProjectDiscovery.short_cwd("/Users/u/work/tools/live-monitor")
+        # short_cwd strips at the container ("work"), so "tools/live-monitor" remains
+        assert result == "tools/live-monitor"
 
     def test_empty(self):
         assert ProjectDiscovery.short_cwd("") == ""
@@ -193,11 +192,11 @@ class TestDiscoverCodex:
         )""")
         conn.execute(
             "INSERT INTO threads VALUES (?, ?, ?, ?)",
-            (str(r1), "/Users/test/MyApp", 5000, "cli")
+            (str(r1), "/Users/u/MyApp", 5000, "cli")
         )
         conn.execute(
             "INSERT INTO threads VALUES (?, ?, ?, ?)",
-            (str(r2), "/Users/test/MyApp", 3000, "cli")
+            (str(r2), "/Users/u/MyApp", 3000, "cli")
         )
         conn.commit()
         conn.close()
@@ -248,7 +247,7 @@ class TestDiscoverCodex:
             rollout_path TEXT, cwd TEXT, tokens_used INTEGER, source TEXT
         )""")
         conn.execute("INSERT INTO threads VALUES (?, ?, ?, ?)",
-                     (str(r_real), "/Users/test/MyApp", 5000, "vscode"))
+                     (str(r_real), "/Users/u/MyApp", 5000, "vscode"))
         conn.execute("INSERT INTO threads VALUES (?, ?, ?, ?)",
                      (str(r_noise), "/", 0, "exec"))
         conn.commit()
@@ -342,14 +341,14 @@ class TestCrossPlatformPaths:
         assert result == ["C:", "Users", "Johny", "Documents", "myproject"]
 
     def test_split_path_unix(self):
-        result = ProjectDiscovery._split_path("/Users/franco/Downloads/Claude/moolmesh")
-        assert result == ["Users", "franco", "Downloads", "Claude", "moolmesh"]
+        result = ProjectDiscovery._split_path("/Users/u/work/moolmesh")
+        assert result == ["Users", "u", "work", "moolmesh"]
 
     def test_extract_project_name_windows(self):
         result = ProjectDiscovery.extract_project_name(
-            "C:\\Users\\Johny\\Documents\\Programming\\GitHub Projects\\feedback_yaahub"
+            "C:\\Users\\Johny\\Documents\\Programming\\GitHub Projects\\feedback_widgethub"
         )
-        assert result == "feedback_yaahub"
+        assert result == "feedback_widgethub"
 
     def test_extract_project_name_windows_unc(self):
         result = ProjectDiscovery.extract_project_name(
@@ -359,7 +358,7 @@ class TestCrossPlatformPaths:
 
     def test_extract_project_name_unix_still_works(self):
         result = ProjectDiscovery.extract_project_name(
-            "/Users/franco/Downloads/Claude/tools/moolmesh"
+            "/Users/u/work/tools/moolmesh"
         )
         assert result == "tools/moolmesh"
 
@@ -373,12 +372,12 @@ class TestCrossPlatformPaths:
 
     def test_short_cwd_windows(self):
         result = ProjectDiscovery.short_cwd(
-            "C:\\Users\\Johny\\Downloads\\Claude\\tools\\moolmesh"
+            "C:\\Users\\Johny\\work\\tools\\moolmesh"
         )
-        assert result == "Claude/tools/moolmesh"
+        assert result == "tools/moolmesh"
 
     def test_short_cwd_unix_still_works(self):
         result = ProjectDiscovery.short_cwd(
-            "/Users/franco/Downloads/Claude/tools/moolmesh"
+            "/Users/u/work/tools/moolmesh"
         )
-        assert result == "Claude/tools/moolmesh"
+        assert result == "tools/moolmesh"

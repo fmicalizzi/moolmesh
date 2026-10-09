@@ -83,7 +83,7 @@ Final step of the Workspace axis (VISION §6): roll the attributed path-touches 
 First stage of the portfolio-intelligence epic ([#24](https://github.com/fmicalizzi/moolmesh/issues/24)): the `/portfolio` view now identifies real **projects** instead of listing ~376 flat folders (on a real machine ~49% are agent-harness folders).
 
 - **#24 (Stage 1)** — collapse harness noise + hierarchical grouping. A new **read-layer classifier** (`hub/cache/portfolio_classifier.py`) maps every workspace into a 4-category taxonomy, materialized into an additive, **fully-rebuildable** `workspace_classification` table (contrast the durable `workspace_rollup`):
-  - **A. Harness → collapse** onto the real project — primary via the session `cwd` embedded through the scratchpad's session uuid (`events.db`, read-only, no decode); fallbacks are exact encode-match against known real dirs then a filesystem-validated decode (the naive `replace('-','/')` is lossy — Claude encodes `/`, `_` and `-` all to `-` — so `coep-services` is never split into `coep/services`).
+  - **A. Harness → collapse** onto the real project — primary via the session `cwd` embedded through the scratchpad's session uuid (`events.db`, read-only, no decode); fallbacks are exact encode-match against known real dirs then a filesystem-validated decode (the naive `replace('-','/')` is lossy — Claude encodes `/`, `_` and `-` all to `-` — so `widget-services` is never split into `widget/services`).
   - **B. deep subdirs** + **C. materials/reports/exports** nest under their nearest real ancestor; **D. config dotfolders** de-prioritized (D1 nested) or orphaned (D2 home-level dotfolders + degenerate/system roots → a collapsed "sin clasificar" section).
   - **Surface** — new `get_portfolio_grouped` MCP tool + store method (harness activity folded **at read time**; the rollup is never re-keyed), a `collapsed_harness` count per project (nothing deleted — grouped), `hide_project_names` masking recurses into labels + children. Hierarchical **read-on-load** `/portfolio` (SSE untouched). New `mool workspace classify` / `portfolio --grouped`.
   - **Additive** — resolver (#20), watcher (#21), `events.db`, the `project` field, `delivery_candidate` and SSE are untouched. **No charts (Stage 2) or client attribution (Stage 3)** — those stay in epic #24.
@@ -106,7 +106,7 @@ Second stage of the portfolio-intelligence epic ([#24](https://github.com/fmical
 
 First unit of the **Project Intelligence** epic ([#26](https://github.com/fmicalizzi/moolmesh/issues/26)): the portfolio moves from measuring *effort* to also surfacing *outcome* (the "Correlate" rung — activity ↔ delivery).
 
-- **#27 (Unit 1) — outcome layer.** The production view now carries, next to the effort columns, the **authoritative delivery already ingested in `github.db`**: **merged PRs + closed issues + open issues** per **canonical project** (`workspace_classification.project_key`, so harness folds into its real project). e.g. *fiestados: 39 ses · 10d · 180 PR · 101 cerr · 52 abiertos*.
+- **#27 (Unit 1) — outcome layer.** The production view now carries, next to the effort columns, the **authoritative delivery already ingested in `github.db`**: **merged PRs + closed issues + open issues** per **canonical project** (`workspace_classification.project_key`, so harness folds into its real project). e.g. *shop: 39 ses · 10d · 180 PR · 101 cerr · 52 abiertos*.
   - **Fact, not heuristic** — a merged PR / closed issue is a **fact** for git-backed projects, a distinct signal from `delivery_candidate` (#22, the gitless heuristic); the two are never conflated.
   - **Contributor-agnostic (team latent)** — all authors summed at project level; no per-person breakdown, `author` never surfaced. All-time totals, labelled as such in the UI (not window-scoped like effort).
   - **`github.db` read-only** — the join goes one direction (portfolio reads `github.db`, `mode=ro`); nothing writes back.
@@ -128,12 +128,12 @@ Second unit of the **Project Intelligence** epic ([#26](https://github.com/fmica
 
 Third and final unit of the **Project Intelligence** epic ([#26](https://github.com/fmicalizzi/moolmesh/issues/26)): the portfolio grows a third tier — **client/org → project → materials** — so the work reads by *who it's for*. **Closes epic #26.**
 
-- **#29 (Unit 3) — unified client/org hierarchy.** A read-layer projection hangs a client tier over the Stage-1 grouping via a **client attribution ladder**: manual override → **git-remote owner** (primary) → **parent-folder convention** (gitless fallback). Orgs are matched **case/underscore-insensitively** (`_eventsmx` / `EventsMX` → `eventsmx`), so the non-git materials folder **reconciles onto the same client** as its git products — filesystem + GitHub org as two feeds of one tree.
-- **Client classification.** A known client org (`[workspace] client_orgs`, curatable, **auto-seeded** from github.db repo owners ∪ workspace.db orgs with ≥2 projects) → a **client node**; the owner's own org (`personal_orgs`) → projects shown **loose**; an unknown git org → **externos/referencia** drawer; a shared workspace of the owner's own (`PRODUCCIONES`) → its own **top-level node**, never forced under a client.
+- **#29 (Unit 3) — unified client/org hierarchy.** A read-layer projection hangs a client tier over the Stage-1 grouping via a **client attribution ladder**: manual override → **git-remote owner** (primary) → **parent-folder convention** (gitless fallback). Orgs are matched **case/underscore-insensitively** (`_acme` / `Acme` → `acme`), so the non-git materials folder **reconciles onto the same client** as its git products — filesystem + GitHub org as two feeds of one tree.
+- **Client classification.** A known client org (`[workspace] client_orgs`, curatable, **auto-seeded** from github.db repo owners ∪ workspace.db orgs with ≥2 projects) → a **client node**; the owner's own org (`personal_orgs`) → projects shown **loose**; an unknown git org → **externos/referencia** drawer; a shared workspace of the owner's own (`SHARED-WORKSPACE`) → its own **top-level node**, never forced under a client.
 - **Client rollup (contributor-agnostic).** Effort (`active_days` **UNIONed**, not summed), **outcome** (merged-PR/closed-issue, all authors summed), and the **hottest** project state all roll up to the client, each with its evidence.
 - **Starts invisible** — no owner identity → **flat no-op** (byte-for-byte pre-#29); one config line (`personal_orgs` / `github_handle`) activates it.
 - **Consumes, doesn't change** — `delivery_candidate` (#22), the outcome layer (#27) and derived state (#28); resolver (#20), watcher (#21), the `project` field, SSE and `events.db`/`github.db` (read-only) untouched; `author` never surfaced. Zero new dependencies.
-- **Follow-up [#30](https://github.com/fmicalizzi/moolmesh/issues/30)** — container split (`PRODUCCIONES` → its distinct child projects/clients) needs re-anchoring at the resolver and is deferred.
+- **Follow-up [#30](https://github.com/fmicalizzi/moolmesh/issues/30)** — container split (`SHARED-WORKSPACE` → its distinct child projects/clients) needs re-anchoring at the resolver and is deferred.
 
 ### v1.18 — Portfolio UX redesign (layout)
 
@@ -229,7 +229,7 @@ From *effort* to *outcome* — the loose portfolio follow-ups (#24 Stage 3, #25)
 
 Deferred out of the epic:
 
-- **Container split** ([#30](https://github.com/fmicalizzi/moolmesh/issues/30)): decompose a shared-workspace node (`PRODUCCIONES`) into its distinct child projects/clients — needs re-anchoring at the resolver layer, so it is a separate follow-up rather than part of #29.
+- **Container split** ([#30](https://github.com/fmicalizzi/moolmesh/issues/30)): decompose a shared-workspace node (`SHARED-WORKSPACE`) into its distinct child projects/clients — needs re-anchoring at the resolver layer, so it is a separate follow-up rather than part of #29.
 - **Team/org visibility** — deferred to `v2.x` Org-Scale: the outcome data is inherently multi-actor and the model already carries contributors latently (counted contributor-agnostic today); not built now — the largest privacy surface.
 
 (#24 and #25 were folded into this epic and closed as superseded.)

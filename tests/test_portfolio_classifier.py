@@ -31,7 +31,7 @@ from hub.mcp_server import (
 )
 
 HOME = "/Users/tester"
-CLAUDE = f"{HOME}/Downloads/Claude"
+CLAUDE = f"{HOME}/work"
 UUID = "005784b6-3bf5-423a-a467-6b7d1d86b7a1"
 
 
@@ -48,12 +48,12 @@ def _classify(kind, dir_path=None, root_path=None, remote_url=None,
 
 class TestPathEncode:
     def test_slash_and_underscore_both_become_dash(self):
-        assert (path_encode(f"{CLAUDE}/_eventsmx/fiestados")
-                == "-Users-tester-Downloads-Claude--eventsmx-fiestados")
+        assert (path_encode(f"{CLAUDE}/_acme/shop")
+                == "-Users-tester-work--acme-shop")
 
     def test_hyphenated_name_encodes_stably(self):
-        assert (path_encode(f"{CLAUDE}/PRODUCCIONES/LACNIC")
-                == "-Users-tester-Downloads-Claude-PRODUCCIONES-LACNIC")
+        assert (path_encode(f"{CLAUDE}/SHARED-WORKSPACE/project-x")
+                == "-Users-tester-work-SHARED-WORKSPACE-project-x")
 
 
 class TestAnchorPath:
@@ -73,7 +73,7 @@ class TestCollapseA:
     def test_scratchpad_collapses_via_session_cwd(self):
         # Primary path: the scratchpad embeds the session uuid; the session's
         # real cwd (a deep dir) resolves to the project anchor.
-        d = f"/private/tmp/claude-501/-Users-tester-Downloads-Claude-myproj/{UUID}/scratchpad"
+        d = f"/private/tmp/claude-501/-Users-tester-work-myproj/{UUID}/scratchpad"
         cwd = f"{CLAUDE}/myproj/deep/nested"
         c = _classify("path_hash", dir_path=d, session_cwds={UUID: cwd})
         assert c.category == "A" and c.role == "collapse"
@@ -82,7 +82,7 @@ class TestCollapseA:
 
     def test_scratchpad_falls_back_to_encode_match(self):
         # No session cwd → exact match of the encoded segment against a known dir.
-        d = f"/private/tmp/claude-501/-Users-tester-Downloads-Claude-myproj/{UUID}/scratchpad"
+        d = f"/private/tmp/claude-501/-Users-tester-work-myproj/{UUID}/scratchpad"
         enc_index: dict = {}
         index_real_dir(f"{CLAUDE}/myproj", enc_index)
         c = _classify("path_hash", dir_path=d, enc_index=enc_index)
@@ -90,7 +90,7 @@ class TestCollapseA:
         assert c.project_key == f"path_hash:{_hash(f'{CLAUDE}/myproj')}"
 
     def test_session_storage_collapses_via_encode_match(self):
-        d = f"{HOME}/.claude/projects/-Users-tester-Downloads-Claude-myproj/memory"
+        d = f"{HOME}/.claude/projects/-Users-tester-work-myproj/memory"
         enc_index: dict = {}
         index_real_dir(f"{CLAUDE}/myproj", enc_index)
         c = _classify("path_hash", dir_path=d, enc_index=enc_index)
@@ -111,7 +111,7 @@ class TestCollapseA:
 
 class TestPrecedence:
     def test_session_storage_is_A_not_home_config(self):
-        d = f"{HOME}/.claude/projects/-Users-tester-Downloads-Claude-myproj"
+        d = f"{HOME}/.claude/projects/-Users-tester-work-myproj"
         enc_index: dict = {}
         index_real_dir(f"{CLAUDE}/myproj", enc_index)
         c = _classify("path_hash", dir_path=d, enc_index=enc_index)
@@ -150,7 +150,7 @@ class TestNesting:
         assert c.category == "C" and c.role == "nest" and c.subtype == "materials"
 
     def test_ops_folder_nests_as_C(self):
-        c = _classify("path_hash", dir_path=f"{CLAUDE}/ddtyi/yaahub-ops/memory")
+        c = _classify("path_hash", dir_path=f"{CLAUDE}/globex/widgethub-ops/memory")
         assert c.category == "C" and c.subtype == "materials"
 
     def test_dotfolder_inside_project_is_D1_config(self):
@@ -190,8 +190,8 @@ class TestTempRoots:
             assert _classify("path_hash", dir_path=d).subtype == "degenerate", d
 
     def test_boundary_non_temp_system_dirs_unchanged(self):
-        # /var/www is not temp; home dirs named like temp roots are projects.
-        assert _classify("path_hash", dir_path="/var/www/html").role == "nest"
+        # Home dirs named like temp roots are projects (only real system roots
+        # are noise — R4, decisión 3, moved /var/** to temporary).
         c = _classify("path_hash", dir_path=f"{CLAUDE}/tmp-notes")
         assert c.role == "project"
         c = _classify("path_hash", dir_path=f"{CLAUDE}/myproj/tmp/out")
@@ -231,7 +231,7 @@ class TestTempRoots:
         assert (c.subtype, c.role) == ("temporary", "orphan")
 
     def test_harness_of_a_real_project_still_collapses(self):
-        d = f"/private/tmp/claude-501/-Users-tester-Downloads-Claude-myproj/{UUID}/scratchpad"
+        d = f"/private/tmp/claude-501/-Users-tester-work-myproj/{UUID}/scratchpad"
         c = _classify("path_hash", dir_path=d, session_cwds={UUID: f"{CLAUDE}/myproj"})
         assert c.category == "A" and c.role == "collapse"
 
@@ -413,19 +413,19 @@ class TestAppBundles:
 
 class TestFsDecode:
     def test_hyphenated_name_not_split(self, tmp_path):
-        # Only `coep-services` exists — never a `coep/services` tree.
-        real = tmp_path / "coep-services" / "webinstitucional"
+        # Only `widget-services` exists — never a `widget/services` tree.
+        real = tmp_path / "widget-services" / "webinstitucional"
         real.mkdir(parents=True)
         encoded = path_encode(str(real))
         decoded = fs_decode(encoded)
         assert decoded == str(real)
-        assert (tmp_path / "coep").exists() is False
+        assert (tmp_path / "widget").exists() is False
 
     def test_longest_match_wins_over_prefix(self, tmp_path):
-        (tmp_path / "coep").mkdir()
-        (tmp_path / "coep-services").mkdir()
-        encoded = path_encode(str(tmp_path / "coep-services"))
-        assert fs_decode(encoded) == str(tmp_path / "coep-services")
+        (tmp_path / "widget").mkdir()
+        (tmp_path / "widget-services").mkdir()
+        encoded = path_encode(str(tmp_path / "widget-services"))
+        assert fs_decode(encoded) == str(tmp_path / "widget-services")
 
     def test_missing_leaf_returns_none_but_parent_decodes(self, tmp_path):
         parent = tmp_path / "realdir"
@@ -491,9 +491,11 @@ class TestGroupedRead:
     def test_grouped_empty_when_never_classified(self, tmp_path):
         store = WorkspaceStore(tmp_path / "workspace.db")
         g = store.get_portfolio_grouped()
-        assert g == {"projects": [], "unclassified": [],
+        assert g == {"projects": [], "unclassified": [], "reference": [],
+                     "temporary": [],
                      "summary": {"projects": 0, "collapsed_harness": 0,
-                                 "children": 0, "unclassified": 0}}
+                                 "children": 0, "unclassified": 0,
+                                 "reference": 0, "temporary": 0}}
         store.close()
 
 
@@ -505,7 +507,7 @@ class TestMasking:
                 "project_label": "github.com/me/proj",
                 "children": [{
                     "workspace_key": "path_hash:abc",
-                    "dir_path": "/Users/tester/Downloads/Claude/proj/apps",
+                    "dir_path": "/Users/tester/work/proj/apps",
                     "remote_url": None, "root_path": None,
                 }],
             }],
@@ -526,7 +528,8 @@ class TestMasking:
 
     def test_mcp_grouped_absent_db_returns_empty(self, tmp_path):
         assert _get_portfolio_grouped(str(tmp_path / "nope.db")) == {
-            "projects": [], "unclassified": [], "summary": {}
+            "projects": [], "unclassified": [], "reference": [],
+            "temporary": [], "summary": {},
         }
 
 

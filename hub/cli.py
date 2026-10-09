@@ -1172,6 +1172,12 @@ def main() -> None:
                            help="Days of history to ingest (default: 14)")
     repo_sync.add_argument("--all", dest="all_history", action="store_true",
                            help="Ingest full history")
+    repo_sync.add_argument("--all-registered", dest="all_registered",
+                           action="store_true",
+                           help="Sync every registered repo in one pass (#59); "
+                                "with --all, full history + full issues/PRs backfill")
+    repo_sync.add_argument("--no-github", action="store_true",
+                           help="Skip the GitHub issues/PRs backfill with --all")
 
     # query (agent-friendly JSON output)
     query_parser = subparsers.add_parser("query", help="Query data as JSON (agent-friendly)")
@@ -1748,7 +1754,15 @@ def cmd_workspace_backfill(args: argparse.Namespace) -> None:
     rollup = store.build_rollup()
     store.detect_delivery_candidates()
     # Classify the (possibly new) workspaces for the grouped portfolio view (#24).
-    cls = store.classify_workspaces(EVENTS_DB_PATH)
+    # `[workspace]` ordering config (aliases + reference containers) applies in
+    # the read layer — decisión 5/#64p2, decisión 4c.
+    from hub.config import load_config as _load_config
+    _cfg = _load_config()
+    cls = store.classify_workspaces(
+        EVENTS_DB_PATH,
+        project_aliases=_cfg.project_aliases,
+        reference_containers=_cfg.reference_containers,
+    )
     store.close()
 
     print(green(
@@ -1791,7 +1805,13 @@ def cmd_workspace_rollup(args: argparse.Namespace) -> None:
     # Delivery detection reads the same real clocks — refresh it in the same pass.
     d = store.detect_delivery_candidates()
     # Refresh the #24 classification so the grouped portfolio stays in sync.
-    cls = store.classify_workspaces(EVENTS_DB_PATH)
+    from hub.config import load_config as _load_config
+    _cfg = _load_config()
+    cls = store.classify_workspaces(
+        EVENTS_DB_PATH,
+        project_aliases=_cfg.project_aliases,
+        reference_containers=_cfg.reference_containers,
+    )
     store.close()
     print(green(
         f"Rollup built: {r['rows']} day-rows across {r['workspaces']} workspaces."
@@ -1815,9 +1835,16 @@ def cmd_workspace_classify(args: argparse.Namespace) -> None:
     from hub.cache.event_store import DEFAULT_DB_PATH as EVENTS_DB_PATH
     from hub.cache.workspace_store import WorkspaceStore
 
+    from hub.config import load_config
+
     store = WorkspaceStore()
     print(dim(f"Classifying workspaces (events.db read-only): {store.db_path}"))
-    c = store.classify_workspaces(EVENTS_DB_PATH)
+    cfg = load_config()
+    c = store.classify_workspaces(
+        EVENTS_DB_PATH,
+        project_aliases=cfg.project_aliases,
+        reference_containers=cfg.reference_containers,
+    )
     store.close()
     print(green(
         f"Classified {c['classified']} workspaces into {c['projects']} projects."
@@ -1827,6 +1854,8 @@ def cmd_workspace_classify(args: argparse.Namespace) -> None:
         f"{c['unclassified']} unclassified. Categories: {c['by_category']}."
     ))
     print(dim(f"  Resolved via: {c['by_resolved_via']}."))
+    for w in c.get("alias_warnings", []):
+        print(yellow(f"  project_aliases: {w}"))
 
 
 def cmd_workspace_delivery(args: argparse.Namespace) -> None:
@@ -1871,7 +1900,11 @@ def cmd_workspace_portfolio(args: argparse.Namespace) -> None:
 
     store = WorkspaceStore()
     if getattr(args, "grouped", False):
-        grouped = store.get_portfolio_grouped(getattr(args, "since", None))
+        from hub.config import load_config
+        grouped = store.get_portfolio_grouped(
+            getattr(args, "since", None),
+            temporary_containers=load_config().temporary_containers,
+        )
         store.close()
         # This CLI view keeps the flat project list (no client tier); still drop
         # the internal join-only fields (_day_set/_remote_url/_anchor_path) the
@@ -1955,6 +1988,20 @@ def _print_portfolio_grouped(grouped: dict, json_output: bool) -> None:
             olabel = masked_label(o.get("dir_path") or o.get("root_path") or "", hide)
             subtype = subtype_labels.get(o["subtype"], o["subtype"])
             print(dim(f"    · [{subtype}] {olabel}"))
+
+    reference = grouped.get("reference", [])
+    if reference:
+        print(f"\n  {bold('Contenedores / referencia')} ({len(reference)}):")
+        for o in reference:
+            olabel = masked_label(o.get("dir_path") or o.get("root_path") or "", hide)
+            print(dim(f"    · [reference] {olabel}"))
+
+    temporary = grouped.get("temporary", [])
+    if temporary:
+        print(f"\n  {bold('Temporal')} ({len(temporary)}):")
+        for p in temporary:
+            label = masked_label(p.get("project_label") or p["project_key"], hide)
+            print(dim(f"    · {label}"))
 
 
 def cmd_workspace_list(args: argparse.Namespace) -> None:
@@ -2115,6 +2162,58 @@ def cmd_repo(args: argparse.Namespace) -> None:
             print("Usage: mool repo {add|list|remove|sync}")
 
 
+def _github_client_for(config, no_github: bool):
+    """GitHubClient del token configurado, o None (sin token / --no-github).
+
+    Imprime el aviso una vez. El backfill completo de issues/PRs es best-effort:
+    sin token, el flag de historia queda sin marcar (la UI rotula "desde").
+    """
+    if no_github:
+        return None
+    from hub.config import get_github_token
+    token = get_github_token(config)
+    if not isinstance(token, str) or not token:
+        print(yellow("No GitHub token (config / GITHUB_TOKEN / gh auth) — "
+                     "skipping the issues/PRs history backfill."))
+        return None
+    from hub.integrations.github_client import GitHubClient
+    return GitHubClient(token)
+
+
+def _full_history_ingest(
+    store, repo_id: int, repo_config, harvester, client,
+) -> dict:
+    """Ingesta de historial COMPLETO de un repo (#59): git + issues/PRs.
+
+    ``--all`` es la promesa "all-time de verdad": además del git sin acotar,
+    completa la historia de issues/PRs (el poll incremental corta a 1000
+    items). El flag ``history_complete`` se marca SÓLO si TODAS las capas
+    aplicables corrieron: git OK y, si el repo es github-enabled, el backfill
+    de GitHub OK. Un repo local (``github_enabled=False``) se completa con git.
+    Devuelve ``{"ok", "commits", "items", "complete", "reason"}``.
+    """
+    from hub.harvesters.git_harvester import GIT_READ_FAILED
+
+    count = harvester.ingest_history(repo_config.path, days=None)
+    if count == GIT_READ_FAILED:
+        return {"ok": False, "commits": 0, "items": 0, "complete": False,
+                "reason": "git"}
+    items = 0
+    complete = True
+    if getattr(repo_config, "github_enabled", False):
+        if client is None:
+            complete = False
+        else:
+            items = _sync_github_issues(store, repo_id, repo_config, client)
+            if items < 0:
+                return {"ok": True, "commits": count, "items": 0,
+                        "complete": False, "reason": "github"}
+    if complete:
+        store.mark_history_complete(repo_id)
+    return {"ok": True, "commits": count, "items": items,
+            "complete": complete, "reason": None}
+
+
 def cmd_repo_add(args: argparse.Namespace) -> None:
     from pathlib import Path
     from hub.config import add_repo, save_config, load_config
@@ -2139,15 +2238,28 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
 
     store = GitStore()
     store.register_repo(repo_config)
+    repo_id = store.get_repo_id(repo_config.path)
 
     harvester = GitHarvester(store)
-    days = None if args.all_history else args.days
 
     if args.all_history:
         print(dim("Ingesting full history — this may take several minutes..."))
+        client = _github_client_for(config, args.no_github)
+        res = _full_history_ingest(store, repo_id, repo_config, harvester, client)
+        store.close()
+        print(green(f"Registered {repo_config.owner}/{repo_config.repo}"))
+        if not res["ok"]:
+            # count < 0 (GIT_READ_FAILED): el repo quedó registrado (el add tuvo
+            # éxito) pero el backfill falló. Aviso sin exit no-cero (#34).
+            print(yellow(f"  Could not read git history in {path} (see logs) — "
+                         f"run 'mool repo sync {path}' to retry"))
+            return
+        gh_note = f", {res['items']} issues/PRs" if res["items"] else ""
+        complete = "historia completa" if res["complete"] else "historia parcial"
+        print(f"  Ingested {res['commits']} commits{gh_note} (full history, {complete})")
+        return
 
-    count = harvester.ingest_history(path, days=days)
-
+    count = harvester.ingest_history(path, days=args.days)
     store.close()
     print(green(f"Registered {repo_config.owner}/{repo_config.repo}"))
     # count < 0 (GIT_READ_FAILED): el repo quedó registrado (el add tuvo éxito)
@@ -2158,8 +2270,7 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
         print(yellow(f"  Could not read git history in {path} (see logs) — "
                      f"run 'mool repo sync {path}' to retry"))
     else:
-        days_desc = "full history" if days is None else f"last {days} days"
-        print(f"  Ingested {count} commits ({days_desc})")
+        print(f"  Ingested {count} commits (last {args.days} days)")
 
 
 def cmd_repo_list(args: argparse.Namespace) -> None:
@@ -2207,6 +2318,11 @@ def cmd_repo_remove(args: argparse.Namespace) -> None:
 
 def cmd_repo_sync(args: argparse.Namespace) -> None:
     from pathlib import Path
+
+    if getattr(args, "all_registered", False):
+        _sync_all_registered(args)
+        return
+
     from hub.config import load_config
     from hub.cache.git_store import GitStore
     from hub.harvesters.git_harvester import GitHarvester
@@ -2214,7 +2330,8 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
     path = str(Path(args.path).resolve())
     config = load_config()
 
-    if not any(r.path == path for r in config.repos):
+    repo_cfg = next((r for r in config.repos if r.path == path), None)
+    if repo_cfg is None:
         print(red(f"Not registered: {path}"))
         print(dim("  Use: mool repo add /path/to/repo"))
         return
@@ -2231,6 +2348,17 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
 
     if args.all_history:
         print(dim("Ingesting full history — this may take several minutes..."))
+        client = _github_client_for(config, getattr(args, "no_github", False))
+        res = _full_history_ingest(store, repo_id, repo_cfg, harvester, client)
+        store.close()
+        if not res["ok"]:
+            print(red(f"Error reading git in {path} (see logs)"))
+            sys.exit(1)
+        gh_note = f", {res['items']} issues/PRs" if res["items"] else ""
+        complete = "historia completa" if res["complete"] else "historia parcial"
+        print(green(f"Synced: {res['commits']} new commits{gh_note} "
+                    f"(full history, {complete})"))
+        return
 
     count = harvester.ingest_history(path, days=days)
     store.close()
@@ -2241,8 +2369,153 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
         print(red(f"Error reading git in {path} (see logs)"))
         sys.exit(1)
 
+    print(green(f"Synced: {count} new commits ingested (last {days} days)"))
+
+
+def _sync_github_issues(
+    store, repo_id: int, repo_config, client,
+) -> int:
+    """Full issues+PRs backfill for one repo (#59). Returns item count, -1 error.
+
+    The incremental harvester caps at ``max_pages=10`` (1000 items, sorted by
+    ``updated`` desc) — enough for polling, not for history: a busy repo
+    silently loses its older issues/PRs. ``repo sync --all`` therefore pulls
+    every page (``max_pages=None``) and upserts idempotently.
+    """
+    try:
+        status, data, _ = client.list_issues(
+            repo_config.owner, repo_config.repo, state="all", max_pages=None)
+    except Exception:
+        _log_cli("GitHub backfill failed for %s/%s",
+                 repo_config.owner, repo_config.repo, exc_info=True)
+        return -1
+    if status != 200 or data is None:
+        return -1
+    # Reuse the harvester's shaping so the row contract stays in one place.
+    from hub.harvesters.github_harvester import GitHubHarvester
+    issues = []
+    for item in data:
+        is_pr = "pull_request" in item
+        d = {
+            "number": item["number"],
+            "title": item["title"],
+            "state": item["state"],
+            "author": item.get("user", {}).get("login", ""),
+            "assignees": __import__("json").dumps(
+                [a["login"] for a in item.get("assignees", [])]),
+            "labels": __import__("json").dumps(
+                [lbl["name"] for lbl in item.get("labels", [])]),
+            "milestone_number": (item.get("milestone") or {}).get("number"),
+            "created_at": item["created_at"],
+            "updated_at": item["updated_at"],
+            "closed_at": item.get("closed_at"),
+            "body": (item.get("body") or "")[:500],
+            "is_pull_request": 1 if is_pr else 0,
+        }
+        if is_pr:
+            pr_data = item.get("pull_request", {})
+            d["pr_merged_at"] = pr_data.get("merged_at")
+            d["pr_state"] = GitHubHarvester._determine_pr_state(item)
+            d["pr_base_branch"] = ""
+            d["pr_head_branch"] = ""
+            d["pr_review_decision"] = ""
+        issues.append(d)
+    store.upsert_issues(repo_id, issues)
+    return len(issues)
+
+
+def _sync_all_registered(args: argparse.Namespace) -> None:
+    """Sync every registered repo in one bounded, resumable pass (#59).
+
+    Per-repo independent: an error (git read failure, GitHub backfill failure,
+    missing store row) is recorded and the loop continues. With ``--all``, both
+    layers go to full history — git without bounds and github-enabled repos'
+    issues/PRs past the poller's 1000-item cap; ``history_complete`` is marked
+    only when every applicable layer succeeded. Rerunning is safe — commits
+    dedupe by sha, issues upsert. Exits non-zero when any repo failed.
+    """
+    from hub.config import load_config
+    from hub.cache.git_store import GitStore
+    from hub.harvesters.git_harvester import GitHarvester, GIT_READ_FAILED
+
+    config = load_config()
+    if not config.repos:
+        print(yellow("No repositories registered."))
+        print(dim("  Use: mool repo add /path/to/repo"))
+        return
+
+    days = None if args.all_history else args.days
     days_desc = "full history" if days is None else f"last {days} days"
-    print(green(f"Synced: {count} new commits ingested ({days_desc})"))
+    total = len(config.repos)
+    store = GitStore()
+    harvester = GitHarvester(store)
+
+    client = None
+    github_skipped = False
+    if args.all_history:
+        client = _github_client_for(config, getattr(args, "no_github", False))
+        github_skipped = client is None and not getattr(args, "no_github", False)
+
+    new_commits = 0
+    new_items = 0
+    partial = 0
+    errors: list[str] = []
+    for i, r in enumerate(config.repos, 1):
+        name = f"{r.owner}/{r.repo}"
+        repo_id = store.get_repo_id(r.path)
+        if repo_id is None:
+            errors.append(f"{name}: not in GitStore")
+            print(f"  [{i}/{total}] {name}  {red('error')} (not in GitStore)")
+            continue
+
+        if days is None:
+            res = _full_history_ingest(store, repo_id, r, harvester, client)
+            if not res["ok"]:
+                errors.append(f"{name}: git read failed")
+                print(f"  [{i}/{total}] {name}  {red('error')} (git read failed)")
+                continue
+            if res["reason"] == "github":
+                errors.append(f"{name}: GitHub history failed")
+            new_commits += res["commits"]
+            new_items += res["items"]
+            extra = f", {res['items']} issues/PRs" if res["items"] else ""
+            if not res["complete"]:
+                partial += 1
+                extra += dim(" (historia parcial)")
+            print(f"  [{i}/{total}] {name}  "
+                  f"{green(f'{res['commits']} new commits')}{extra} (full history)")
+            continue
+
+        count = harvester.ingest_history(r.path, days=days)
+        if count == GIT_READ_FAILED:
+            errors.append(f"{name}: git read failed")
+            print(f"  [{i}/{total}] {name}  {red('error')} (git read failed)")
+            continue
+        new_commits += count
+        print(f"  [{i}/{total}] {name}  {green(f'{count} new commits')} ({days_desc})")
+
+    store.close()
+    print(green(f"\nSynced {total - len(errors)}/{total} repos: "
+                f"{new_commits} new commits"
+                + (f", {new_items} issues/PRs" if new_items else "")
+                + f" ({days_desc})."))
+    if github_skipped:
+        print(dim("  GitHub history: skipped (no token)."))
+    if partial:
+        print(dim(f"  {partial} repo(s) con historia parcial — la UI rotula "
+                  f"'desde <fecha>' hasta completarlas."))
+    if errors:
+        print(red(f"  {len(errors)} error(s):"))
+        for e in errors:
+            print(red(f"    - {e}"))
+        print(dim("  Rerun to resume — per-repo, idempotent."))
+        sys.exit(1)
+
+
+def _log_cli(msg: str, *a, **kw) -> None:
+    """Log de un helper CLI (contexto sin nombres en stdout)."""
+    from hub.log import get as _get
+    _get("CLI").warning(msg, *a, **kw)
 
 
 if __name__ == "__main__":

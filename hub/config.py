@@ -81,6 +81,11 @@ class HubConfig:
     repos: list[RepoConfig] = field(default_factory=list)
     github_token: str = ""           # vacío = auto-detect
     github_handle: str = ""          # para "Tus Pendientes" en digest
+    # Emails de commit del owner (issue #36, decisión 1A). Un commit es "propio"
+    # si su email de autor está en esta lista (comparación sin mayúsculas);
+    # vacía → no se marca nada (comportamiento previo). NUNCA se exponen los
+    # emails ni conteos por autor en ninguna superficie: sólo un booleano.
+    user_emails: list[str] = field(default_factory=list)
     # --- LLM (sección canónica) ---
     llm_provider: str = "ollama"
     llm_api_url: str = "https://ollama.com/api"
@@ -116,6 +121,18 @@ class HubConfig:
     # Override manual para bordes: project_key → nombre de cliente. Gana sobre
     # la escalera git-org/carpeta.
     client_overrides: dict[str, str] = field(default_factory=dict)
+    # --- Orden por config (issue #36, decisiones 3/4/5; #64 parte 2) ---
+    # Alias de proyectos: origen (ruta o clave) → proyecto canónico (clave o
+    # ruta). Los workspaces del origen (y sus hijos) suman su historia al
+    # canónico y no aparecen como fila propia. Destino inexistente → aviso.
+    project_aliases: dict[str, str] = field(default_factory=dict)
+    # Contenedores de referencia: la carpeta y sus hijos van a la sección
+    # "contenedores / referencia", nunca como proyecto (funciona aunque la
+    # carpeta ya no exista en disco).
+    reference_containers: list[str] = field(default_factory=list)
+    # Contenedores temporales: los hijos DIRECTOS van a una sección "Temporal"
+    # visible y plegada, conservando su estado e historia.
+    temporary_containers: list[str] = field(default_factory=list)
 
 
 def _serialize_toml(config: HubConfig) -> str:
@@ -141,6 +158,11 @@ def _serialize_toml(config: HubConfig) -> str:
     # Sección [user]
     lines.append("[user]")
     lines.append(f'github_handle = "{_toml_escape(config.github_handle)}"')
+    # Emails propios (decisión 1A) — sólo si tienen contenido, como el resto
+    # de las listas opcionales.
+    if config.user_emails:
+        emails = ", ".join(f'"{_toml_escape(e)}"' for e in config.user_emails)
+        lines.append(f'emails = [{emails}]')
     lines.append("")
 
     # Sección [workspace] (privacidad — escalar; DEBE ir antes de cualquier
@@ -164,6 +186,19 @@ def _serialize_toml(config: HubConfig) -> str:
             for k, v in config.client_overrides.items()
         )
         lines.append(f'client_overrides = {{{pairs}}}')
+    # Orden por config (decisiones 3/4/5) — mismas reglas: sólo con contenido.
+    if config.project_aliases:
+        pairs = ", ".join(
+            f'"{_toml_escape(k)}" = "{_toml_escape(v)}"'
+            for k, v in config.project_aliases.items()
+        )
+        lines.append(f'project_aliases = {{{pairs}}}')
+    if config.reference_containers:
+        refs = ", ".join(f'"{_toml_escape(p)}"' for p in config.reference_containers)
+        lines.append(f'reference_containers = [{refs}]')
+    if config.temporary_containers:
+        temps = ", ".join(f'"{_toml_escape(p)}"' for p in config.temporary_containers)
+        lines.append(f'temporary_containers = [{temps}]')
     lines.append("")
 
     # Sección [[repos]] - array de tablas
@@ -230,6 +265,10 @@ def load_config() -> HubConfig:
     if "user" in data:
         user = data["user"]
         config.github_handle = user.get("github_handle", "")
+        # Emails propios (decisión 1A) — lista, vacía por defecto.
+        config.user_emails = [
+            str(e).strip() for e in user.get("emails", []) if str(e).strip()
+        ]
     
     # Parse repos array
     if "repos" in data:
@@ -259,6 +298,17 @@ def load_config() -> HubConfig:
             str(k): str(v) for k, v in dict(ws.get("client_overrides", {})).items()
             if str(k) and str(v)
         }
+        # Orden por config (decisiones 3/4/5) — todas opcionales, default vacío.
+        config.project_aliases = {
+            str(k): str(v) for k, v in dict(ws.get("project_aliases", {})).items()
+            if str(k) and str(v)
+        }
+        config.reference_containers = [
+            str(p) for p in ws.get("reference_containers", []) if str(p).strip()
+        ]
+        config.temporary_containers = [
+            str(p) for p in ws.get("temporary_containers", []) if str(p).strip()
+        ]
 
     # Parse [[workspace_roots]] array (issue #21, opt-in)
     if "workspace_roots" in data:

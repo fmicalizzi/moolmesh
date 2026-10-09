@@ -168,7 +168,7 @@ class GitHubClient:
     def list_issues(self, owner: str, repo: str, state: str = "all",
                     since: str | None = None, per_page: int = 100,
                     etag: str | None = None,
-                    max_pages: int = 10) -> tuple[int, list[dict] | None, str | None]:
+                    max_pages: int | None = 10) -> tuple[int, list[dict] | None, str | None]:
         """GET /repos/{owner}/{repo}/issues con filtros, paginado.
 
         Retorna issues Y pull requests (GitHub API las mezcla).
@@ -177,7 +177,9 @@ class GitHubClient:
         El ETag aplica solo a la primera página (suficiente: los issues
         vienen ordenados por updated desc, si la página 1 no cambió no
         cambió nada). Las siguientes se piden hasta max_pages mientras
-        cada página venga llena.
+        cada página venga llena. ``max_pages=None`` → sin tope: historial
+        completo (``repo sync --all``, #59 — el poll incremental se queda
+        en el default de 10 páginas).
         """
         path = f"/repos/{owner}/{repo}/issues"
         params = {"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"}
@@ -190,7 +192,8 @@ class GitHubClient:
 
         all_items = list(data)
         page = 2
-        while len(data) == per_page and page <= max_pages:
+        while (len(data) == per_page
+               and (max_pages is None or page <= max_pages)):
             page_params = dict(params)
             page_params["page"] = page
             page_status, data, _ = self.rest_get(path, page_params)

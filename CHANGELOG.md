@@ -632,16 +632,16 @@ by *who it's for*, not just as a flat list of repos. **Closes epic #26**
   belongs to (first match wins):
   - **Manual override** (`client_overrides`: `project_key → client`) → **git-remote
     owner** (primary: `github.com/<org>/<repo>` → org) → **parent-folder
-    convention** (gitless fallback: `~/Downloads/Claude/<client>/<project>`).
-  - Orgs are matched **case- and underscore-insensitively** (`_eventsmx` /
-    `EventsMX` → `eventsmx`), so a non-git materials folder **reconciles onto the
+    convention** (gitless fallback: `~/work/<client>/<project>`).
+  - Orgs are matched **case- and underscore-insensitively** (`_acme` /
+    `Acme` → `acme`), so a non-git materials folder **reconciles onto the
     same client node** as the git products under it — two feeds (filesystem +
     GitHub org) of the one tree.
 - **Client classification** — a known client org (`[workspace] client_orgs`,
   curatable) becomes a **client node** grouping its projects; the owner's own org
   (`personal_orgs`) shows its projects **loose** (no client node); an unknown git
   org lands in the **externos / referencia** drawer (cloned deps/repos); a shared
-  workspace of the owner's own (e.g. `PRODUCCIONES`) stays a **top-level node**,
+  workspace of the owner's own (e.g. `SHARED-WORKSPACE`) stays a **top-level node**,
   never forced under a client.
 - **Auto-seed for `client_orgs`** — computed from the two stores (github.db repo
   owners ∪ workspace.db orgs with ≥2 projects), firing **only when the owner
@@ -668,7 +668,7 @@ by *who it's for*, not just as a flat list of repos. **Closes epic #26**
   the SSE stream are untouched; `author` is never surfaced (team latent, deferred
   to v2.x Org-Scale). Zero new dependencies.
 - **Follow-up [#30](https://github.com/fmicalizzi/moolmesh/issues/30)** —
-  container split (e.g. `PRODUCCIONES` decomposed into its distinct
+  container split (e.g. `SHARED-WORKSPACE` decomposed into its distinct
   projects/clients) needs re-anchoring at the resolver layer and is deferred; the
   shared workspace renders as its own node until then.
 
@@ -731,7 +731,7 @@ measuring *effort* to also surfacing *outcome*.
   active days), the **delivery already recorded in `github.db`**: **merged PRs,
   closed issues, and open issues** per **canonical project** (the Stage-1
   `workspace_classification.project_key`, so agent-harness folders fold into
-  their real project). e.g. *fiestados: 39 ses · 10d · 180 PR · 101 cerr · 52
+  their real project). e.g. *shop: 39 ses · 10d · 180 PR · 101 cerr · 52
   abiertos*.
   - **Authoritative fact, not heuristic.** A merged PR / closed issue is a
     **fact** for git-backed projects — a different signal from
@@ -821,8 +821,8 @@ measuring *effort* to also surfacing *outcome*.
     session uuid, so the real `cwd` is read from `events.db` (read-only) — no decode.
     Fallbacks: exact match of the encoded segment against known real dirs
     (`encode_match`), then a filesystem-validated decode. The naive `replace('-','/')`
-    decode is **lossy** (Claude encodes `/`, `_` and `-` all to `-`), so `coep-services`
-    is never split into `coep/services`.
+    decode is **lossy** (Claude encodes `/`, `_` and `-` all to `-`), so `widget-services`
+    is never split into `widget/services`.
   - **B. Deep subdirs** and **C. materials/reports/exports** nest under their nearest real
     ancestor (the project anchor).
   - **D. Config dotfolders** de-prioritized (D1 nested config) or orphaned (D2 home-level

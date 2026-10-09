@@ -139,11 +139,29 @@ def _mig_3_utc_to_local(conn: sqlite3.Connection) -> int:
     return updated
 
 
+def _mig_4_repo_history_complete(conn: sqlite3.Connection) -> int:
+    """Migration 4: marca por repo si su historia git está completa (#59).
+
+    ``repo add --all`` / ``repo sync --all`` la marcan al ingerir el historial
+    completo; donde está en 0, la UI rotula "desde <fecha del primer commit
+    ingerido>" en vez de "all-time". Aditiva e idempotente (chequea la columna).
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(repos)")}
+    if "history_complete" in cols:
+        return 0
+    conn.execute(
+        "ALTER TABLE repos ADD COLUMN history_complete INTEGER NOT NULL DEFAULT 0"
+    )
+    conn.commit()
+    return 1
+
+
 # Register migrations
 _MIGRATIONS = [
     (1, "normalize_timestamps", _mig_1_normalize_timestamps),
     (2, "extract_branches", _mig_2_extract_branches),
     (3, "utc_to_local", _mig_3_utc_to_local),
+    (4, "repo_history_complete", _mig_4_repo_history_complete),
 ]
 
 
@@ -182,7 +200,11 @@ CREATE TABLE IF NOT EXISTS repos (
     owner TEXT NOT NULL,
     repo_name TEXT NOT NULL,
     added_at TEXT NOT NULL,
-    last_fetch_at TEXT
+    last_fetch_at TEXT,
+    -- 1 = se ingirió el historial git completo (``repo add/sync --all``);
+    -- 0 = parcial (la UI rotula "desde <fecha>", #59). Migración 4 la agrega
+    -- a DBs previas.
+    history_complete INTEGER NOT NULL DEFAULT 0
 );
 
 -- Refs snapshot (para detectar nuevos commits)
@@ -337,19 +359,50 @@ class GitStore:
     # --- Repos ---
 
     def register_repo(self, config) -> int:
-        """INSERT en repos. Retorna repo_id."""
-        
+        """UPSERT en repos. Retorna repo_id.
+
+        UPSERT (nunca REPLACE): re-registrar el mismo path NO debe resetear
+        ``history_complete`` — el flag es un hecho durable del repo (#59).
+        """
         with self._lock:
             conn = self._get_conn()
-            cursor = conn.execute(
-                """INSERT OR REPLACE INTO repos
-                   (path, remote_url, owner, repo_name, added_at, last_fetch_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+            conn.execute(
+                """INSERT INTO repos
+                       (path, remote_url, owner, repo_name, added_at, last_fetch_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(path) DO UPDATE SET
+                       remote_url = excluded.remote_url,
+                       owner = excluded.owner,
+                       repo_name = excluded.repo_name,
+                       added_at = excluded.added_at""",
                 (config.path, config.remote_url, config.owner, config.repo,
                  config.added_at, None)
             )
+            row = conn.execute(
+                "SELECT id FROM repos WHERE path = ?", (config.path,)
+            ).fetchone()
             conn.commit()
-            return cursor.lastrowid
+            return int(row[0]) if row else 0
+
+    def mark_history_complete(self, repo_id: int) -> None:
+        """Marca el repo como de historial COMPLETO (#59).
+
+        Se llama sólo cuando la ingesta corrió sin acotar (``--all``) y git
+        respondió; es aditivo y no toca commits/refs.
+        """
+        with self._lock:
+            self._get_conn().execute(
+                "UPDATE repos SET history_complete = 1 WHERE id = ?", (repo_id,)
+            )
+            self._get_conn().commit()
+
+    def is_history_complete(self, repo_id: int) -> bool:
+        """True si el historial del repo se ingirió completo (``--all``)."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT history_complete FROM repos WHERE id = ?", (repo_id,)
+            ).fetchone()
+        return bool(row and row[0])
 
     def get_repo_id(self, path: str) -> int | None:
         """SELECT id FROM repos WHERE path = ?"""
@@ -364,7 +417,8 @@ class GitStore:
         """SELECT * FROM repos. Retorna list de dicts."""
         with self._lock:
             rows = self._get_conn().execute(
-                "SELECT id, path, remote_url, owner, repo_name, added_at, last_fetch_at FROM repos"
+                "SELECT id, path, remote_url, owner, repo_name, added_at,"
+                " last_fetch_at, history_complete FROM repos"
             ).fetchall()
         
         return [
@@ -376,6 +430,7 @@ class GitStore:
                 "repo_name": r[4],
                 "added_at": r[5],
                 "last_fetch_at": r[6],
+                "history_complete": bool(r[7]),
             }
             for r in rows
         ]

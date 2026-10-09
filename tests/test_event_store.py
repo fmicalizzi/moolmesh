@@ -107,14 +107,14 @@ class TestEventStoreQuery:
 
     def test_query_by_project(self, store):
         events = [
-            {"provider": "claude", "project": "YAAHub", "event_type": "user",
+            {"provider": "claude", "project": "WidgetHub", "event_type": "user",
              "timestamp": "2026-04-08T10:00:00", "summary": "y1"},
             {"provider": "claude", "project": "other", "event_type": "user",
              "timestamp": "2026-04-08T10:00:01", "summary": "o1"},
         ]
         store.store_batch(events)
 
-        result = store.query(project="YAA")
+        result = store.query(project="Widget")
         assert len(result) == 1
 
     def test_query_by_since(self, store):

@@ -91,6 +91,20 @@ hub/
   startup.
 - **SSE contract:** don't change the SSE event schema without bumping the API
   version; the static HTML has coupled listeners.
+- **Privacy (public repo):** never carry the owner's real client/org/project
+  names in examples — tests, fixtures, docstrings, comments, README/ROADMAP/
+  CHANGELOG. Use the neutral vocabulary instead: orgs `acme` / `globex` /
+  `initech`, gitless client folder `_acme`, shared workspace
+  `SHARED-WORKSPACE`, hyphenated project `widget-services`, reference container
+  `/Users/u/work/reference-clones`, root `/Users/u/work/...`. The owner's
+  personal-org handle in test data is `ownerhandle` (real handles stay only in
+  the repo's own URLs). The local term list lives OUTSIDE the repo at
+  `~/.moolmesh/privacy-denylist.txt` (one term per line; never committed, never
+  pasted anywhere). `tests/test_privacy_denylist.py` enforces this when
+  `MOOLMESH_PRIVACY_DENYLIST` points at that file; without the variable it
+  skips. Run
+  `MOOLMESH_PRIVACY_DENYLIST=~/.moolmesh/privacy-denylist.txt pytest tests/test_privacy_denylist.py`
+  before any release.
 
 ---
 

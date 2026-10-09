@@ -208,6 +208,7 @@ CREATE TABLE IF NOT EXISTS workspace_classification (
     category TEXT NOT NULL,        -- root | A | B | C | D
     subtype TEXT NOT NULL,         -- project | harness | subdir | materials | config | home_config
                                    -- | degenerate | temporary | app_bundle | container (#64)
+                                   -- | reference (#36, decisión 4c)
     role TEXT NOT NULL,            -- project | collapse | nest | orphan
     project_key TEXT,              -- canonical project group (join handle; NULL for orphan)
     project_label TEXT,            -- project group display name (masked at read)
@@ -557,6 +558,162 @@ def _lit_sources(session_n: int, fs_n: int, git_n: int) -> list[str]:
     if git_n:
         lit.append("git")
     return lit
+
+
+def _is_own_email(email: str | None, own_emails: frozenset[str] | None) -> bool:
+    """True when a commit's author email belongs to the owner (decisión 1A).
+
+    Case-insensitive; no emails configured → never own (nothing is marked).
+    The email itself is never returned or surfaced — team stays latent.
+    """
+    if not own_emails or not email:
+        return False
+    return email.strip().lower() in own_emails
+
+
+_KEY_TOKEN_PREFIXES = ("git_remote:", "git_root:", "path_hash:", "encoded:")
+
+
+def _rewrite_project_aliases(
+    classified: list[tuple[int, Any]],
+    ws_rows: list[tuple],
+    aliases: dict[str, str],
+) -> tuple[list[tuple[int, Any]], list[str]]:
+    """Rewrite classified project keys through ``[workspace] project_aliases``.
+
+    Read-layer only (decisión 5, #64p2). An **origin** is matched by path (the
+    workspace's own root/dir, or anything under it) or by key (workspace_key /
+    project_key: ``git_remote:…``, ``git_root:…``, ``path_hash:…``). Every
+    workspace whose project_key belongs to the origin's group is rewritten to
+    the **destination** — a key form used verbatim, or a path resolved against
+    the workspace rows. Chains are followed (bounded, cycle-safe). A missing
+    destination or an origin matching nothing emits a warning and changes
+    nothing — never a failure.
+
+    Returns ``(classified, warnings)``.
+    """
+    from dataclasses import replace
+    from hub.cache.portfolio_classifier import config_path, is_under
+
+    def _is_key(t: str) -> bool:
+        return str(t).startswith(_KEY_TOKEN_PREFIXES)
+
+    # Normalize origins (path tokens) + keep raw dests for chain resolution.
+    amap: dict[str, str] = {}
+    for k, v in (aliases or {}).items():
+        k, v = str(k).strip(), str(v).strip()
+        if not k or not v:
+            continue
+        amap[k if _is_key(k) else config_path(k)] = v
+    if not amap:
+        return classified, []
+
+    meta: dict[int, tuple[str, str | None, str | None]] = {}
+    for wid, kind, _remote, root, dirp, wkey in ws_rows:
+        d = (root if kind in ("git_remote", "git_root") else dirp) or ""
+        meta[wid] = (wkey, d.rstrip("/"), kind)
+
+    pkey_label: dict[str, str] = {}
+    for _wid, c in classified:
+        if c.project_key and c.project_label and c.project_key not in pkey_label:
+            pkey_label[c.project_key] = c.project_label
+
+    def _label_for_key(key: str) -> str:
+        if key in pkey_label:
+            return pkey_label[key]
+        if key.startswith("git_remote:"):
+            return key[len("git_remote:"):]
+        if key.startswith("git_root:"):
+            return os.path.basename(key[len("git_root:"):].rstrip("/")) or key
+        for pref in ("path_hash:", "encoded:"):
+            if key.startswith(pref):
+                return os.path.basename(key[len(pref):].rstrip("/")) or key
+        return key
+
+    def _origin_match(wid: int, c: Any) -> str | None:
+        wkey, d, _kind = meta[wid]
+        for origin in amap:
+            if _is_key(origin):
+                if wkey == origin or c.project_key == origin:
+                    return origin
+            elif d and is_under(d, origin):
+                return origin
+        return None
+
+    origin_map: dict[int, str] = {}
+    pkey_origin: dict[str, str] = {}
+    for wid, c in classified:
+        o = _origin_match(wid, c)
+        if o is not None:
+            origin_map[wid] = o
+            if c.project_key:
+                pkey_origin.setdefault(c.project_key, o)
+    # Rows that share an origin group's project_key (harness collapses) follow.
+    for wid, c in classified:
+        if wid in origin_map:
+            continue
+        if c.project_key and c.project_key in pkey_origin:
+            origin_map[wid] = pkey_origin[c.project_key]
+
+    def _canonical_for(origin: str) -> tuple[tuple[str, str] | None, str | None]:
+        seen = {origin}
+        token = amap[origin].strip()
+        norm = token if _is_key(token) else config_path(token)
+        while norm in amap:
+            if norm in seen:
+                return None, f"alias circular en '{origin}'"
+            seen.add(norm)
+            token = amap[norm].strip()
+            norm = token if _is_key(token) else config_path(token)
+        if _is_key(norm):
+            return (norm, _label_for_key(norm)), None
+        # Path destination: exact own-path match, else the shallowest project
+        # row below it (a project folder whose workspaces are its children).
+        exact: list[tuple[int, Any]] = []
+        under: list[tuple[int, Any]] = []
+        for wid, c in classified:
+            wkey, d, _kind = meta[wid]
+            if not d or not c.project_key:
+                continue
+            if config_path(d) == norm:
+                exact.append((wid, c))
+            elif is_under(d, norm):
+                under.append((wid, c))
+        pick = exact[0][1] if exact else None
+        if pick is None and under:
+            under.sort(key=lambda t: len(meta[t[0]][1]))
+            pick = under[0][1]
+        if pick is None:
+            return None, f"destino inexistente: '{amap[origin]}' (origen '{origin}')"
+        return (pick.project_key, pick.project_label or
+                _label_for_key(pick.project_key)), None
+
+    canon: dict[str, tuple[str, str]] = {}
+    warnings: list[str] = []
+    for origin in amap:
+        res, err = _canonical_for(origin)
+        if res is None:
+            warnings.append(err or f"alias sin destino: '{origin}'")
+        else:
+            canon[origin] = res
+    used = set(origin_map.values())
+    for origin in amap:
+        if origin not in used:
+            warnings.append(f"origen sin coincidencias: '{origin}'")
+
+    out: list[tuple[int, Any]] = []
+    for wid, c in classified:
+        origin = origin_map.get(wid)
+        if origin and origin in canon:
+            key, label = canon[origin]
+            if c.project_key != key or c.role == "orphan":
+                # An aliased orphan (e.g. a container-internal ``/app``) must
+                # become a project row so its history FOLDS into the canonical
+                # group instead of staying in the unclassified drawer.
+                role = "project" if c.role == "orphan" else c.role
+                c = replace(c, project_key=key, project_label=label, role=role)
+        out.append((wid, c))
+    return out, warnings
 
 
 def _portfolio_row(r: Any) -> dict[str, Any]:
@@ -1118,6 +1275,83 @@ class WorkspaceStore:
             wconn.close()
         return out
 
+    @staticmethod
+    def read_history_coverage(
+        workspace_db_path: str | Path,
+        github_db_path: str | Path,
+    ) -> dict[str, dict[str, Any]]:
+        """Per-project git-history coverage: was the full history ingested (#59)?
+
+        Reads ``github.db`` read-only: each repo's ``history_complete`` flag
+        (marked by ``repo add/sync --all``; absent column on a pre-#59 DB reads
+        as NOT complete) and its earliest ingested commit date. Folds onto the
+        same canonical project as the outcome (``resolve_dir`` → classification
+        ``project_key``). Returns ``{project_key: {"complete": bool, "since":
+        "YYYY-MM-DD"|None}}``; ``since`` is the earliest commit across the
+        project's repos. All-or-nothing; ``{}`` when either DB/table is absent.
+        """
+        if not os.path.exists(str(github_db_path)):
+            return {}
+        try:
+            src = sqlite3.connect(f"file:{github_db_path}?mode=ro", uri=True, timeout=5)
+        except sqlite3.OperationalError:
+            return {}
+        try:
+            try:
+                repos = src.execute(
+                    "SELECT id, path, history_complete FROM repos").fetchall()
+            except sqlite3.OperationalError:
+                repos = [(r[0], r[1], 0) for r in
+                         src.execute("SELECT id, path FROM repos").fetchall()]
+            mins = dict(src.execute(
+                "SELECT repo_id, MIN(timestamp) FROM git_commits GROUP BY repo_id"
+            ).fetchall())
+        except sqlite3.OperationalError:
+            src.close()
+            return {}
+        src.close()
+
+        try:
+            wconn = sqlite3.connect(str(workspace_db_path), timeout=5)
+        except sqlite3.OperationalError:
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        key_cache: dict[str, str | None] = {}
+        try:
+            for repo_id, repo_path, complete in repos:
+                if not repo_path:
+                    continue
+                pk = key_cache.get(repo_path, ...)  # type: ignore[arg-type]
+                if pk is ...:
+                    ident = resolve_dir(repo_path)
+                    try:
+                        row = wconn.execute(
+                            """SELECT c.project_key
+                               FROM workspaces w
+                               JOIN workspace_classification c
+                                 ON c.workspace_id = w.id
+                               WHERE w.workspace_key = ?""",
+                            (ident.key,),
+                        ).fetchone()
+                    except sqlite3.OperationalError:
+                        return {}
+                    pk = row[0] if row and row[0] else None
+                    key_cache[repo_path] = pk
+                if pk is None:
+                    continue
+                cell = out.setdefault(pk, {"complete": True, "since": None})
+                if not complete:
+                    cell["complete"] = False
+                ts = mins.get(repo_id)
+                if ts:
+                    dt = _parse_ts(ts)
+                    day = dt.date().isoformat() if dt is not None else str(ts)[:10]
+                    if cell["since"] is None or day < cell["since"]:
+                        cell["since"] = day
+        finally:
+            wconn.close()
+        return out
+
     # --- Derived project state (issue #28 — Unit 2, integrate) ---
 
     # Human-scale quiescence bands for the per-project state chip. UNLIKE
@@ -1147,6 +1381,7 @@ class WorkspaceStore:
         cooling_window_seconds: float | None = None,
         delivery_slack_seconds: float | None = None,
         session_ingest: dict[tuple[str, str], datetime] | None = None,
+        own_emails: list[str] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Derive one honest STATE per canonical project — the epic integrator.
 
@@ -1188,10 +1423,12 @@ class WorkspaceStore:
         Each state carries its ``basis`` (which signal determined it) + the
         contributing counts + ``last_activity``/``age_days`` — a read of evidence
         surfaced with its ground, never a bare asserted flag. Reads ``events.db``
-        and ``github.db`` strictly read-only; the ``delivery_candidates`` table is
+        and ``github.db`` strictly read-only; the         ``delivery_candidates`` table is
         only READ here (this never runs detection or writes it). Returns
         ``{project_key: {state, basis, last_activity, age_days,
-        outcome_measurable, merged_prs, closed_issues, open_issues}}``.
+        outcome_measurable, merged_prs, closed_issues, open_issues, team_only}}``.
+        With ``own_emails`` set, a hot state sustained only by commits of other
+        people carries ``team_only`` (nothing per-person is exposed).
         """
         events_db_path = events_db_path or (self.db_path.parent / "events.db")
         github_db_path = github_db_path or (self.db_path.parent / "github.db")
@@ -1211,12 +1448,18 @@ class WorkspaceStore:
 
         # Readers that open their own connections / take the store lock: call
         # them OUTSIDE the lock block below (never re-enter self._lock).
-        git_last = self._read_git_latest_by_workspace(github_db_path)
+        own = frozenset(
+            e.strip().lower() for e in (own_emails or []) if e and e.strip()
+        )
+        git_last = self._read_git_latest_by_workspace(github_db_path, own or None)
         github_state = self._read_github_state(github_db_path)
 
         # Real last-activity clock per canonical project, folded over every
-        # workspace that maps to it.
+        # workspace that maps to it. ``last_own`` folds the SAME clocks but only
+        # for sources that are always the owner's: session edges, filesystem
+        # touches, and commits authored by one of ``own_emails`` (decisión 1A).
         last_real: dict[str, datetime] = {}
+        last_own: dict[str, datetime] = {}
 
         def _bump(pk: str | None, ts: datetime | None) -> None:
             if pk is None or ts is None:
@@ -1224,6 +1467,13 @@ class WorkspaceStore:
             cur = last_real.get(pk)
             if cur is None or ts > cur:
                 last_real[pk] = ts
+
+        def _bump_own(pk: str | None, ts: datetime | None) -> None:
+            if pk is None or ts is None:
+                return
+            cur = last_own.get(pk)
+            if cur is None or ts > cur:
+                last_own[pk] = ts
 
         # Edge clocks (#56) collected under the lock, folded after it: an edge
         # with no clock of its own may need the session-activity scan, which
@@ -1246,14 +1496,20 @@ class WorkspaceStore:
                 edge_clocks.append(
                     (wid, sid, prov or "", _parse_ts(ats) or _parse_ts(ets))
                 )
-            # Filesystem watcher touches.
+            # Filesystem watcher touches (always the owner's activity).
             for wid, last_seen in conn.execute(
                 "SELECT workspace_id, last_seen FROM path_touches"
             ):
-                _bump(wid_pk.get(wid), _parse_ts(last_seen))
-            # Git commits (already parsed to aware UTC by the reader).
-            for wid, (ts, _sha) in git_last.items():
-                _bump(wid_pk.get(wid), ts)
+                pk = wid_pk.get(wid)
+                ts_fs = _parse_ts(last_seen)
+                _bump(pk, ts_fs)
+                _bump_own(pk, ts_fs)
+            # Git commits (already parsed to aware UTC by the reader). The third
+            # element is the latest commit authored by the owner (or None).
+            for wid, (ts, _sha, own_ts) in git_last.items():
+                pk = wid_pk.get(wid)
+                _bump(pk, ts)
+                _bump_own(pk, own_ts)
             # Gitless delivery heuristic: which projects have a candidate row.
             dc_projects: set[str] = set()
             for (wid,) in conn.execute(
@@ -1271,7 +1527,9 @@ class WorkspaceStore:
         for wid, sid, prov, dt in edge_clocks:
             if dt is None and session_ingest:
                 dt = session_ingest.get((sid, prov))
-            _bump(wid_pk.get(wid), dt)
+            pk = wid_pk.get(wid)
+            _bump(pk, dt)
+            _bump_own(pk, dt)  # a local session edge is always the owner's
 
         out: dict[str, dict[str, Any]] = {}
         for pk, lr in last_real.items():
@@ -1309,6 +1567,19 @@ class WorkspaceStore:
                 else:
                     state, basis = "pausado", "quiescent_no_outcome"
 
+            # Team-latent mark (issue #36, decisión 1A): only meaningful with
+            # own emails configured. A hot state is "team_only" when no own
+            # activity falls inside the band that sustains it — the state's own
+            # window (activo → ACTIVE band; enfriándose → COOLING band). A
+            # recent own commit/session/fs touch clears the mark. Nothing
+            # per-person is ever exposed: just the boolean.
+            team_only = False
+            if own and state in ("activo", "enfriandose"):
+                own_dt = last_own.get(pk)
+                band = active_w if state == "activo" else cooling_w
+                if own_dt is None or (now - own_dt).total_seconds() >= band:
+                    team_only = True
+
             out[pk] = {
                 "state": state,
                 "basis": basis,
@@ -1318,6 +1589,7 @@ class WorkspaceStore:
                 "merged_prs": merged,
                 "closed_issues": closed,
                 "open_issues": open_,
+                "team_only": team_only,
             }
         return out
 
@@ -1670,13 +1942,20 @@ class WorkspaceStore:
         return out
 
     def _read_git_latest_by_workspace(
-        self, github_db_path: str | Path
-    ) -> dict[int, tuple[datetime, str]]:
-        """Latest git commit per workspace_id: ``{wid: (ts, sha)}`` (read-only).
+        self, github_db_path: str | Path,
+        own_emails: frozenset[str] | None = None,
+    ) -> dict[int, tuple[datetime, str, datetime | None]]:
+        """Latest git commit per workspace_id: ``{wid: (ts, sha, own_ts)}``.
 
-        Each repo root is resolved to its workspace via the SAME ladder as the
-        rollup, so git lands on the same node as session/fs activity. Timestamps
-        are parsed to aware UTC (git stores naive-local — see ``_parse_ts``).
+        Read-only. Each repo root is resolved to its workspace via the SAME
+        ladder as the rollup, so git lands on the same node as session/fs
+        activity. Timestamps are parsed to aware UTC (git stores naive-local —
+        see ``_parse_ts``).
+
+        ``own_ts`` (issue #36, decisión 1A) is the latest commit whose author
+        email is in ``own_emails`` (pre-normalized lowercase), or ``None`` when
+        no own commit exists / no emails are configured. The author is NEVER
+        surfaced — only the timestamp is folded, so team-latent holds.
         """
         if not os.path.exists(str(github_db_path)):
             return {}
@@ -1684,24 +1963,32 @@ class WorkspaceStore:
             src = sqlite3.connect(f"file:{github_db_path}?mode=ro", uri=True, timeout=5)
         except sqlite3.OperationalError:
             return {}
-        out: dict[int, tuple[datetime, str]] = {}
+        out: dict[int, tuple[datetime, str, datetime | None]] = {}
         try:
             rows = src.execute(
-                """SELECT r.path, c.sha, c.timestamp
+                """SELECT r.path, c.sha, c.timestamp, c.author_email
                    FROM git_commits c JOIN repos r ON r.id = c.repo_id"""
             ).fetchall()
         except sqlite3.OperationalError:
-            src.close()
-            return {}
+            # Legacy/synthetic DB without ``author_email``: no own-commit signal
+            # is derivable, so the team mark simply stays off (never a false one).
+            try:
+                rows = src.execute(
+                    """SELECT r.path, c.sha, c.timestamp, NULL
+                       FROM git_commits c JOIN repos r ON r.id = c.repo_id"""
+                ).fetchall()
+            except sqlite3.OperationalError:
+                src.close()
+                return {}
         src.close()
         # Resolve repo roots to workspace keys OUTSIDE the lock (disk I/O).
         repo_keys: dict[str, str] = {}
-        for repo_path, _, _ in rows:
+        for repo_path, _, _, _ in rows:
             if repo_path and repo_path not in repo_keys:
                 repo_keys[repo_path] = resolve_dir(repo_path).key
         key_cache: dict[str, int | None] = {}
         with self._lock:
-            for repo_path, sha, ts_raw in rows:
+            for repo_path, sha, ts_raw, email in rows:
                 if not repo_path:
                     continue
                 wid = key_cache.get(repo_path, ...)  # type: ignore[arg-type]
@@ -1718,8 +2005,14 @@ class WorkspaceStore:
                 if ts is None:
                     continue
                 cur = out.get(wid)
-                if cur is None or ts > cur[0]:
-                    out[wid] = (ts, sha)
+                if cur is None:
+                    own = ts if _is_own_email(email, own_emails) else None
+                    out[wid] = (ts, sha, own)
+                else:
+                    own = cur[2]
+                    if _is_own_email(email, own_emails) and (own is None or ts > own):
+                        own = ts
+                    out[wid] = (ts, sha, own) if ts > cur[0] else (cur[0], cur[1], own)
         return out
 
     def get_delivery_candidates(self) -> list[dict[str, Any]]:
@@ -2310,7 +2603,9 @@ class WorkspaceStore:
         return out
 
     def classify_workspaces(
-        self, events_db_path: str | Path | None = None
+        self, events_db_path: str | Path | None = None,
+        project_aliases: dict[str, str] | None = None,
+        reference_containers: list[str] | None = None,
     ) -> dict[str, Any]:
         """Classify every workspace into the #24 taxonomy (read-layer, additive).
 
@@ -2319,17 +2614,30 @@ class WorkspaceStore:
         orphans degenerate/home-config roots. Rebuilds the whole
         ``workspace_classification`` table each pass (it is derived, not durable
         — see the schema note); ``events.db`` is read strictly read-only.
+
+        ``project_aliases`` (decisión 5, #64p2) rewrites the canonical
+        ``project_key`` of an origin folder (and everything under it) to its
+        destination — the origin row disappears as its own project and its
+        history/outcome/state fold onto the canonical one. ``reference_containers``
+        (decisión 4c) mark owner-declared reference folders + children as never-
+        projects (they surface in their own section). Both are read-layer only;
+        the resolver is untouched and an alias to a missing destination only
+        warns (``alias_warnings`` in the result), never fails.
         """
         from collections import Counter
-        from hub.cache.portfolio_classifier import classify, index_real_dir
+        from hub.cache.portfolio_classifier import (
+            classify, config_path, index_real_dir,
+        )
 
         events_db_path = events_db_path or (self.db_path.parent / "events.db")
         home = os.path.expanduser("~")
         session_cwds = self._read_session_cwds(events_db_path)
+        ref_paths = tuple(config_path(p) for p in (reference_containers or []))
 
         with self._lock:
             ws_rows = self._conn.execute(
-                "SELECT id, kind, remote_url, root_path, dir_path FROM workspaces"
+                "SELECT id, kind, remote_url, root_path, dir_path, workspace_key "
+                "FROM workspaces"
             ).fetchall()
             git_roots = [
                 r[0] for r in self._conn.execute(
@@ -2348,16 +2656,29 @@ class WorkspaceStore:
         # classify() itself touches disk (resolve_dir / fs_decode walk real
         # dirs), so every row is computed here, outside the lock too.
         now = _now()
-        cat = Counter()
-        via = Counter()
-        role = Counter()
         classified: list[tuple[int, Any]] = []
-        for wid, kind, remote_url, root_path, dir_path in ws_rows:
+        for wid, kind, remote_url, root_path, dir_path, _wkey in ws_rows:
             c = classify(
                 kind, remote_url, root_path, dir_path,
                 session_cwds=session_cwds, enc_index=enc_index, home=home,
+                reference_paths=ref_paths,
             )
             classified.append((wid, c))
+
+        # Aliases (decisión 5) rewrite the derived project_key BEFORE storage,
+        # so every downstream read (grouped, states, outcome, production) sees
+        # one canonical key — the resolver never learns about aliases.
+        alias_warnings: list[str] = []
+        if project_aliases:
+            classified, alias_warnings = _rewrite_project_aliases(
+                classified, ws_rows, project_aliases)
+            for w in alias_warnings:
+                _log.warning("project_aliases: %s", w)
+
+        cat = Counter()
+        via = Counter()
+        role = Counter()
+        for _wid, c in classified:
             cat[c.category] += 1
             via[c.resolved_via] += 1
             role[c.role] += 1
@@ -2396,9 +2717,13 @@ class WorkspaceStore:
             "by_resolved_via": dict(via),
             "collapsed_harness": role.get("collapse", 0),
             "unclassified": role.get("orphan", 0),
+            "alias_warnings": alias_warnings,
         }
 
-    def get_portfolio_grouped(self, since: str | None = None) -> dict[str, Any]:
+    def get_portfolio_grouped(
+        self, since: str | None = None,
+        temporary_containers: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Hierarchical portfolio: real projects with nested children + orphans.
 
         Folds harness (role=collapse) activity INTO its project at READ TIME —
@@ -2440,7 +2765,8 @@ class WorkspaceStore:
                        JOIN workspaces w ON w.id = c.workspace_id"""
                 ).fetchall()
             except sqlite3.OperationalError:
-                return {"projects": [], "unclassified": [], "summary": {}}
+                return {"projects": [], "unclassified": [], "reference": [],
+                        "temporary": [], "summary": {}}
             # Per-workspace day rows (bounded); folded/aggregated in Python so
             # active_days is DISTINCT across a folded group, not a naive sum.
             roll = conn.execute(
@@ -2483,6 +2809,28 @@ class WorkspaceStore:
         groups: dict[str, dict[str, Any]] = {}
         children: dict[str, list[dict[str, Any]]] = {}
         orphans: list[dict[str, Any]] = []
+        reference: list[dict[str, Any]] = []
+
+        # Rung 4d (decisión 4d): the git repos that are DIRECT children of a
+        # folder, keyed by that folder, so a gitless container with a strict
+        # majority of one known org's repos can attribute to that client.
+        from hub.cache.portfolio_classifier import org_of_remote
+        child_orgs_by_parent: dict[str, list[str]] = {}
+        for (_wid, _role, _cat, _sub, _pk, _pl, _via,
+             _wk, kind, remote_url, root_path, _dir) in cls:
+            if kind == "git_remote" and remote_url and root_path:
+                org = org_of_remote(remote_url)
+                if org:
+                    child_orgs_by_parent.setdefault(
+                        os.path.dirname(os.path.normpath(root_path)), []).append(org)
+
+        def _path_missing(kind, remote_url, root_path, dir_path):
+            """Ruta ya no existe (solo informativo). git_remote no depende de la
+            ruta, así que nunca se marca (decisión 3, #36)."""
+            if kind == "git_remote" or remote_url:
+                return False
+            p = root_path if kind == "git_root" else dir_path
+            return bool(p) and not os.path.exists(p)
 
         for (wid, role, category, subtype, pkey, plabel, via,
              wkey, kind, remote_url, root_path, dir_path) in cls:
@@ -2491,8 +2839,12 @@ class WorkspaceStore:
                 o.update({"workspace_key": wkey, "kind": kind,
                           "remote_url": remote_url, "root_path": root_path,
                           "dir_path": dir_path, "category": category,
-                          "subtype": subtype})
-                orphans.append(o)
+                          "subtype": subtype,
+                          "path_missing": _path_missing(
+                              kind, remote_url, root_path, dir_path)})
+                # "contenedores / referencia" (decisión 4c) is its own section,
+                # next to externos — never the unclassified noise drawer.
+                (reference if subtype == "reference" else orphans).append(o)
                 continue
             if pkey is None:
                 continue
@@ -2533,16 +2885,23 @@ class WorkspaceStore:
                 children.get(pkey, []),
                 key=lambda c: (c.get("last_activity") or ""), reverse=True,
             )
+            anchor = grp["_anchor_path"]
             projects.append({
                 "project_key": pkey,
                 "project_label": grp["project_label"],
                 **agg,
                 "collapsed_harness": grp["collapsed_harness"],
                 "children": kids,
-                # Internal evidence for the client ladder (#29); stripped before
-                # the payload leaves the read wrapper.
+                # Informative only (decisión 3, #36): the folder no longer exists
+                # on disk. git_remote never depends on the path.
+                "path_missing": bool(anchor) and not grp["_remote_url"]
+                                and not os.path.exists(anchor),
+                # Internal evidence for the client ladder (#29/#36-4d); stripped
+                # before the payload leaves the read wrapper.
                 "_remote_url": grp["_remote_url"],
-                "_anchor_path": grp["_anchor_path"],
+                "_anchor_path": anchor,
+                "_child_orgs": child_orgs_by_parent.get(
+                    os.path.dirname(os.path.normpath(anchor or "")) or "\0", []),
             })
 
         projects.sort(
@@ -2551,14 +2910,43 @@ class WorkspaceStore:
             reverse=True,
         )
         orphans.sort(key=lambda o: (o.get("last_activity") or ""), reverse=True)
+        reference.sort(key=lambda o: (o.get("last_activity") or ""), reverse=True)
+
+        # Temporary containers (decisión 3): the DIRECT children move to their
+        # own visible, collapsed "Temporal" section, keeping their state and
+        # history — display grouping only, nothing is retracted.
+        temporary: list[dict[str, Any]] = []
+        if temporary_containers:
+            from hub.cache.portfolio_classifier import config_path
+            temp_paths = [config_path(p) for p in temporary_containers]
+
+            def _is_direct_child(anchor: str | None) -> bool:
+                if not anchor:
+                    return False
+                parent = os.path.dirname(config_path(anchor))
+                return any(parent == tp for tp in temp_paths)
+
+            kept = []
+            for p in projects:
+                if _is_direct_child(p.get("_anchor_path")):
+                    temporary.append(p)
+                else:
+                    kept.append(p)
+            projects = kept
 
         return {
             "projects": projects,
             "unclassified": orphans,
+            "reference": reference,
+            "temporary": temporary,
             "summary": {
-                "projects": len(projects),
-                "collapsed_harness": sum(p["collapsed_harness"] for p in projects),
-                "children": sum(len(p["children"]) for p in projects),
+                "projects": len(projects) + len(temporary),
+                "collapsed_harness": sum(
+                    p["collapsed_harness"] for p in projects + temporary),
+                "children": sum(
+                    len(p["children"]) for p in projects + temporary),
                 "unclassified": len(orphans),
+                "reference": len(reference),
+                "temporary": len(temporary),
             },
         }

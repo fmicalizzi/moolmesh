@@ -286,16 +286,16 @@ class TestWorkspaceRoots:
         )
         save_config(HubConfig(
             hide_project_names=True,
-            client_orgs=["eventsmx", "ddtyi"],
-            personal_orgs=["fmicalizzi"],
+            client_orgs=["acme", "globex"],
+            personal_orgs=["ownerhandle"],
             client_overrides={"git_remote:github.com/x/y": "acme-corp"},
             workspace_roots=[WorkspaceRoot(path="/x", max_depth=2)],
             repos=[RepoConfig(path="/r", remote_url="github.com/o/r",
                               owner="o", repo="r", added_at="2026-01-01")],
         ))
         loaded = load_config()
-        assert loaded.client_orgs == ["eventsmx", "ddtyi"]
-        assert loaded.personal_orgs == ["fmicalizzi"]
+        assert loaded.client_orgs == ["acme", "globex"]
+        assert loaded.personal_orgs == ["ownerhandle"]
         assert loaded.client_overrides == {"git_remote:github.com/x/y": "acme-corp"}
         # Scalars and array-of-tables intact around the new keys.
         assert loaded.hide_project_names is True

@@ -19,21 +19,21 @@ The client attribution **ladder** (first match wins), per project:
        * otherwise → the **externos / referencia** drawer (cloned deps/repos:
          homebrew, alfio-event, …).
   3. **Parent-folder convention (gitless fallback)** — no remote: the first
-     meaningful folder below the container prefix (``~/Downloads/Claude/<X>/…``,
+     meaningful folder below the container prefix (``~/work/<X>/…``,
      via :func:`portfolio_classifier.anchor_path`). ``<X>`` normalized:
        * ∈ ``personal_orgs`` → personal/loose.
        * ∈ ``client_orgs`` → that client node (so a non-git materials folder like
-         ``_eventsmx`` reconciles onto the SAME client as the git products under
+         ``_acme`` reconciles onto the SAME client as the git products under
          it — the headline reconciliation).
        * otherwise → LOOSE, tagged ``shared`` (a shared workspace of the owner's
-         own, e.g. ``PRODUCCIONES`` — NEVER forced under a client; it holds
+         own, e.g. ``SHARED-WORKSPACE`` — NEVER forced under a client; it holds
          possibly-many clients' work and splitting it would need re-anchoring,
          which is out of scope here).
 
 **Case-insensitivity.** Orgs are compared through :func:`_norm_org`
 (``lstrip('_')`` + ``lower()``). The resolver already lowercases every
-``remote_url`` (``github.com/EventsMX/…`` → ``…/eventsmx/…``) and the parent
-folder ``_eventsmx`` normalizes to ``eventsmx`` — so all three feeds land on one
+``remote_url`` (``github.com/Acme/…`` → ``…/acme/…``) and the parent
+folder ``_acme`` normalizes to ``acme`` — so all three feeds land on one
 key regardless of the on-disk casing.
 
 **Flat by default.** With no client configuration AND no known owner identity the
@@ -127,7 +127,7 @@ def suggest_client_orgs(
 def _norm_org(name: str | None) -> str:
     """Normalize an org/folder token for case- and underscore-insensitive match.
 
-    ``_eventsmx`` → ``eventsmx``; ``EventsMX`` → ``eventsmx``. Mirrors the
+    ``_acme`` → ``acme``; ``Acme`` → ``acme``. Mirrors the
     resolver's ``remote_url`` lowercasing so filesystem folder, git org, and
     github.db owner all collapse to one key.
     """
@@ -159,7 +159,7 @@ def _folder_client(anchor: str | None) -> str | None:
 
     The first meaningful folder below the container prefix (``Downloads``,
     ``Claude``, …) — the same anchor the classifier uses — is the client/workspace
-    folder. Returns the raw basename (``_eventsmx``, ``PRODUCCIONES``) so the
+    folder. Returns the raw basename (``_acme``, ``SHARED-WORKSPACE``) so the
     caller can both normalize it (for client matching) and display it verbatim
     (for a shared-workspace label). ``None`` for a degenerate/container root.
     """
@@ -179,6 +179,7 @@ def resolve_client(
     client_orgs: set[str],
     personal_orgs: set[str],
     overrides: dict[str, str],
+    child_orgs: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run the attribution ladder for ONE project.
 
@@ -186,6 +187,12 @@ def resolve_client(
     ``{"bucket": ..., "client_key": ..., "client_label": ...}`` where bucket ∈
     ``{client, personal, shared, external}``. ``client_key``/``client_label`` are
     set only for ``bucket == "client"``.
+
+    ``child_orgs`` (decisión 4d, #36) are the orgs of the git repos that are
+    DIRECT children of this gitless folder. A strict majority (> 50 %, ≥ 2
+    repos) of one KNOWN org attributes the container to that client/personal
+    bucket. A tie or an unknown majority changes nothing; ``client_overrides``
+    still wins over everything.
     """
     # 1. Manual override wins outright.
     if project_key and project_key in overrides:
@@ -213,12 +220,56 @@ def resolve_client(
         if norm in client_orgs:
             return {"bucket": "client", "client_key": f"client:{norm}",
                     "client_label": folder}
+        # 4d. Majority org of the DIRECT git-repo children (strict majority,
+        # ≥ 2 repos, known org). Only upgrades a shared folder; personal and
+        # client folders already resolved above, and unknown majorities change
+        # nothing.
+        majority = _majority_org(child_orgs or [])
+        if majority:
+            if majority in client_orgs:
+                return {"bucket": "client", "client_key": f"client:{majority}",
+                        "client_label": majority}
+            if majority in personal_orgs:
+                return {"bucket": "personal", "client_key": None,
+                        "client_label": None}
         # A grouping folder of the owner's own that is not a known client:
-        # a shared workspace (PRODUCCIONES). Loose, never forced under a client.
+        # a shared workspace (SHARED-WORKSPACE). Loose, never forced under a client.
         return {"bucket": "shared", "client_key": None, "client_label": None}
 
     # No evidence at all (synthetic/encoded project) → loose personal.
     return {"bucket": "personal", "client_key": None, "client_label": None}
+
+
+def _majority_org(child_orgs: list[str]) -> str | None:
+    """The org with a STRICT majority (> 50 %) among direct child repos, if any.
+
+    Requires ≥ 2 repos total: a single repo is not a majority statement. Ties
+    (and 2-vs-2 splits) return ``None`` — the rung then changes nothing.
+    """
+    if len(child_orgs) < 2:
+        return None
+    counts: Counter[str] = Counter(_norm_org(o) for o in child_orgs if _norm_org(o))
+    if not counts:
+        return None
+    top, n = counts.most_common(1)[0]
+    if n >= 2 and n * 2 > len(child_orgs):
+        return top
+    return None
+
+
+def _is_registered_inactive(p: dict[str, Any]) -> bool:
+    """A registered repo that never lit up locally (issue #60).
+
+    Folded into the client's "registrados sin actividad" subgroup instead of
+    rendering as an empty project row: registered in ``github.db`` (the caller
+    annotates ``registered``) with zero session/fs/git touches across all
+    ingested history and no derived state.
+    """
+    if not p.get("registered"):
+        return False
+    if p.get("session_touches") or p.get("fs_touches") or p.get("git_touches"):
+        return False
+    return not p.get("state")
 
 
 def _hotter(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -355,7 +406,7 @@ def group_by_client(
         ref = resolve_client(
             p.get("project_key"), p.get("_remote_url"), p.get("_anchor_path"),
             client_orgs=client_orgs, personal_orgs=personal_orgs,
-            overrides=overrides,
+            overrides=overrides, child_orgs=p.get("_child_orgs"),
         )
         bucket = ref["bucket"]
         if bucket == "client":
@@ -371,8 +422,17 @@ def group_by_client(
             p2["client_bucket"] = bucket
             loose.append(p2)
 
-    nodes = [_aggregate_client(ck, clients[ck]["label"], clients[ck]["members"])
-             for ck in order]
+    nodes = []
+    for ck in order:
+        members = clients[ck]["members"]
+        active = [p for p in members if not _is_registered_inactive(p)]
+        inactive = [p for p in members if _is_registered_inactive(p)]
+        node = _aggregate_client(ck, clients[ck]["label"], active)
+        # Issue #60: registered repos with no activity fold into a collapsed
+        # subgroup — they stay visible, but out of the client KPIs and rows.
+        if inactive:
+            node["inactive"] = inactive
+        nodes.append(node)
     # Hottest / most-active client first (mirror the project sort discipline).
     nodes.sort(
         key=lambda c: (c.get("last_activity") or "",
@@ -392,13 +452,16 @@ def strip_internal(payload: dict[str, Any]) -> None:
     """
     def _clean(rows: list[dict[str, Any]] | None) -> None:
         for r in rows or []:
-            for k in ("_day_set", "_remote_url", "_anchor_path"):
+            for k in ("_day_set", "_remote_url", "_anchor_path", "_child_orgs"):
                 r.pop(k, None)
             _clean(r.get("children"))
 
     for c in payload.get("clients", []):
         members = c.get("projects", [])
         _clean(members)
+        _clean(c.get("inactive"))
     _clean(payload.get("projects"))
     _clean(payload.get("external"))
     _clean(payload.get("unclassified"))
+    _clean(payload.get("reference"))
+    _clean(payload.get("temporary"))

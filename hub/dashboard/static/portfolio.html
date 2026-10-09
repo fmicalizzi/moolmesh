@@ -313,7 +313,7 @@ const STATE_BASIS = {
   quiescent_no_outcome: 'quieto, nada abierto, sin outcome medible',
 };
 // Spanish display names for unclassified subtypes (#64); unknown ones render raw.
-const SUBTYPE_LABEL = {container:'contenedor (ruta interna)'};
+const SUBTYPE_LABEL = {container:'contenedor (ruta interna)', reference:'contenedor (referencia)'};
 function ageStr(d){
   if (d == null) return '';
   if (d < 1) return 'hoy';
@@ -327,8 +327,13 @@ function stateChip(st){
   const age = ageStr(st.age_days);
   const basis = STATE_BASIS[st.basis] || st.basis || '';
   const meas = st.outcome_measurable ? 'con repo (outcome medible)' : 'sin repo (outcome no medible)';
-  const tip = `${m.label} — ${basis}. Última actividad: ${age}. ${meas}.`;
-  return `<span class="st st-${st.state}" title="${esc(tip)}">${m.emoji} ${m.label}${age?` · ${esc(age)}`:''}</span>`;
+  // Team-latent mark (decisión 1A): el estado lo sostiene SOLO actividad ajena
+  // (commits de otras personas), sin sesiones/fs/commits propios en su ventana.
+  // Texto, nunca sólo color; sin nombres ni emails — el equipo queda latente.
+  const team = st.team_only ? ' · equipo' : '';
+  const teamNote = st.team_only ? ' Sostenido sólo por actividad del equipo (commits de otras personas), sin actividad propia en la ventana.' : '';
+  const tip = `${m.label}${st.team_only?' (actividad del equipo)':''} — ${basis}. Última actividad: ${age}. ${meas}.${teamNote}`;
+  return `<span class="st st-${st.state}" title="${esc(tip)}">${m.emoji} ${m.label}${team}${age?` · ${esc(age)}`:''}</span>`;
 }
 
 // Name for display (P3): drop the `github.com/` prefix — it is pure noise and the
@@ -347,7 +352,8 @@ function stateDot(st){
   const age = ageStr(st.age_days);
   const basis = STATE_BASIS[st.basis] || st.basis || '';
   const meas = st.outcome_measurable ? 'con repo (outcome medible)' : 'sin repo (outcome no medible)';
-  const tip = `${m ? m.label : st.state} — ${basis}. Última actividad: ${age}. ${meas}.`;
+  const teamNote = st.team_only ? ' Sostenido sólo por actividad del equipo (commits de otras personas), sin actividad propia en la ventana.' : '';
+  const tip = `${m ? m.label : st.state}${st.team_only?' (actividad del equipo)':''} — ${basis}. Última actividad: ${age}. ${meas}.${teamNote}`;
   return `<span class="pc-dot" style="background:${c}" title="${esc(tip)}"></span>`;
 }
 
@@ -365,16 +371,26 @@ function isMeasurable(p){
 }
 function outcomeCell(p, delivMeasurable){
   const pr=p.merged_prs||0, cl=p.closed_issues||0, op=p.open_issues||0;
-  const measurable = isMeasurable(p);
+  const measurable = isMeasurable(p) || !!p.registered;
   // Filesystem deliverables (#27) sólo cuando el watcher está encendido; si no,
   // el banner fs-mon ya lo explica — no repetimos "— entreg." por fila (era ruido).
   const arch = (delivMeasurable && p.deliverables)
     ? ` · <span class="out-cl" title="Entregables detectados por el watcher de filesystem (ventana)">${p.deliverables} arch.</span>` : '';
-  if (!measurable)
+  if (!measurable){
+    // Tri-estado honesto (#60): remote GitHub sin registrar = "no medido",
+    // distinto de "— sin repo" (sin remote) y de "0 entregado" (repo, cero real).
+    if (p.has_remote)
+      return `<span class="pc-out out-na" title="Remote GitHub sin registrar — entrega NO MEDIDA (distinto de 0 entregado y de sin repo). Registralo con mool repo add.">no medido${arch}</span>`;
     return `<span class="pc-out out-na" title="Sin repo GitHub vinculado — entrega no medible (distinto de 0 entregado)">— sin repo${arch}</span>`;
+  }
   if (!pr && !cl && !op)
     return `<span class="pc-out out-zero" title="Repo GitHub vinculado, aún sin PRs mergeados ni issues cerrados — entrega real: 0">0 entregado${arch}</span>`;
-  const tip = 'Entrega GitHub — totales all-time (no de la ventana). PR mergeados + issues cerrados / abiertos, sumando a todos los contribuidores.';
+  // #59: donde el historial git está acotado (sin repo sync --all), el total NO
+  // es all-time — se rotula con la fecha del primer commit ingerido.
+  const scope = (p.outcome_complete === false)
+    ? (p.outcome_since ? `desde ${p.outcome_since} (historial parcial)` : 'desde el registro (historial parcial)')
+    : 'all-time';
+  const tip = `Entrega GitHub — totales ${scope} (no de la ventana). PR mergeados + issues cerrados / abiertos, sumando a todos los contribuidores.`;
   const parts = [];
   if (pr) parts.push(`<span class="out-pr"><b>${pr}</b> PR</span>`);
   if (cl) parts.push(`<span class="out-cl">${cl} cerr.</span>`);
@@ -461,7 +477,9 @@ function renderExec(){
   const nAct = sc.counts.activo || 0;
   const nEnt = sc.counts.entregado || 0;
   const nEst = sc.counts.estancado || 0;
-  const measurable = projects.filter(isMeasurable);
+  // Medible = repo registrado o cualquier conteo/estado de repo (mismo predicado
+  // del outcomeCell, #60). Un remote sin registrar NO es medible.
+  const measurable = projects.filter(p => isMeasurable(p) || p.registered);
   const totalPR = projects.reduce((a,p)=>a+(p.merged_prs||0),0);
   const kpiEl = document.getElementById('kpis');
   let kpis = '';
@@ -571,9 +589,12 @@ function renderExec(){
   const delEl = document.getElementById('chart-del');
   const topDel = measurable.slice().sort((a,b)=>b.merged_prs-a.merged_prs).slice(0,6);
   const notMeasN = projects.length - measurable.length;
+  // Desglose honesto del gap (#60): remote sin registrar ("no medido") ≠ sin repo.
+  const noMedidoN = projects.filter(p => p.has_remote && !isMeasurable(p) && !p.registered).length;
+  const sinRepoN = notMeasN - noMedidoN;
   let delHtml = '';
   if (!measurable.length){
-    delHtml = '<div class="chart-empty">Ningún proyecto de la ventana tiene repo vinculado — entrega no medible.</div>';
+    delHtml = '<div class="chart-empty">Ningún proyecto de la ventana tiene repo registrado — entrega no medible.</div>';
   } else {
     const maxDel = Math.max(1, topDel[0].merged_prs);
     delHtml = topBars(topDel, maxDel, 'fill-del', p=>p.merged_prs, chartName);
@@ -581,14 +602,18 @@ function renderExec(){
   // The outcome gap made VISIBLE in-chart: a hatched, not-measurable track — so a
   // 0-PR project with no repo is never implied to have "delivered nothing".
   if (notMeasN){
+    const parts = [];
+    if (noMedidoN) parts.push(`${noMedidoN} no medidos (remote sin registrar)`);
+    if (sinRepoN) parts.push(`${sinRepoN} sin repo`);
     delHtml += `<div class="tbar tbar-na">
-      <div class="tbar-top"><span class="tbar-name" title="Proyectos sin repo GitHub vinculado — entrega no medible (distinto de 0 entregado)">${notMeasN} proyectos · sin repo</span><span class="tbar-v">n/m</span></div>
+      <div class="tbar-top"><span class="tbar-name" title="Proyectos sin entrega medible — ${esc(parts.join(' · '))}. Distinto de 0 entregado.">${notMeasN} proyectos · ${parts.length? esc(parts.join(' · ')) : 'sin repo'}</span><span class="tbar-v">n/m</span></div>
       <div class="tbar-track"></div>
     </div>`;
   }
-  delHtml += `<div class="chart-note"><b>${measurable.length}</b> de <b>${projects.length}</b> proyectos con repo vinculado (entrega medible). `
-    + `Los ${notMeasN} restantes no ingirieron repo — <b>no medible</b>, distinto de 0 entregado. `
-    + `Los conteos de PR son all-time. Vinculá un repo con <code>mool workspace root add</code> / repo add.</div>`;
+  delHtml += `<div class="chart-note"><b>${measurable.length}</b> de <b>${projects.length}</b> proyectos con repo registrado (entrega medible). `
+    + (noMedidoN ? `Los <b>${noMedidoN}</b> con remote sin registrar quedan <b>no medidos</b>; ` : '')
+    + `los ${sinRepoN} sin repo GitHub — <b>no medible</b>, distinto de 0 entregado. `
+    + `Los conteos de PR son all-time donde el historial está completo; donde no, cada fila rotula <b>desde &lt;fecha&gt;</b> (<code>mool repo sync --all</code> lo completa). Vinculá un repo con <code>mool repo add</code>.</div>`;
   delEl.innerHTML = delHtml;
 }
 
@@ -613,7 +638,7 @@ function renderProduction(data, daysN){
     <span>proyecto</span>
     <span class="h-num" title="Sesiones en la ventana (esfuerzo, no duración)">ses</span>
     <span class="h-num" title="Días activos en la ventana">d</span>
-    <span title="Entrega GitHub — PR mergeados / issues cerrados / abiertos (all-time)">entrega</span>
+    <span title="Entrega GitHub — PR mergeados / issues cerrados / abiertos. All-time donde el historial está completo; donde no, 'desde &lt;fecha del primer commit ingerido&gt;' (repo sync --all completa)">entrega</span>
     <span title="Sesiones por día en la ventana; color = proveedor dominante, intensidad = volumen">producción · ${daysN}d</span>
   </div>`;
   const rows = projects.map(p =>
@@ -669,6 +694,11 @@ function projRow(p){
   const harnessChip = p.collapsed_harness ? `<span class="chip">+${p.collapsed_harness} harness</span>` : '';
   const hasKids = (p.children||[]).length > 0;
   const kidsChip = hasKids ? `<span class="chip">${p.children.length} anidadas</span>` : '';
+  // Carpeta ya no existe (decisión 3, #36): informativo — el nodo se conserva
+  // con su historia. Nunca para git_remote, que no depende de la ruta.
+  const missChip = p.path_missing
+    ? `<span class="chip" title="La ruta de esta carpeta ya no existe en disco; el nodo se conserva con su historia">carpeta ya no existe</span>`
+    : '';
   // Only projects with nested children are expandable (empty caret gutter keeps
   // names column-aligned — #24 caret fix).
   const cls = hasKids ? 'proj' : 'proj leaf';
@@ -679,7 +709,7 @@ function projRow(p){
       <span class="caret">${caret}</span>
       ${stateDot(p.state)}
       <span class="proj-name" title="${esc(p.project_label || '—')}">${esc(cleanName(p.project_label))}</span>
-      ${stateChip(p.state)}${harnessChip}${kidsChip}
+      ${stateChip(p.state)}${harnessChip}${kidsChip}${missChip}
       <span class="proj-meta">${badges(p.sources)} ${metaStr(p)}</span>
     </div>
     ${hasKids ? `<div class="kids">${kids}</div>` : ''}
@@ -693,13 +723,19 @@ function clientNode(c){
   const outStr = (out.merged_prs||out.closed_issues||out.open_issues)
     ? `<span class="client-out" title="Entrega GitHub del cliente (todos los autores sumados, all-time)">${out.merged_prs||0} PR · ${out.closed_issues||0} issues cerrados · ${out.open_issues||0} abiertos</span>` : '';
   const members = (c.projects||[]).map(projRow).join('');
+  // Registrados sin actividad (#60): plegados, visibles, fuera de los KPIs del
+  // cliente. No se borra nada — se agrupa.
+  const inactive = c.inactive||[];
+  const inactiveBlock = inactive.length
+    ? `<details class="unclassified"><summary>registrados sin actividad (${inactive.length})</summary><div style="padding-left:6px">${inactive.map(projRow).join('')}</div></details>`
+    : '';
   return `<details class="client">
     <summary>
       <span class="client-caret">▶</span>
       <span class="client-name">${esc(c.client_label || '—')}${stateChip(c.state)}<span class="chip">${(c.projects||[]).length} proyectos</span></span>
       <span class="client-meta">${badges(c.sources)} ${metaStr(c)}${outStr}</span>
     </summary>
-    <div class="client-body">${members}</div>
+    <div class="client-body">${members}${inactiveBlock}</div>
   </details>`;
 }
 
@@ -718,7 +754,9 @@ async function loadPortfolio(){
       active: clients.filter(c => c.state && (c.state.state==='activo' || c.state.state==='enfriandose')).length,
     };
     renderExec();
-    if (!clients.length && !projects.length && !external.length && !(data.unclassified||[]).length){
+    if (!clients.length && !projects.length && !external.length
+        && !(data.unclassified||[]).length && !(data.reference||[]).length
+        && !(data.temporary||[]).length){
       body.innerHTML = '<div class="empty">Sin datos. Corré: <code>mool workspace rollup</code></div>'; return;
     }
     const s = data.summary||{};
@@ -726,6 +764,8 @@ async function loadPortfolio(){
                    `${s.children||0} anidadas`];
     if (s.clients) parts.push(`${s.clients} cliente(s)`);
     if (s.external) parts.push(`${s.external} externo(s)`);
+    if (s.reference) parts.push(`${s.reference} referencia`);
+    if (s.temporary) parts.push(`${s.temporary} temporal`);
     parts.push(`${s.unclassified||0} sin clasificar`);
     sum.textContent = parts.join(' · ');
 
@@ -742,11 +782,26 @@ async function loadPortfolio(){
       html += `<details class="unclassified"><summary>Externos / referencia (${external.length})</summary><div style="padding-left:6px">` +
         external.map(projRow).join('') + `</div></details>`;
     }
+    // 3b. Contenedores / referencia (decisión 4c): carpetas declaradas por el
+    // owner que sólo contienen clones/referencias — ni ellas ni sus hijos son
+    // proyectos. Funciona aunque la carpeta ya no exista.
+    const reference = data.reference||[];
+    if (reference.length){
+      html += `<details class="unclassified"><summary>Contenedores / referencia (${reference.length})</summary><ul>` +
+        reference.map(o => `<li>[${esc(SUBTYPE_LABEL[o.subtype] || o.subtype)}] ${esc(label(o))}${o.path_missing?' <span class="muted">(carpeta ya no existe)</span>':''}</li>`).join('') + `</ul></details>`;
+    }
+    // 3c. Temporal (decisión 3): hijos directos de los contenedores temporales,
+    // visibles y plegados, CONSERVANDO su estado y su historia.
+    const temporary = data.temporary||[];
+    if (temporary.length){
+      html += `<details class="unclassified"><summary>Temporal (${temporary.length})</summary><div style="padding-left:6px">` +
+        temporary.map(projRow).join('') + `</div></details>`;
+    }
     // 4. Sin clasificar / herramientas.
     const orphans = data.unclassified||[];
     if (orphans.length){
       html += `<details class="unclassified"><summary>Sin clasificar / herramientas (${orphans.length})</summary><ul>` +
-        orphans.map(o => `<li>[${esc(SUBTYPE_LABEL[o.subtype] || o.subtype)}] ${esc(label(o))}</li>`).join('') + `</ul></details>`;
+        orphans.map(o => `<li>[${esc(SUBTYPE_LABEL[o.subtype] || o.subtype)}] ${esc(label(o))}${o.path_missing?' <span class="muted">(carpeta ya no existe)</span>':''}</li>`).join('') + `</ul></details>`;
     }
     body.innerHTML = html;
   } catch(e){ body.innerHTML = '<div class="empty">Error al cargar.</div>'; }

@@ -713,7 +713,7 @@ class TestGithubOutcome:
                 {"repo_id": 1, "state": "closed", "is_pull_request": 1,
                  "pr_merged_at": now, "author": "owner"},
                 {"repo_id": 1, "state": "closed", "is_pull_request": 1,
-                 "pr_merged_at": now, "author": "avillegas"},
+                 "pr_merged_at": now, "author": "initech"},
                 {"repo_id": 1, "state": "closed", "is_pull_request": 1,
                  "pr_merged_at": None, "author": "owner"},
                 # r1: 1 closed issue, 1 open issue
@@ -721,7 +721,7 @@ class TestGithubOutcome:
                 {"repo_id": 1, "state": "open"},
                 # r2: 1 merged PR, 2 open issues
                 {"repo_id": 2, "state": "closed", "is_pull_request": 1,
-                 "pr_merged_at": now, "author": "almacreativa"},
+                 "pr_merged_at": now, "author": "globex"},
                 {"repo_id": 2, "state": "open"},
                 {"repo_id": 2, "state": "open"},
             ],
