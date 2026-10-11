@@ -377,6 +377,97 @@ class TestGithubBackfillFailureMessage:
         assert _sync_github_issues(store, 1, _repo("a"), client) == (1, 200)
 
 
+class TestSingleRepoGithubFailureReason:
+    """#72 — `repo add --all` and `repo sync --all` on ONE repo say why GitHub
+    failed, in the same words as --all-registered (#69). Behaviour that stays:
+    the repo is left in partial history and the exit code is 0 (the local git
+    history WAS ingested; only a git failure exits non-zero)."""
+
+    def _client(self, answer):
+        client = MagicMock()
+        client.list_issues.side_effect = [answer]
+        return client
+
+    def _run_sync(self, answer, tmp_path, capsys):
+        from hub.cli import cmd_repo_sync
+        repo = _repo("a")
+        repo.path = str((tmp_path / "a").resolve())
+        store = MagicMock()
+        store.get_repo_id.return_value = 1
+        harvester = MagicMock()
+        harvester.ingest_history.return_value = 3
+        args = argparse.Namespace(path=str(tmp_path / "a"), days=14,
+                                  all_history=True, no_github=False)
+        with patch("hub.config.load_config", return_value=MagicMock(repos=[repo])), \
+             patch("hub.config.get_github_token", return_value="tok"), \
+             patch("hub.cache.git_store.GitStore", return_value=store), \
+             patch("hub.harvesters.git_harvester.GitHarvester", return_value=harvester), \
+             patch("hub.integrations.github_client.GitHubClient",
+                   return_value=self._client(answer)):
+            try:
+                cmd_repo_sync(args)
+                code = 0
+            except SystemExit as exc:
+                code = exc.code
+        return code, capsys.readouterr().out, store
+
+    def _run_add(self, answer, tmp_path, capsys):
+        from hub.cli import cmd_repo_add
+        repo = _repo("a")
+        store = MagicMock()
+        store.get_repo_id.return_value = 1
+        harvester = MagicMock()
+        harvester.ingest_history.return_value = 3
+        args = argparse.Namespace(path=str(tmp_path), days=14, all_history=True,
+                                  no_github=False)
+        with patch("hub.config.add_repo", return_value=repo), \
+             patch("hub.config.load_config", return_value=MagicMock(repos=[])), \
+             patch("hub.config.save_config"), \
+             patch("hub.config.get_github_token", return_value="tok"), \
+             patch("hub.cache.git_store.GitStore", return_value=store), \
+             patch("hub.harvesters.git_harvester.GitHarvester", return_value=harvester), \
+             patch("hub.integrations.github_client.GitHubClient",
+                   return_value=self._client(answer)):
+            try:
+                cmd_repo_add(args)
+                code = 0
+            except SystemExit as exc:
+                code = exc.code
+        return code, capsys.readouterr().out, store
+
+    @pytest.mark.parametrize("runner", ["_run_sync", "_run_add"])
+    @pytest.mark.parametrize("status,fragment", [
+        (404, "GitHub 404 — repo not found or not visible to the token"),
+        (403, "GitHub 403 — token lacks access or rate limit reached"),
+        (401, "GitHub 401 — token invalid or expired"),
+        (0, "GitHub history failed (no response from GitHub)"),
+    ])
+    def test_names_the_reason_and_keeps_partial_and_exit_zero(
+            self, runner, status, fragment, tmp_path, capsys):
+        code, out, store = getattr(self, runner)((status, None, None), tmp_path, capsys)
+
+        assert code == 0                                    # unchanged
+        assert f"{fragment} {LOCAL_OK}" in out
+        assert "historia parcial" in out                    # unchanged
+        store.mark_history_complete.assert_not_called()
+
+    @pytest.mark.parametrize("runner", ["_run_sync", "_run_add"])
+    def test_success_prints_no_failure_line(self, runner, tmp_path, capsys):
+        ok = (200, [{"number": 1, "title": "t", "state": "open",
+                     "created_at": "x", "updated_at": "y"}], None)
+        code, out, store = getattr(self, runner)(ok, tmp_path, capsys)
+
+        assert code == 0
+        assert "GitHub" not in out and "historia completa" in out
+        store.mark_history_complete.assert_called_once_with(1)
+
+    @pytest.mark.parametrize("runner", ["_run_sync", "_run_add"])
+    def test_a_client_exception_reads_as_no_response(self, runner, tmp_path, capsys):
+        code, out, _ = getattr(self, runner)(RuntimeError("boom"), tmp_path, capsys)
+        assert code == 0
+        assert f"GitHub history failed (no response from GitHub) {LOCAL_OK}" in out
+
+
 class TestHistoryCoverage:
     def _fixture(self, tmp_path, *, complete: bool, commits: list[str]):
         repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")

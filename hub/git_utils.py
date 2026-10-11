@@ -67,6 +67,13 @@ def parse_github_remote(url: str) -> tuple[str, str] | None:
     - git://github.com/owner/repo
     - repos con punto en el nombre (owner/my.repo)
 
+    Dos formas "laxas" se mantienen A PROPÓSITO (decisión #72, fijadas con tests):
+    - sin esquema, ``github.com/owner/repo`` (también ``github.com:owner/repo``):
+      es el formato canónico que ``add_repo`` guarda en ``[[repos]].remote_url``
+      y con el que el resto del sistema identifica un repo registrado —
+      rechazarla rompería repos ya registrados;
+    - ``www.github.com`` (con o sin esquema): inofensivo, sigue siendo GitHub.
+
     Normaliza con strip(), sin barras finales y sin un único ``.git`` final.
     Otros hosts (gitlab.com, notgithub.com, github.com.evil.com) → None.
 

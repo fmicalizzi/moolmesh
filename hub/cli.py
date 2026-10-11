@@ -876,7 +876,7 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
         if getattr(args, "install_mcp", False):
             if blocker:
                 print(red(f"  ✗ --install-deps cannot install here: {blocker}"))
-                return
+                sys.exit(1)
             if dry_run:
                 # Show what a real run would do next, as if the install worked.
                 print(dim(f"  Dry run — would run: {_display_cmd(inject_cmd)}"))
@@ -890,10 +890,10 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
                     print(green("  ✓ mcp installed successfully.\n"))
                 except FileNotFoundError:
                     print(red(f"  ✗ Failed: '{inject_cmd[0]}' not found in PATH"))
-                    return
+                    sys.exit(1)
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
                     print(red(f"  ✗ Failed: {exc}"))
-                    return
+                    sys.exit(1)
         else:
             if blocker:
                 print(dim(f"  {blocker}"))
@@ -1103,12 +1103,14 @@ def _write_mcp_json_config(config_path, config_block: dict, client_name: str, ar
     existing: dict = {}
     if config_path.exists():
         try:
-            existing = json.loads(config_path.read_text())
-        except (json.JSONDecodeError, OSError) as exc:
+            existing = json.loads(config_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            # The file is the user's: leave it untouched and say how to add the
+            # server by hand. Non-zero because the registration did not happen.
             print(red(f"  ✗ Cannot parse {config_path}: {exc}"))
-            print(dim("  Add manually:"))
+            print(dim(f"  Left {config_path} unchanged. Add manually:"))
             _print_mcp_json(config_block)
-            return
+            sys.exit(1)
 
     mcp_servers = existing.setdefault("mcpServers", {})
     already = "moolmesh" in mcp_servers
@@ -1118,7 +1120,7 @@ def _write_mcp_json_config(config_path, config_block: dict, client_name: str, ar
         print()
     mcp_servers["moolmesh"] = config_block
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(existing, indent=2) + "\n")
+    config_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     verb = "Updated" if already else "Written to"
     print(green(f"  ✓ {verb} {config_path}"))
     print(dim(f"  Restart {client_name} to load the new server."))
@@ -1137,10 +1139,12 @@ def _write_opencode_mcp(config_path, oc_block: dict, args) -> None:
     existing: dict = {}
     if config_path.exists():
         try:
-            existing = json.loads(config_path.read_text())
-        except (json.JSONDecodeError, OSError) as exc:
+            existing = json.loads(config_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
             print(red(f"  ✗ Cannot parse {config_path}: {exc}"))
-            return
+            print(dim(f"  Left {config_path} unchanged. Add under \"mcp\" manually:"))
+            print(json.dumps({"mcp": {"moolmesh": oc_block}}, indent=2))
+            sys.exit(1)
 
     mcp = existing.setdefault("mcp", {})
     already = "moolmesh" in mcp
@@ -1149,7 +1153,7 @@ def _write_opencode_mcp(config_path, oc_block: dict, args) -> None:
         print(dim("  Overwriting with updated config."))
         print()
     mcp["moolmesh"] = oc_block
-    config_path.write_text(json.dumps(existing, indent=2) + "\n")
+    config_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     verb = "Updated" if already else "Written to"
     print(green(f"  ✓ {verb} {config_path}"))
     print(dim("  Restart OpenCode to load the new server."))
@@ -1175,7 +1179,7 @@ def _codex_mcp_entry(server_cmd: list) -> str:
 
 
 def _write_codex_mcp(config_path, server_cmd: list, args) -> None:
-    from hub.colors import green, yellow, dim
+    from hub.colors import green, yellow, red, dim
 
     entry = _codex_mcp_entry(server_cmd)
     shown = "".join(f"  {line}\n" for line in entry.splitlines())
@@ -1186,7 +1190,14 @@ def _write_codex_mcp(config_path, server_cmd: list, args) -> None:
         print(f"\n{shown}")
         return
 
-    content = config_path.read_text() if config_path.exists() else ""
+    try:
+        content = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    except (UnicodeDecodeError, OSError) as exc:
+        # Appending to a file we could not read would rewrite it blind.
+        print(red(f"  ✗ Cannot read {config_path}: {exc}"))
+        print(dim(f"  Left {config_path} unchanged. Add manually:"))
+        print(f"\n{shown}")
+        sys.exit(1)
     already = "mcp_servers.moolmesh" in content
 
     if already:
@@ -1195,7 +1206,7 @@ def _write_codex_mcp(config_path, server_cmd: list, args) -> None:
         print(f"\n{shown}")
         return
 
-    config_path.write_text(content + "\n" + entry)
+    config_path.write_text(content + "\n" + entry, encoding="utf-8")
     print(green(f"  ✓ Written to {config_path}"))
     print(dim("  Restart Codex to load the new server."))
 
@@ -1205,9 +1216,9 @@ def _claude_code_has_mcp_user(claude_bin: str, name: str) -> bool:
     from pathlib import Path
     claude_json = Path.home() / ".claude.json"
     try:
-        data = json.loads(claude_json.read_text())
+        data = json.loads(claude_json.read_text(encoding="utf-8"))
         return name in data.get("mcpServers", {})
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, OSError):
         return False
 
 
@@ -2470,6 +2481,10 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
         gh_note = f", {res['items']} issues/PRs" if res["items"] else ""
         complete = "historia completa" if res["complete"] else "historia parcial"
         print(f"  Ingested {res['commits']} commits{gh_note} (full history, {complete})")
+        if res["reason"] == "github":
+            # Same wording as --all-registered (#69); the add itself succeeded and
+            # the exit code stays 0 — the repo is left in partial history.
+            print(yellow(f"  {_github_failure(res.get('http_status'))}"))
         return
 
     count = harvester.ingest_history(path, days=args.days)
@@ -2571,6 +2586,10 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
         complete = "historia completa" if res["complete"] else "historia parcial"
         print(green(f"Synced: {res['commits']} new commits{gh_note} "
                     f"(full history, {complete})"))
+        if res["reason"] == "github":
+            # Same wording as --all-registered (#69); the exit code stays 0 as
+            # before — the repo is left in partial history and a rerun resumes.
+            print(yellow(f"  {_github_failure(res.get('http_status'))}"))
         return
 
     count = harvester.ingest_history(path, days=days)

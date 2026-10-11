@@ -620,8 +620,13 @@ class TestInstallPlan:
 
 
 def _setup(monkeypatch_method, install=False, dry_run=False, *, mcp_missing=True,
-           pip=True, uv=True, install_exc=None):
-    """Run `mcp setup json` with a given install method; return (calls, output)."""
+           pip=True, uv=True, install_exc=None, with_code=False):
+    """Run `mcp setup json` with a given install method; return (calls, output).
+
+    With ``with_code=True`` returns ``(calls, output, exit_code)`` instead (0 when
+    the command returned normally). Without it a ``SystemExit`` propagates, so a
+    test that doesn't expect a failing exit can't hide one (#72).
+    """
     import io
     import contextlib
     calls = []
@@ -638,13 +643,21 @@ def _setup(monkeypatch_method, install=False, dry_run=False, *, mcp_missing=True
 
     which = lambda name: f"/bin/{name}" if (name == "uv" and uv) else None  # noqa: E731
     buf = io.StringIO()
+    code = 0
     with patch("hub.cli._detect_install_method", return_value=monkeypatch_method), \
          patch("hub.cli._has_pip", return_value=pip), \
          patch("subprocess.run", side_effect=fake_run), \
          patch("shutil.which", side_effect=which), \
          contextlib.redirect_stdout(buf):
-        cmd_mcp_setup(_make_args(target="json", install_mcp=install, dry_run=dry_run))
+        try:
+            cmd_mcp_setup(_make_args(target="json", install_mcp=install, dry_run=dry_run))
+        except SystemExit as exc:
+            if not with_code:
+                raise
+            code = exc.code
     installs = [c for c in calls if c[1:3] != ["-c", "import mcp"]]
+    if with_code:
+        return installs, buf.getvalue(), code
     return installs, buf.getvalue()
 
 
@@ -677,7 +690,8 @@ class TestInstallDeps:
         assert '"mcpServers"' in out                # carried on to the target
 
     def test_venv_without_pip_fails_with_the_cause_and_installs_nothing(self):
-        installs, out = _setup("venv", install=True, pip=False)
+        installs, out, code = _setup("venv", install=True, pip=False, with_code=True)
+        assert code == 1                            # #72: a failed install is not success
         assert installs == []
         assert "cannot install here" in out
         assert "no pip" in out and "uv-created" in out
@@ -690,21 +704,44 @@ class TestInstallDeps:
         assert "Use --install-deps" not in out
 
     def test_uv_tool_without_uv_on_path(self):
-        installs, out = _setup("uv-tool", install=True, uv=False)
+        installs, out, code = _setup("uv-tool", install=True, uv=False, with_code=True)
+        assert code == 1
         assert installs == []
         assert "'uv' is not in PATH" in out
         assert f'uv tool install --with "{MCP_SPEC}" moolmesh --force' in out
 
     def test_install_failure_is_reported_without_traceback(self):
-        installs, out = _setup(
+        installs, out, code = _setup(
             "uv-tool", install=True,
-            install_exc=subprocess.CalledProcessError(2, ["uv"]))
+            install_exc=subprocess.CalledProcessError(2, ["uv"]), with_code=True)
+        assert code == 1
         assert len(installs) == 1 and "Failed" in out
         assert '"mcpServers"' not in out
 
     def test_missing_installer_binary_says_so(self):
-        _, out = _setup("pipx", install=True, install_exc=FileNotFoundError("pipx"))
+        _, out, code = _setup("pipx", install=True,
+                              install_exc=FileNotFoundError("pipx"), with_code=True)
+        assert code == 1
         assert "'pipx' not found in PATH" in out
+
+    def test_install_timeout_exits_non_zero_too(self):
+        _, out, code = _setup(
+            "pipx", install=True, with_code=True,
+            install_exc=subprocess.TimeoutExpired(["pipx"], 120))
+        assert code == 1
+        assert "Failed" in out and '"mcpServers"' not in out
+
+    @pytest.mark.parametrize("method", list(EXPECTED_INSTALL))
+    def test_hint_without_install_deps_still_exits_zero(self, method):
+        """The hint is informational: only an attempted --install-deps can fail."""
+        _, _, code = _setup(method, with_code=True)
+        assert code == 0
+        _, _, code = _setup("venv", pip=False, with_code=True)   # blocked, but just a hint
+        assert code == 0
+
+    def test_successful_install_deps_exits_zero(self):
+        _, _, code = _setup("pipx", install=True, with_code=True)
+        assert code == 0
 
     def test_dry_run_with_install_deps_runs_nothing_but_shows_the_plan(self):
         installs, out = _setup("uv-tool", install=True, dry_run=True)
@@ -715,3 +752,187 @@ class TestInstallDeps:
     def test_mcp_present_skips_everything(self):
         installs, out = _setup("uv-tool", install=True, mcp_missing=False)
         assert installs == [] and "not installed" not in out
+
+
+# ── #72 · UTF-8 client configs; never overwrite what can't be decoded ──────
+
+import hashlib
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+BLOCK = {"command": "/opt/u/venv/bin/python", "args": ["-m", "hub.mcp_server"]}
+OC_BLOCK = {"type": "local", "command": ["/opt/u/venv/bin/python", "-m", "hub.mcp_server"],
+            "enabled": True}
+# Non-ASCII on purpose: names and paths users really have.
+NON_ASCII = {"mcpServers": {"otro-ñandú": {"command": "/Users/u/Proyección/bin/srv"}},
+             "nota": "configuración — año 2026 ✓"}
+BAD_BYTES = b'{"mcpServers": {"x": "\xff\xfe\x81 not utf-8"}}'
+
+
+def _write_utf8(path: Path, data: dict) -> None:
+    path.write_bytes(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
+
+def _run_writer(writer, *a):
+    """Run a config writer, returning (exit_code, stdout)."""
+    import contextlib
+    import io
+    buf = io.StringIO()
+    code = 0
+    with contextlib.redirect_stdout(buf):
+        try:
+            writer(*a)
+        except SystemExit as exc:
+            code = exc.code
+    return code, buf.getvalue()
+
+
+def _args(**kw):
+    return _make_args(**kw)
+
+
+class TestUserConfigEncoding:
+    def test_json_writer_keeps_non_ascii_content_intact(self, tmp_path):
+        from hub.cli import _write_mcp_json_config
+        cfg = tmp_path / "mcp.json"
+        _write_utf8(cfg, NON_ASCII)
+
+        code, _ = _run_writer(_write_mcp_json_config, cfg, BLOCK, "Cursor", _args())
+
+        assert code == 0
+        written = json.loads(cfg.read_text(encoding="utf-8"))
+        assert written["nota"] == NON_ASCII["nota"]
+        assert written["mcpServers"]["otro-ñandú"] == NON_ASCII["mcpServers"]["otro-ñandú"]
+        assert written["mcpServers"]["moolmesh"] == BLOCK
+
+    def test_opencode_writer_keeps_non_ascii_content_intact(self, tmp_path):
+        from hub.cli import _write_opencode_mcp
+        cfg = tmp_path / "opencode.json"
+        _write_utf8(cfg, {"mcp": {"ñandú": {"type": "local"}}, "tema": "oscuro ✓"})
+
+        code, _ = _run_writer(_write_opencode_mcp, cfg, OC_BLOCK, _args())
+
+        assert code == 0
+        written = json.loads(cfg.read_text(encoding="utf-8"))
+        assert written["tema"] == "oscuro ✓" and "ñandú" in written["mcp"]
+        assert written["mcp"]["moolmesh"] == OC_BLOCK
+
+    def test_codex_writer_appends_to_a_non_ascii_toml(self, tmp_path):
+        from hub.cli import _write_codex_mcp
+        cfg = tmp_path / "config.toml"
+        cfg.write_bytes('model = "gpt"\n# configuración de año ✓\n'.encode("utf-8"))
+
+        code, _ = _run_writer(_write_codex_mcp, cfg, [BLOCK["command"], *BLOCK["args"]], _args())
+
+        assert code == 0
+        parsed = tomllib.loads(cfg.read_text(encoding="utf-8"))
+        assert parsed["model"] == "gpt"
+        assert parsed["mcp_servers"]["moolmesh"]["args"] == BLOCK["args"]
+        assert "configuración de año ✓" in cfg.read_text(encoding="utf-8")
+
+    def test_writers_pass_utf8_explicitly(self, tmp_path, monkeypatch):
+        """Every read/write of a client config names its encoding: the locale
+        default (cp1252 on Windows) would corrupt non-ASCII content."""
+        from hub.cli import _write_codex_mcp, _write_mcp_json_config, _write_opencode_mcp
+        calls = []
+        real_read, real_write = Path.read_text, Path.write_text
+
+        def read(self, *a, **kw):
+            calls.append(("read", kw.get("encoding")))
+            return real_read(self, *a, **kw)
+
+        def write(self, data, *a, **kw):
+            calls.append(("write", kw.get("encoding")))
+            return real_write(self, data, *a, **kw)
+
+        monkeypatch.setattr(Path, "read_text", read)
+        monkeypatch.setattr(Path, "write_text", write)
+        j, o, t = tmp_path / "a.json", tmp_path / "b.json", tmp_path / "c.toml"
+        for f in (j, o):
+            _write_utf8(f, {})
+        t.write_text("", encoding="utf-8")
+        calls.clear()
+
+        _run_writer(_write_mcp_json_config, j, BLOCK, "Cursor", _args())
+        _run_writer(_write_opencode_mcp, o, OC_BLOCK, _args())
+        _run_writer(_write_codex_mcp, t, [BLOCK["command"], *BLOCK["args"]], _args())
+
+        assert {k for k, _ in calls} == {"read", "write"}
+        assert all(enc == "utf-8" for _, enc in calls), calls
+
+    def test_claude_code_check_reads_non_ascii_json(self, tmp_path, monkeypatch):
+        from hub.cli import _claude_code_has_mcp_user
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        _write_utf8(tmp_path / ".claude.json",
+                    {"mcpServers": {"moolmesh": {}, "ñandú": {}}, "x": "año ✓"})
+        assert _claude_code_has_mcp_user("claude", "moolmesh") is True
+        assert _claude_code_has_mcp_user("claude", "ñandú") is True
+        assert _claude_code_has_mcp_user("claude", "absent") is False
+
+    def test_claude_code_check_survives_invalid_bytes(self, tmp_path, monkeypatch):
+        from hub.cli import _claude_code_has_mcp_user
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        (tmp_path / ".claude.json").write_bytes(BAD_BYTES)
+        assert _claude_code_has_mcp_user("claude", "moolmesh") is False   # no traceback
+
+
+class TestUndecodableConfigIsNeverOverwritten:
+    """A config we can't read is the user's, not ours to rewrite: leave it
+    byte-for-byte, show the block to add by hand, exit non-zero."""
+
+    @pytest.mark.parametrize("content", [BAD_BYTES, b'{"mcpServers": {broken'],
+                             ids=["invalid-utf8", "invalid-json"])
+    def test_json_clients(self, tmp_path, content):
+        from hub.cli import _write_mcp_json_config
+        cfg = tmp_path / "mcp.json"
+        cfg.write_bytes(content)
+        before = _sha(cfg)
+
+        code, out = _run_writer(_write_mcp_json_config, cfg, BLOCK, "Cursor", _args())
+
+        assert code == 1
+        assert _sha(cfg) == before
+        assert "Cannot parse" in out and "Add manually" in out
+        assert '"mcpServers"' in out and BLOCK["command"] in out     # the block to paste
+
+    @pytest.mark.parametrize("content", [BAD_BYTES, b'{"mcp": {broken'],
+                             ids=["invalid-utf8", "invalid-json"])
+    def test_opencode(self, tmp_path, content):
+        from hub.cli import _write_opencode_mcp
+        cfg = tmp_path / "opencode.json"
+        cfg.write_bytes(content)
+        before = _sha(cfg)
+
+        code, out = _run_writer(_write_opencode_mcp, cfg, OC_BLOCK, _args())
+
+        assert code == 1
+        assert _sha(cfg) == before
+        assert "Cannot parse" in out
+        assert '"mcp"' in out and "hub.mcp_server" in out            # manual block (new)
+
+    def test_codex_toml(self, tmp_path):
+        from hub.cli import _write_codex_mcp
+        cfg = tmp_path / "config.toml"
+        cfg.write_bytes(b'model = "\xff\xfe\x81"\n')
+        before = _sha(cfg)
+
+        code, out = _run_writer(_write_codex_mcp, cfg, [BLOCK["command"], *BLOCK["args"]], _args())
+
+        assert code == 1
+        assert _sha(cfg) == before
+        assert "Cannot read" in out
+        assert "[mcp_servers.moolmesh]" in out                       # the TOML entry, not JSON
+        assert "mcpServers" not in out
+
+    def test_dry_run_still_touches_nothing_and_exits_zero(self, tmp_path):
+        from hub.cli import _write_mcp_json_config
+        cfg = tmp_path / "mcp.json"
+        cfg.write_bytes(BAD_BYTES)
+        before = _sha(cfg)
+        code, _ = _run_writer(_write_mcp_json_config, cfg, BLOCK, "Cursor", _args(dry_run=True))
+        assert code == 0 and _sha(cfg) == before

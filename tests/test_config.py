@@ -148,6 +148,50 @@ def _legacy_parse(url):
     return (m.group(1), m.group(2)) if m else None
 
 
+class TestDeliberatelyLenientForms:
+    """#72 — decision: two non-canonical forms stay accepted, on purpose.
+
+    The scheme-less ``github.com/owner/repo`` is the canonical form add_repo
+    stores in ``[[repos]].remote_url`` (and the key the rest of the system
+    matches on); ``www.github.com`` is harmless. Pinned explicitly so a future
+    tightening of the regex can't drop them by accident.
+    """
+
+    @pytest.mark.parametrize("url,expected", [
+        ("github.com/acme/widget", ("acme", "widget")),
+        ("github.com/acme/widget.git", ("acme", "widget")),
+        ("github.com:acme/widget", ("acme", "widget")),
+        ("GitHub.com/Acme/Widget", ("Acme", "Widget")),
+    ])
+    def test_scheme_less_form_is_kept(self, url, expected):
+        assert parse_github_remote(url) == expected
+
+    @pytest.mark.parametrize("url,expected", [
+        ("https://www.github.com/acme/widget", ("acme", "widget")),
+        ("https://www.github.com/acme/widget.git", ("acme", "widget")),
+        ("git@www.github.com:acme/widget.git", ("acme", "widget")),
+        ("www.github.com/acme/widget", ("acme", "widget")),
+        ("HTTPS://WWW.GITHUB.COM/acme/widget", ("acme", "widget")),
+    ])
+    def test_www_host_is_kept(self, url, expected):
+        assert parse_github_remote(url) == expected
+
+    def test_what_add_repo_stores_round_trips(self):
+        """add_repo writes ``github.com/<owner>/<repo>``; parsing it gives them back."""
+        stored = "github.com/{}/{}".format(*parse_github_remote("git@github.com:acme/widget.git"))
+        assert parse_github_remote(stored) == ("acme", "widget")
+
+    @pytest.mark.parametrize("url", [
+        "www.evil.com/github.com/acme/widget",      # leniency is not a free-for-all
+        "wwwgithub.com/acme/widget",
+        "ww.github.com/acme/widget",
+        "sub.github.com/acme/widget",
+        "github.com.evil.com/acme/widget",
+    ])
+    def test_leniency_does_not_widen_to_other_hosts(self, url):
+        assert parse_github_remote(url) is None
+
+
 class TestParseGitHubRemoteTable:
     @pytest.mark.parametrize("url,expected", PARSED_REMOTES)
     def test_parses(self, url, expected):
