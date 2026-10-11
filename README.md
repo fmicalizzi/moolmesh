@@ -141,6 +141,13 @@ mool daemon restart
 `--no-cache-dir` skips the local pip cache: right after a release, a cached
 wheel (or a lagging mirror) can make the upgrade resolve the previous version.
 
+After upgrading, restart open agent sessions (or their MCP servers) so they load
+the new code; `mool doctor` lists stale ones (1.26.2+). Every agent session keeps
+its own `hub.mcp_server` alive until it closes, so it keeps serving the old
+version after the upgrade and `mool daemon restart`. Servers started by 1.26.1 or
+earlier can't report that they are stale and are not listed — only a restart
+replaces them.
+
 **Windows:** a running daemon can lock files inside the pipx venv and make
 `pipx upgrade` fail or apply only partially — stop it first
 (`mool daemon stop`), upgrade, then `mool daemon start`. If you installed with
@@ -369,10 +376,17 @@ the `hub` package and fails with `No module named 'hub'`.
 | `get_tool_stats` | Top tools used by AI agents |
 | `search_events` | Full-text search on event summaries |
 | `get_project_activity` | Complete project summary with stats |
+| `get_server_info` | Running vs installed version of this MCP server — call it if results look inconsistent: a stale server must be restarted |
 
 Resources: `hub://schema` (database schema), `hub://projects` (project list with stats).
 
 The server opens SQLite in read-only mode (`?mode=ro`). It runs as a separate process (~15-20 MB RAM), independent from the dashboard.
+
+A server that is older than the installed version says so: `get_server_info` reports
+`stale: true`, tools that return an object add a `stale_server` key, and the first
+detection is logged once. Each server also records itself in
+`~/.moolmesh/run/mcp-<pid>.json` (removed when it exits) so `mool doctor` can list the
+ones running old code — that is MoolMesh's own state, not provider data.
 
 ---
 

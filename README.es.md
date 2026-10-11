@@ -132,6 +132,42 @@ pipx install moolmesh
 pip install moolmesh
 ```
 
+### Actualizar
+
+```bash
+# pipx (recomendado)
+pipx upgrade moolmesh --pip-args=--no-cache-dir
+
+# pip dentro de un entorno virtual
+python -m pip install --upgrade --no-cache-dir moolmesh
+
+# uv tool
+uv tool upgrade moolmesh
+```
+
+Después reiniciá el daemon para que corra la versión nueva:
+
+```bash
+mool daemon restart
+```
+
+`--no-cache-dir` omite la caché local de pip: justo después de un release, un wheel
+cacheado (o un mirror atrasado) puede hacer que la actualización resuelva la versión
+anterior.
+
+Después de actualizar, reiniciá las sesiones de agentes abiertas (o sus servidores MCP)
+para que carguen el código nuevo; `mool doctor` lista los desactualizados (1.26.2+).
+Cada sesión de agente mantiene vivo su propio `hub.mcp_server` hasta que se cierra, así
+que sigue sirviendo la versión vieja después de actualizar y de `mool daemon restart`.
+Los servidores iniciados por 1.26.1 o anteriores no pueden avisar que están
+desactualizados y no aparecen en la lista: solo un reinicio los reemplaza.
+
+**Windows:** un daemon en ejecución puede bloquear archivos dentro del venv de pipx y
+hacer que `pipx upgrade` falle o se aplique a medias: detenelo antes
+(`mool daemon stop`), actualizá y luego `mool daemon start`. Si instalaste con Scoop u
+otro gestor, usá su propia actualización (`scoop update moolmesh`,
+`uv tool upgrade moolmesh`).
+
 ### Servicio systemd (Linux)
 
 Usa `mool dashboard` (foreground) como punto de entrada — MoolMesh auto-detecta systemd y se queda en primer plano:
@@ -291,10 +327,17 @@ paquete `hub` y falla con `No module named 'hub'`.
 | `get_tool_stats` | Herramientas más usadas por los agentes de IA |
 | `search_events` | Búsqueda de texto completo en resúmenes de eventos |
 | `get_project_activity` | Resumen completo del proyecto con estadísticas |
+| `get_server_info` | Versión en ejecución vs instalada de este servidor MCP — llamala si los resultados parecen inconsistentes: un servidor desactualizado hay que reiniciarlo |
 
 Recursos: `hub://schema` (esquema de base de datos), `hub://projects` (lista de proyectos con estadísticas).
 
 El servidor abre SQLite en modo solo lectura (`?mode=ro`). Se ejecuta como un proceso separado (~15-20 MB RAM), independiente del dashboard.
+
+Un servidor más viejo que la versión instalada lo dice: `get_server_info` devuelve
+`stale: true`, las herramientas que devuelven un objeto agregan la clave `stale_server`
+y la primera detección queda registrada una vez en el log. Además cada servidor se
+anota en `~/.moolmesh/run/mcp-<pid>.json` (se borra al salir) para que `mool doctor`
+liste los que corren código viejo — es estado propio de MoolMesh, no datos de proveedores.
 
 ---
 

@@ -64,6 +64,7 @@ hub/
 ├── dashboard/    # HTTP server + SSE + static/*.html (4 views)
 ├── analyzers/ renderers/   # analytics, output rendering
 ├── mcp_server.py # read-only MCP (stdio) query tools
+├── mcp_registry.py # run registry of MCP servers (~/.moolmesh/run/mcp-<pid>.json) for `mool doctor`
 ├── cli.py        # `mool` entrypoint
 ├── daemon.py discovery.py config.py log.py backfill.py
 ```
@@ -73,6 +74,12 @@ hub/
 - **MCP server** exposes read-only query tools (`get_active_sessions`,
   `get_session_chain`, `search_session_content`, `get_session_detail`, …). These are
   the coordination primitives — treat them as product surface, not plumbing.
+- **MCP servers outlive upgrades**: each agent session keeps its own `hub.mcp_server`
+  until it closes, so the server reports when it runs old code (`get_server_info`, a
+  `stale_server` key on dict results) and registers itself in
+  `~/.moolmesh/run/mcp-<pid>.json`, which `mool doctor` reads (#70). That file is
+  MoolMesh's own state, like the daemon pidfile — the read-only invariant covers
+  provider data and `events.db`, not this directory.
 
 ---
 
