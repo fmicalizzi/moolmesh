@@ -8,11 +8,17 @@
 
 from __future__ import annotations
 
+import atexit
+import functools
+import importlib
+import importlib.metadata
 import json
 import logging
 import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 _log = logging.getLogger("moolmesh.mcp_server")
@@ -46,6 +52,123 @@ def _connect_optional(db_path: str) -> sqlite3.Connection | None:
 
 def _rows_to_dicts(rows) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
+
+
+# ── Stale-server detection (#70) ────────────────────────────────────
+# An agent session keeps its MCP server alive until it closes, so after
+# `pipx upgrade` it keeps serving the code it started with — silently. Each
+# process remembers what it started as, re-reads what is installed on every
+# call, and says so when they differ. Servers <= 1.26.1 predate this and
+# cannot be fixed retroactively: only a restart replaces them.
+try:
+    from hub import __version__ as RUNNING_VERSION
+except ImportError:  # run outside the package: nothing to compare against
+    RUNNING_VERSION = "dev"
+STARTED_AT = datetime.now(timezone.utc).isoformat(timespec="seconds")
+STALE_HINT = (
+    "This MoolMesh MCP server is running old code. Restart this agent session "
+    "(or its MCP server) to load the installed version."
+)
+_SERVER_INSTRUCTIONS = (
+    "If results look inconsistent, call get_server_info: "
+    "a stale server must be restarted."
+)
+_stale_logged = False
+
+
+def _installed_version() -> str | None:
+    """Version of moolmesh on disk right now, or None when it can't be verified.
+
+    Re-read on every call, never cached. ``importlib.metadata`` reads METADATA
+    lazily and already refreshes its directory listing when the directory mtime
+    changes (so a running process sees an upgrade's new ``dist-info`` without
+    restarting — covered by a test); ``invalidate_caches()`` additionally closes
+    the corner where an upgrade lands within the filesystem's timestamp
+    granularity of the last lookup. Never raises: this runs inside tool calls,
+    and a half-finished upgrade can make the lookup fail.
+    """
+    try:
+        importlib.invalidate_caches()
+        return importlib.metadata.version("moolmesh") or None
+    except Exception:  # noqa: BLE001 — contract: unverifiable → None, never an error
+        _log.debug("could not read the installed moolmesh version", exc_info=True)
+        return None
+
+
+def _stale_from(installed: str | None) -> dict[str, str] | None:
+    """Staleness for a given installed version; warns once per process."""
+    global _stale_logged
+    if installed is None or RUNNING_VERSION == "dev" or installed == RUNNING_VERSION:
+        return None
+    if not _stale_logged:
+        _stale_logged = True
+        _log.warning(
+            "MoolMesh MCP server is running v%s but v%s is installed — "
+            "restart this agent session to load the new code",
+            RUNNING_VERSION, installed,
+        )
+    return {
+        "running": RUNNING_VERSION,
+        "installed": installed,
+        "started_at": STARTED_AT,
+        "hint": STALE_HINT,
+    }
+
+
+def _staleness() -> dict[str, str] | None:
+    """``None`` when versions match or the installed one can't be verified."""
+    return _stale_from(_installed_version())
+
+
+def _get_server_info() -> dict[str, Any]:
+    installed = _installed_version()
+    stale = _stale_from(installed)
+    info: dict[str, Any] = {
+        "running_version": RUNNING_VERSION,
+        "installed_version": installed,
+        "stale": stale is not None,
+        "started_at": STARTED_AT,
+        "pid": os.getpid(),
+    }
+    if stale is not None:
+        info["hint"] = STALE_HINT
+    return info
+
+
+def _stale_aware(fn):
+    """Add ``stale_server`` to a dict-returning tool's result when this process is stale.
+
+    Applied at the MCP layer only, so the ``_get_*`` functions (also used by
+    ``mool query``) stay untouched. List-returning tools are not wrapped — a
+    list can't carry the flag without changing its type; ``get_server_info``
+    and the log cover them.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        result = fn(*args, **kwargs)
+        stale = _staleness()
+        if stale is not None and isinstance(result, dict):
+            return {**result, "stale_server": stale}
+        return result
+    return wrapper
+
+
+def _register_run_file() -> Path | None:
+    """Record this server in ``~/.moolmesh/run`` so ``mool doctor`` can list it.
+
+    Called only from the server's ``__main__`` startup — never on import, or
+    every CLI command and test that imports this module would register itself.
+    A failure is logged and never stops the server from starting.
+    """
+    try:
+        from hub import mcp_registry
+        path = mcp_registry.write_run_file(RUNNING_VERSION, STARTED_AT)
+    except Exception:  # noqa: BLE001 — the registry is best-effort by contract
+        _log.warning("could not write the MCP run file; `mool doctor` will not "
+                     "list this server", exc_info=True)
+        return None
+    atexit.register(mcp_registry.remove_run_file, path)
+    return path
 
 
 # ── Pure functions (testable without mcp SDK) ───────────────────────
@@ -1281,7 +1404,10 @@ _mcp_import_error: ImportError | None = None
 
 try:
     from mcp.server.fastmcp import FastMCP
-    _mcp = FastMCP("moolmesh")
+    try:
+        _mcp = FastMCP("moolmesh", instructions=_SERVER_INSTRUCTIONS)
+    except TypeError:  # an SDK at the mcp>=1.2.0 floor without `instructions=`
+        _mcp = FastMCP("moolmesh")
 except ImportError as exc:
     # No tragamos el error: lo guardamos con contexto para distinguir
     # "mcp no instalado" de "mcp versión incompatible" (2.x movió/renombró
@@ -1324,6 +1450,19 @@ if _mcp is not None:
     def get_projects_resource() -> str:
         """Lista de todos los proyectos con estadísticas: provider, eventos, tokens, última actividad."""
         return _get_projects_resource(EVENTS_DB)
+
+    @_mcp.tool()
+    def get_server_info() -> dict[str, Any]:
+        """Estado de ESTE servidor MCP: versión en ejecución vs. versión instalada.
+
+        Llamala si los datos te parecen raros o no coinciden con el dashboard
+        o la CLI: un servidor MCP vive tanto como la sesión del agente, y tras
+        `pipx upgrade` sigue sirviendo el código viejo hasta que se reinicia.
+        `stale: true` significa que hay que reiniciar esta sesión (o su servidor
+        MCP) para cargar la versión instalada; `installed_version: null`, que no
+        se pudo verificar. Los servidores <= 1.26.1 no pueden avisar solos.
+        """
+        return _get_server_info()
 
     @_mcp.tool()
     def get_recent_events(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
@@ -1398,6 +1537,7 @@ if _mcp is not None:
         return _search_events(EVENTS_DB, query, provider, project, event_type, limit, offset)
 
     @_mcp.tool()
+    @_stale_aware
     def get_project_activity(
         project: str,
         since: Optional[str] = None,
@@ -1430,6 +1570,7 @@ if _mcp is not None:
         return _get_sessions(EVENTS_DB, hours, provider, branch, limit)
 
     @_mcp.tool()
+    @_stale_aware
     def get_session_detail(session_id: str) -> dict[str, Any]:
         """Detalle completo de una sesión específica por ID.
         Incluye metadata, prompt inicial, branch, modelo, eventos.
@@ -1578,6 +1719,7 @@ if _mcp is not None:
         return _get_portfolio(WORKSPACE_DB, since, limit)
 
     @_mcp.tool()
+    @_stale_aware
     def get_portfolio_grouped(
         since: Optional[str] = None,
     ) -> dict[str, Any]:
@@ -1607,6 +1749,7 @@ if _mcp is not None:
         return _get_portfolio_grouped(WORKSPACE_DB, since)
 
     @_mcp.tool()
+    @_stale_aware
     def get_portfolio_production(days: int = 30) -> dict[str, Any]:
         """Producción por proyecto en el tiempo — esfuerzo, no duración (#24).
 
@@ -1679,5 +1822,6 @@ if __name__ == "__main__":
     if _mcp is None:
         print(_mcp_unavailable_message(_mcp_import_error), file=sys.stderr)
         sys.exit(1)
+    _register_run_file()
     print("MoolMesh MCP Server starting...", file=sys.stderr)
     _mcp.run(transport="stdio")

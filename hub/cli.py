@@ -697,11 +697,56 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     else:
         print(dim("  - Daemon: not running"))
 
+    # MCP servers — informational: old ones are a warning, never a failed check (#70)
+    from hub.mcp_registry import run_dir
+    _print_mcp_servers(run_dir(), __version__)
+
     print()
     if checks_fail == 0:
         print(green("  All checks passed.\n"))
     else:
         print(yellow(f"  {checks_ok} passed, {checks_fail} failed\n"))
+
+
+def _print_mcp_servers(directory, installed_version: str) -> None:
+    """Doctor's "MCP servers" section (#70): live servers, flagging old code.
+
+    Reads ``~/.moolmesh/run/mcp-<pid>.json``, deletes the files of servers that
+    exited, and lists the live ones. It only reports — those processes belong to
+    the user's agent sessions, so nothing is signalled or killed — and it does
+    not count as a failed check.
+    """
+    from hub.mcp_registry import format_age, scan_run_dir
+
+    none_msg = ("  - MCP servers: none registered "
+                "(servers older than 1.26.2 don't register)")
+    scan = scan_run_dir(directory, installed_version)
+    if scan is None or (not scan.servers and not scan.removed and not scan.skipped):
+        print(dim(none_msg))
+        return
+
+    if scan.servers:
+        print(f"  {bold('MCP servers')}")
+    for srv in scan.servers:
+        line = (f"    PID {srv.pid}  v{srv.version or '?'}  "
+                f"up {format_age(srv.started_at)}  parent {srv.ppid or '?'}")
+        if srv.stale:
+            print(yellow(f"{line}  stale — running old code"))
+        else:
+            print(dim(line))
+    if scan.servers:
+        n, m = len(scan.servers), scan.stale
+        summary = f"{n} MCP server{'s' if n != 1 else ''}, {m} running old code"
+        if m:
+            print(yellow(f"  ~ {summary} — restart those agent sessions"))
+        else:
+            print(green(f"  ✓ {summary}"))
+    else:
+        print(dim(none_msg))
+    if scan.removed:
+        print(dim(f"    removed {scan.removed} run file(s) of servers that exited"))
+    for name in scan.skipped:
+        print(dim(f"    skipped unreadable run file: {name}"))
 
 
 MCP_SPEC = "mcp>=1.2.0,<2"  # same bound as hub/mcp_server.py's PEP 723 header (#33)
