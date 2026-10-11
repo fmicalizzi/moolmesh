@@ -6,6 +6,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.26.2] — 2026-10-11
+
+Honest MCP servers. A MoolMesh MCP server lives as long as its agent session, so
+after an upgrade it kept serving the old code without saying so (#70). It now
+notices, and `mool doctor` lists the running servers. Plus install and setup
+details (#72). No new dependencies, no schema migration.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- Restart open agent sessions (or their MCP servers) so they load the new code.
+  Servers started by 1.26.1 or earlier can't report that they are stale and are
+  not listed by `mool doctor`; only a restart replaces them.
+
+### Added
+- **#70 — stale MCP server detection.**
+  - Each server remembers the version it started with and re-reads the installed
+    version on every call, without restarting.
+  - New MCP tool `get_server_info`: running vs. installed version, `stale`, start
+    time, PID.
+  - Dict-returning tools (`get_project_activity`, `get_session_detail`,
+    `get_portfolio_grouped`, `get_portfolio_production`) add a `stale_server` key
+    when the server is stale. List-returning tools keep their type. A warning is
+    logged once per process. `mool query` is unchanged.
+  - Servers register in `~/.moolmesh/run/mcp-<pid>.json` (written atomically,
+    removed on normal exit). `mool doctor` has a new "MCP servers" section: it
+    lists the live ones, flags the stale ones, and removes files of servers that
+    exited. It never signals or kills a process, and it is informational, not a
+    failed check.
+
+### Fixed
+- **#72 — install and setup details.**
+  - `mool mcp setup --install-deps` exits with status 1 when the install can't run
+    or fails (it used to exit 0).
+  - `mool repo add --all` and `mool repo sync --all` on a single repo now print why
+    GitHub failed (404/401/403/429), with the same wording as
+    `--all-registered`. The exit code stays 0; the repo is left in partial history
+    and a rerun resumes.
+  - MCP client configs (Claude Desktop, Cursor, OpenCode, Codex, `~/.claude.json`)
+    are read and written as UTF-8. A config that can't be read or parsed is left
+    untouched: setup prints the block to add by hand and exits with status 1.
+  - `parse_github_remote` keeps accepting `github.com/owner/repo` without a scheme
+    and `www.github.com`, on purpose; now documented and covered by tests.
+
+### Docs
+- README (en/es): restart agent sessions after upgrading; `mool doctor` lists
+  stale MCP servers from 1.26.2 on. README.es gains an "Actualizar" section.
+
 ## [1.26.1] — 2026-10-11
 
 Install fixes. `mool mcp setup --dry-run` could delete an existing Claude Code
