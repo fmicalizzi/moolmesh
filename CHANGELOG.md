@@ -6,6 +6,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.26.1] — 2026-10-11
+
+Install fixes. `mool mcp setup --dry-run` could delete an existing Claude Code
+registration of MoolMesh (#71). `uv tool` installs couldn't install the optional `mcp`
+dependency (#41). Some GitHub remotes couldn't be registered (#69). No new
+dependencies, no schema migration.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- If an earlier `mool mcp setup` left Claude Code without the `moolmesh` server
+  (`claude mcp list` doesn't show it), run `mool mcp setup` again.
+- MCP servers that agent sessions already started keep running the old code until
+  you restart those sessions (#70).
+
+### Fixed
+- **#71 — `mool mcp setup` (Claude Code target).**
+  - `--dry-run` now only reads state and prints the commands it would run. It never
+    runs `claude mcp remove` or `claude mcp add`.
+  - The registration passes `--` before the server command. Without it, current
+    Claude Code CLIs read `-m` as their own option and reject the command.
+  - If the add fails after the old registration was removed, the command now says
+    so in red, prints the exact manual command, and exits with status 1.
+- **#41 — `uv tool` installs.** `mool mcp setup` detects a `uv tool` environment (by
+  its `uv-receipt.toml`, or by `uv tool dir`). The install hint and `--install-deps`
+  use `uv pip install --python <python> "mcp>=1.2.0,<2"`, because those environments
+  have no pip. In a venv without pip, `--install-deps` explains why it can't install
+  instead of failing. Every install hint now uses the same bounded spec,
+  `mcp>=1.2.0,<2`, including `pipx inject`.
+- **#69 — GitHub remotes.**
+  - `mool repo add` now accepts remotes with a trailing slash (`…/repo/`, `…/repo.git/`),
+    a dot in the repo name (`owner/my.repo`), or the host in uppercase.
+  - Hosts that only contain `github.com` in their name are no longer taken as
+    GitHub (`notgithub.com/…`, `evil.com/github.com/…`).
+  - Remotes that already worked give the same `owner/repo` as before.
+- **#69 — full sync errors.** `mool repo sync --all-registered --all` now says why the
+  GitHub part of a repo failed: 404 (repo not found or not visible to the token),
+  401 (token invalid or expired), 403 or 429 (no access or rate limit). The local git
+  history is still ingested, and the repo stays partial until a later run completes it.
+
+### Docs
+- README (English and Spanish): `uv tool` case and the bounded `mcp` spec in the MCP
+  setup section.
+
 ## [1.26.0] — 2026-10-08
 
 "Team & order": the remaining decisions from the portfolio audit (#36). The portfolio

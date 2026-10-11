@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: October 2026 — v1.26.0
+Last updated: October 2026 — v1.26.1
 
 ---
 
@@ -214,6 +214,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - local-config ordering: `project_aliases` (including container paths, [#64](https://github.com/fmicalizzi/moolmesh/issues/64)), `reference_containers`, `temporary_containers`;
 - a majority-org client rung;
 - full-history `mool repo sync --all-registered --all`, with "desde <fecha>" labels while history is partial ([#59](https://github.com/fmicalizzi/moolmesh/issues/59)).
+
+- **v1.26.1** ([#71](https://github.com/fmicalizzi/moolmesh/issues/71), [#41](https://github.com/fmicalizzi/moolmesh/issues/41), [#69](https://github.com/fmicalizzi/moolmesh/issues/69)): install fixes. `mool mcp setup --dry-run` no longer changes anything and the Claude Code registration passes `--` before the server command; `uv tool` installs get a working `mcp` install path; GitHub remotes with a trailing slash or a dot in the name now register, and a 404/403 during full sync says so.
 
 ---
 
