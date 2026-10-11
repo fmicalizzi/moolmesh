@@ -44,24 +44,42 @@ def get_remote_url(path: str, remote: str = "origin") -> str | None:
         return None
 
 
+# [esquema://[user@]]  o  [user@] (scp-like), host github.com (con www. opcional)
+# y exactamente dos segmentos: owner/repo. Anclada: `notgithub.com/o/r`,
+# `github.com.evil.com/o/r` y `evil.com/github.com/o/r` NO son GitHub (#69).
+_GITHUB_REMOTE = re.compile(
+    r"^(?:[a-z][a-z0-9+.-]*://(?:[^@/\s]+@)?|(?:[\w.+-]+@)?)"
+    r"(?:www\.)?github\.com(?::\d+)?[:/]"
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)$",
+    re.IGNORECASE,
+)
+
+
 def parse_github_remote(url: str) -> tuple[str, str] | None:
     """Parsea owner y repo de una URL de GitHub.
 
-    Soporta:
+    Soporta (host sin distinguir mayúsculas; owner/repo conservan las suyas):
     - git@github.com:owner/repo.git
     - https://github.com/owner/repo.git
-    - https://github.com/owner/repo
+    - https://github.com/owner/repo  (con o sin barra final, con o sin .git)
+    - https://user@github.com/owner/repo.git
     - ssh://git@github.com/owner/repo.git
+    - git://github.com/owner/repo
+    - repos con punto en el nombre (owner/my.repo)
+
+    Normaliza con strip(), sin barras finales y sin un único ``.git`` final.
+    Otros hosts (gitlab.com, notgithub.com, github.com.evil.com) → None.
 
     Returns (owner, repo) o None si no es GitHub.
     """
-    patterns = [
-        r"github\.com[:/]([^/]+)/([^/.]+?)(?:\.git)?$",  # SSH y HTTPS
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, url)
-        if m:
-            return m.group(1), m.group(2)
+    if not url:
+        return None
+    url = url.strip().rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+    m = _GITHUB_REMOTE.match(url)
+    if m:
+        return m.group("owner"), m.group("repo")
     return None
 
 

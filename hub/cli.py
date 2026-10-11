@@ -2356,7 +2356,8 @@ def _full_history_ingest(
     items). El flag ``history_complete`` se marca SÓLO si TODAS las capas
     aplicables corrieron: git OK y, si el repo es github-enabled, el backfill
     de GitHub OK. Un repo local (``github_enabled=False``) se completa con git.
-    Devuelve ``{"ok", "commits", "items", "complete", "reason"}``.
+    Devuelve ``{"ok", "commits", "items", "complete", "reason"}``; con
+    ``reason == "github"`` suma ``http_status`` (0 = red/excepción, #69).
     """
     from hub.harvesters.git_harvester import GIT_READ_FAILED
 
@@ -2370,10 +2371,11 @@ def _full_history_ingest(
         if client is None:
             complete = False
         else:
-            items = _sync_github_issues(store, repo_id, repo_config, client)
+            items, status = _sync_github_issues(store, repo_id, repo_config, client)
             if items < 0:
                 return {"ok": True, "commits": count, "items": 0,
-                        "complete": False, "reason": "github"}
+                        "complete": False, "reason": "github",
+                        "http_status": status}
     if complete:
         store.mark_history_complete(repo_id)
     return {"ok": True, "commits": count, "items": items,
@@ -2540,8 +2542,11 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
 
 def _sync_github_issues(
     store, repo_id: int, repo_config, client,
-) -> int:
-    """Full issues+PRs backfill for one repo (#59). Returns item count, -1 error.
+) -> tuple[int, int]:
+    """Full issues+PRs backfill for one repo (#59). Returns ``(items, status)``.
+
+    On error ``items`` is -1 and ``status`` the HTTP status that failed it (404,
+    403…), or 0 for a network error / exception (#69); on success it is 200.
 
     The incremental harvester caps at ``max_pages=10`` (1000 items, sorted by
     ``updated`` desc) — enough for polling, not for history: a busy repo
@@ -2554,9 +2559,11 @@ def _sync_github_issues(
     except Exception:
         _log_cli("GitHub backfill failed for %s/%s",
                  repo_config.owner, repo_config.repo, exc_info=True)
-        return -1
+        return -1, 0
     if status != 200 or data is None:
-        return -1
+        _log_cli("GitHub backfill for %s/%s returned HTTP %s",
+                 repo_config.owner, repo_config.repo, status)
+        return -1, status
     # Reuse the harvester's shaping so the row contract stays in one place.
     from hub.harvesters.github_harvester import GitHubHarvester
     issues = []
@@ -2587,7 +2594,27 @@ def _sync_github_issues(
             d["pr_review_decision"] = ""
         issues.append(d)
     store.upsert_issues(repo_id, issues)
-    return len(issues)
+    return len(issues), 200
+
+
+def _github_failure(status: int | None) -> str:
+    """One-line reason for a failed issues/PRs backfill (#69).
+
+    By the time it fails, the repo's local git history was already ingested.
+    """
+    if status == 404:
+        why = "GitHub 404 — repo not found or not visible to the token"
+    elif status == 401:
+        why = "GitHub 401 — token invalid or expired"
+    elif status in (403, 429):
+        why = f"GitHub {status} — token lacks access or rate limit reached"
+    elif status and status >= 400:
+        why = f"GitHub history failed (HTTP {status})"
+    elif status == 0:
+        why = "GitHub history failed (no response from GitHub)"
+    else:
+        why = "GitHub history failed"
+    return f"{why} (local git history was ingested)"
 
 
 def _sync_all_registered(args: argparse.Namespace) -> None:
@@ -2641,7 +2668,7 @@ def _sync_all_registered(args: argparse.Namespace) -> None:
                 print(f"  [{i}/{total}] {name}  {red('error')} (git read failed)")
                 continue
             if res["reason"] == "github":
-                errors.append(f"{name}: GitHub history failed")
+                errors.append(f"{name}: {_github_failure(res.get('http_status'))}")
             new_commits += res["commits"]
             new_items += res["items"]
             extra = f", {res['items']} issues/PRs" if res["items"] else ""

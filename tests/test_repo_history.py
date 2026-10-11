@@ -266,6 +266,117 @@ class TestSyncAllRegistered:
         assert "skipped" in out
 
 
+LOCAL_OK = "(local git history was ingested)"
+
+
+class TestGithubBackfillFailureMessage:
+    """#69 — a failed issues/PRs backfill says WHY (HTTP status), not just
+    "GitHub history failed". The repo stays partial; exit code and resume are
+    unchanged (any error → exit 1, rerun resumes)."""
+
+    def _args(self):
+        return argparse.Namespace(path=".", days=14, all_history=True,
+                                  all_registered=True, no_github=False)
+
+    def _run(self, answers, capsys):
+        """Sync repos a, b, … where answers[i] is that repo's list_issues reply
+        (or an exception). Returns (exit_code, output, store)."""
+        from hub.cli import cmd_repo_sync
+        repos = [_repo(n) for n in "abcdef"[:len(answers)]]
+        store = MagicMock()
+        store.get_repo_id.side_effect = range(1, len(answers) + 1)
+        harvester = MagicMock()
+        harvester.ingest_history.return_value = 3
+        client = MagicMock()
+        client.list_issues.side_effect = answers
+        with patch("hub.config.load_config") as lc, \
+             patch("hub.config.get_github_token", return_value="tok"), \
+             patch("hub.cache.git_store.GitStore", return_value=store), \
+             patch("hub.harvesters.git_harvester.GitHarvester",
+                   return_value=harvester), \
+             patch("hub.integrations.github_client.GitHubClient",
+                   return_value=client):
+            lc.return_value = MagicMock(repos=repos)
+            try:
+                cmd_repo_sync(self._args())
+                code = 0
+            except SystemExit as exc:
+                code = exc.code
+        return code, capsys.readouterr().out, store
+
+    OK = (200, [{"number": 1, "title": "t", "state": "open",
+                 "created_at": "x", "updated_at": "y"}], None)
+
+    def test_404_names_the_status_and_keeps_the_repo_partial(self, capsys):
+        code, out, store = self._run([(404, None, None), self.OK], capsys)
+
+        assert code == 1                                   # unchanged: error → exit 1
+        assert (f"acme/a: GitHub 404 — repo not found or not visible to the "
+                f"token {LOCAL_OK}") in out
+        assert "GitHub history failed" not in out
+        assert "(historia parcial)" in out                 # still partial
+        store.mark_history_complete.assert_called_once_with(2)   # only repo b
+        assert "6 new commits" in out                      # local git of both counted
+
+    @pytest.mark.parametrize("status,fragment", [
+        (401, "GitHub 401 — token invalid or expired"),
+        (403, "GitHub 403 — token lacks access or rate limit reached"),
+        (429, "GitHub 429 — token lacks access or rate limit reached"),
+        (500, "GitHub history failed (HTTP 500)"),
+        (0, "GitHub history failed (no response from GitHub)"),
+    ])
+    def test_other_statuses(self, capsys, status, fragment):
+        code, out, store = self._run([(status, None, None)], capsys)
+
+        assert code == 1
+        assert f"acme/a: {fragment} {LOCAL_OK}" in out
+        store.mark_history_complete.assert_not_called()
+
+    def test_client_exception_keeps_the_generic_message(self, capsys):
+        code, out, store = self._run([RuntimeError("boom")], capsys)
+
+        assert code == 1
+        assert f"acme/a: GitHub history failed (no response from GitHub) {LOCAL_OK}" in out
+        store.mark_history_complete.assert_not_called()
+
+    def test_a_failing_repo_does_not_stop_the_next_one(self, capsys):
+        code, out, store = self._run(
+            [(404, None, None), (403, None, None), self.OK], capsys)
+
+        assert code == 1
+        assert "acme/a: GitHub 404" in out and "acme/b: GitHub 403" in out
+        assert "2 error(s)" in out
+        store.mark_history_complete.assert_called_once_with(3)
+
+    def test_status_travels_in_the_helper_result_and_leaves_repo_partial(self, tmp_path):
+        from hub.cli import _full_history_ingest
+        from hub.config import RepoConfig
+        store = GitStore(tmp_path / "github.db")
+        try:
+            store.register_repo(RepoConfig(
+                path="/x/r", remote_url="github.com/o/r", owner="o", repo="r",
+                added_at="x", github_enabled=True))
+            rid = store.get_repo_id("/x/r")
+            harvester = MagicMock()
+            harvester.ingest_history.return_value = 2
+            client = MagicMock()
+            client.list_issues.return_value = (404, None, None)
+            res = _full_history_ingest(
+                store, rid, MagicMock(github_enabled=True, path="/x/r",
+                                      owner="o", repo="r"), harvester, client)
+            assert res == {"ok": True, "commits": 2, "items": 0, "complete": False,
+                           "reason": "github", "http_status": 404}
+            assert store.is_history_complete(rid) is False
+        finally:
+            store.close()
+
+    def test_sync_github_issues_reports_status_200_on_success(self):
+        from hub.cli import _sync_github_issues
+        store, client = MagicMock(), MagicMock()
+        client.list_issues.return_value = TestGithubBackfillFailureMessage.OK
+        assert _sync_github_issues(store, 1, _repo("a"), client) == (1, 200)
+
+
 class TestHistoryCoverage:
     def _fixture(self, tmp_path, *, complete: bool, commits: list[str]):
         repo = _mkrepo(tmp_path, "R", "git@github.com:acme/R.git")

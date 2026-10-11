@@ -1,6 +1,8 @@
 """Tests for config module."""
+import re
 import subprocess
 import tomllib
+from unittest.mock import patch
 
 import pytest
 
@@ -91,6 +93,94 @@ class TestParseGitHubRemote:
         """gitlab URLs should return None."""
         result = parse_github_remote("https://gitlab.com/owner/repo.git")
         assert result is None
+
+
+# ── #69 · robust GitHub remote parsing ─────────────────────────────────────
+
+# (url, (owner, repo)) — owner/repo keep the case they have; host is case-blind.
+PARSED_REMOTES = [
+    ("https://github.com/acme/widget/", ("acme", "widget")),        # trailing slash
+    ("https://github.com/acme/widget.git/", ("acme", "widget")),
+    ("https://github.com/acme/widget.io", ("acme", "widget.io")),   # dot in name
+    ("git@github.com:acme/my.repo.git", ("acme", "my.repo")),
+    ("HTTPS://GitHub.com/Acme/Widget", ("Acme", "Widget")),         # case
+    ("ssh://git@github.com/acme/widget.git", ("acme", "widget")),
+    ("https://user@github.com/acme/widget.git", ("acme", "widget")),
+    ("git://github.com/acme/widget", ("acme", "widget")),
+    ("ssh://git@github.com:22/acme/widget.git", ("acme", "widget")),
+    ("  https://github.com/acme/widget.git\n", ("acme", "widget")),  # whitespace
+    ("https://github.com/acme/widget.git.git", ("acme", "widget.git")),  # ONE .git
+]
+REJECTED_REMOTES = [
+    "https://gitlab.com/acme/widget.git",
+    "git@gitlab.com:acme/widget.git",
+    "https://github.com.evil.com/acme/widget",
+    "https://notgithub.com/acme/widget",
+    "https://evil.com/github.com/acme/widget",     # github.com only in the path
+    "file:///srv/github.com/acme/widget",
+    "https://github.com/acme",                      # one segment
+    "https://github.com/acme/widget/tree/main",     # more than owner/repo
+    "https://github.com/",
+    "/Users/u/work/widget",                         # a local path
+    "", "   ",
+]
+# Genuine github.com forms, written the way the old unanchored regex saw them.
+LEGACY_REMOTES = [
+    "git@github.com:acme/widget.git",
+    "https://github.com/acme/widget.git",
+    "https://github.com/acme/widget",
+    "http://github.com/acme/widget.git",
+    "ssh://git@github.com/acme/widget.git",
+    "https://user@github.com/acme/widget.git",
+    "https://user:token@github.com/acme/widget.git",
+    "git://github.com/acme/widget",
+    "github.com:acme/widget",
+    "github.com/acme/widget",
+    "https://www.github.com/acme/widget",
+    "https://github.com/Acme-Org/Widget_Services.git",
+    "https://github.com/acme/widget-services",
+]
+
+
+def _legacy_parse(url):
+    """The pre-#69 parser, verbatim — the reference for 'works today'."""
+    m = re.search(r"github\.com[:/]([^/]+)/([^/.]+?)(?:\.git)?$", url)
+    return (m.group(1), m.group(2)) if m else None
+
+
+class TestParseGitHubRemoteTable:
+    @pytest.mark.parametrize("url,expected", PARSED_REMOTES)
+    def test_parses(self, url, expected):
+        assert parse_github_remote(url) == expected
+
+    @pytest.mark.parametrize("url", REJECTED_REMOTES)
+    def test_rejects(self, url):
+        assert parse_github_remote(url) is None
+
+    @pytest.mark.parametrize("url", LEGACY_REMOTES)
+    def test_urls_that_worked_before_give_the_same_result(self, url):
+        assert _legacy_parse(url) is not None          # the corpus is "works today"
+        assert parse_github_remote(url) == _legacy_parse(url)
+
+    @pytest.mark.parametrize("url,expected", [
+        (u, e) for u, e in PARSED_REMOTES if "://" in u or "@" in u
+    ])
+    def test_registered_key_matches_the_workspace_key(self, url, expected):
+        """add_repo registers github.com/<owner>/<repo>; the workspace layer keys
+        the same checkout as git_remote:<normalize_remote(url)>. They must agree
+        (case-folded), or a newly parseable remote would split into two projects.
+        normalize_remote itself is untouched."""
+        from hub.correlation.workspace_resolver import normalize_remote
+        owner, repo = expected
+        assert normalize_remote(url) == f"github.com/{owner}/{repo}".lower()
+
+    def test_add_repo_registers_a_trailing_slash_remote(self, tmp_path):
+        with patch("hub.git_utils.is_git_repo", return_value=True), \
+             patch("hub.git_utils.get_remote_url",
+                   return_value="https://github.com/acme/widget.io/"):
+            cfg = add_repo(str(tmp_path))
+        assert (cfg.owner, cfg.repo) == ("acme", "widget.io")
+        assert cfg.remote_url == "github.com/acme/widget.io"
 
 
 class TestGetGitHubToken:
