@@ -704,6 +704,87 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print(yellow(f"  {checks_ok} passed, {checks_fail} failed\n"))
 
 
+MCP_SPEC = "mcp>=1.2.0,<2"  # same bound as hub/mcp_server.py's PEP 723 header (#33)
+
+
+def _has_uv_receipt(prefix: str) -> bool:
+    """``uv tool`` writes ``uv-receipt.toml`` at the root of each tool's venv."""
+    return Path(prefix, "uv-receipt.toml").is_file()
+
+
+def _uv_tool_dir() -> str | None:
+    """``uv tool dir`` output, or None when uv is missing or unusable."""
+    import shutil
+    import subprocess
+    uv = shutil.which("uv")
+    if not uv:
+        return None
+    try:
+        result = subprocess.run([uv, "tool", "dir"], capture_output=True,
+                                text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = result.stdout
+    if result.returncode != 0 or not isinstance(out, str):
+        return None
+    lines = out.strip().splitlines()
+    return lines[0].strip() if lines else None
+
+
+def _prefix_in_dir(prefix: str, directory: str) -> bool:
+    """Is ``prefix`` inside ``directory``? Separator- and case-insensitive so a
+    Windows ``C:\\...\\uv\\tools`` compares the same way on any platform."""
+    def norm(p: str) -> str:
+        return p.replace("\\", "/").rstrip("/").casefold()
+    d = norm(directory)
+    return bool(d) and norm(prefix).startswith(d + "/")
+
+
+def _detect_install_method() -> str:
+    """``uv-tool`` | ``pipx`` | ``venv`` | ``pip`` for the running interpreter."""
+    prefix = sys.prefix
+    if _has_uv_receipt(prefix):
+        return "uv-tool"
+    if "pipx" in prefix:
+        return "pipx"
+    if prefix == sys.base_prefix:
+        return "pip"
+    # A uv tool env without a receipt: fall back to uv's own tool directory.
+    tool_dir = _uv_tool_dir()
+    if tool_dir and _prefix_in_dir(prefix, tool_dir):
+        return "uv-tool"
+    return "venv"
+
+
+def _has_pip() -> bool:
+    """Does this interpreter have pip? (uv-created venvs ship without it.)"""
+    import importlib.util
+    return importlib.util.find_spec("pip") is not None
+
+
+def _mcp_install_plan(method: str, python: str) -> tuple[list, str | None]:
+    """``(command, blocker)`` to install the ``mcp`` dependency (#41).
+
+    ``command`` is what the hint prints and ``--install-deps`` runs. ``blocker``
+    is set when ``--install-deps`` cannot work here, and says why.
+    """
+    import shutil
+    if method == "pipx":
+        return ["pipx", "inject", "moolmesh", MCP_SPEC], None
+    uv_pip = ["uv", "pip", "install", "--python", python, MCP_SPEC]
+    if method == "uv-tool":
+        if shutil.which("uv"):
+            return uv_pip, None
+        return (["uv", "tool", "install", "--with", MCP_SPEC, "moolmesh", "--force"],
+                "'uv' is not in PATH — put it on PATH, then run the command above.")
+    if _has_pip():
+        return [python, "-m", "pip", "install", MCP_SPEC], None
+    ensurepip = _display_cmd([python, "-m", "ensurepip", "--upgrade"])
+    return uv_pip, ("This environment has no pip (uv-created venvs ship without it), "
+                    "so 'python -m pip install' cannot work here. Run the command "
+                    f"above with uv, or bootstrap pip first: {ensurepip}")
+
+
 def cmd_mcp_setup(args: argparse.Namespace) -> None:
     import json
     import platform
@@ -716,16 +797,9 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
     # ── Detect install method ──────────────────────────────────────
     # sys.executable is already the interpreter of the pipx / uv-tool / venv
     # environment that has `hub` installed (and is Windows-correct).
-    is_pipx = "pipx" in sys.prefix
-    in_venv = sys.prefix != sys.base_prefix
-
-    if is_pipx:
-        method = "pipx"
-    elif in_venv:
-        method = "venv"
-    else:
-        method = "pip"
+    method = _detect_install_method()
     python = sys.executable
+    dry_run = getattr(args, "dry_run", False)
 
     # ── Build the MCP config ───────────────────────────────────────
     # Module form, never `uv run <script>`: uv runs a loose script in an
@@ -750,25 +824,36 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
 
     if not mcp_available:
         print(yellow("  ⚠ The 'mcp' package is not installed in this environment."))
-        if method == "pipx":
-            inject_cmd = ["pipx", "inject", "moolmesh", "mcp"]
-        else:
-            inject_cmd = [str(python), "-m", "pip", "install", "mcp"]
-
-        print(f"  Run:  {bold(' '.join(inject_cmd))}")
+        inject_cmd, blocker = _mcp_install_plan(method, python)
+        print(f"  Run:  {bold(_display_cmd(inject_cmd))}")
         print()
 
-        if getattr(args, "install_mcp", False) and not getattr(args, "dry_run", False):
-            print(dim(f"  Running: {' '.join(inject_cmd)}"))
-            try:
-                subprocess.run(inject_cmd, check=True, timeout=120)
-                mcp_available = True
-                print(green("  ✓ mcp installed successfully.\n"))
-            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
-                print(red(f"  ✗ Failed: {exc}"))
+        if getattr(args, "install_mcp", False):
+            if blocker:
+                print(red(f"  ✗ --install-deps cannot install here: {blocker}"))
                 return
+            if dry_run:
+                # Show what a real run would do next, as if the install worked.
+                print(dim(f"  Dry run — would run: {_display_cmd(inject_cmd)}"))
+                print()
+                mcp_available = True
+            else:
+                print(dim(f"  Running: {_display_cmd(inject_cmd)}"))
+                try:
+                    subprocess.run(inject_cmd, check=True, timeout=120)
+                    mcp_available = True
+                    print(green("  ✓ mcp installed successfully.\n"))
+                except FileNotFoundError:
+                    print(red(f"  ✗ Failed: '{inject_cmd[0]}' not found in PATH"))
+                    return
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                    print(red(f"  ✗ Failed: {exc}"))
+                    return
         else:
-            print(dim("  Use --install-deps to install it automatically."))
+            if blocker:
+                print(dim(f"  {blocker}"))
+            else:
+                print(dim("  Use --install-deps to install it automatically."))
             print()
 
     if not mcp_available:

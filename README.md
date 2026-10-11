@@ -319,19 +319,30 @@ mool mcp setup opencode         # OpenCode
 mool mcp setup json             # Print config JSON for any MCP client
 ```
 
-The command auto-detects your install method (pipx/pip/source), finds the correct Python and server paths, and checks for the `mcp` dependency. If `mcp` is missing it shows the exact command to install it, or use `--install-deps` to install automatically:
+The command auto-detects your install method (pipx / uv tool / pip / venv), finds the correct Python and server paths, and checks for the `mcp` dependency. If `mcp` is missing it shows the exact command to install it, or use `--install-deps` to install automatically:
 
 ```bash
-mool mcp setup --install-deps   # Also runs: pipx inject moolmesh mcp
+mool mcp setup --install-deps
 ```
 
-Use `--dry-run` to preview changes without modifying any config files.
+`--install-deps` installs `mcp>=1.2.0,<2` (the bound matters: `mcp` 2.x is incompatible) the way your install method needs:
+
+| Installed with | `--install-deps` runs |
+|----------------|-----------------------|
+| `pipx install moolmesh` | `pipx inject moolmesh "mcp>=1.2.0,<2"` |
+| `uv tool install moolmesh` | `uv pip install --python <tool python> "mcp>=1.2.0,<2"` |
+| `pip install moolmesh` (venv or system) | `<python> -m pip install "mcp>=1.2.0,<2"` |
+
+`uv tool` environments ship without pip, so `python -m pip` does not work in them. If `uv` is not on your `PATH`, reinstall with the dependency included instead: `uv tool install --with "mcp>=1.2.0,<2" moolmesh --force`.
+
+Use `--dry-run` to preview without changing anything: for Claude Code it prints the `claude mcp remove` / `claude mcp add` commands it would run (it never runs them), and for the other clients the config it would write.
 
 ### Manual configuration
 
 If you prefer to configure manually, point the client at the Python interpreter
 of the environment where MoolMesh (and `mcp`) is installed, and run the server as a
-module (requires `pipx inject moolmesh mcp` or `pip install mcp` in that environment):
+module (requires `mcp>=1.2.0,<2` in that environment, e.g. `pipx inject moolmesh "mcp>=1.2.0,<2"`
+or `uv pip install --python /path/to/python "mcp>=1.2.0,<2"`):
 
 ```json
 {

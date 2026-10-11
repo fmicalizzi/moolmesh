@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from hub.cli import cmd_mcp_setup
+from hub.cli import MCP_SPEC, cmd_mcp_setup
 
 MODULE_ARGS = ["-m", "hub.mcp_server"]
 
@@ -50,7 +50,9 @@ class TestMcpSetupDetection:
 
         out = capsys.readouterr().out
         assert "not installed" in out.lower()
-        assert "pip install mcp" in out or "pipx inject" in out
+        # #41: every hint carries the bounded spec (quoted: `>`/`<` are shell syntax)
+        assert MCP_SPEC in out
+        assert "pip install" in out or "pipx inject" in out
 
     def test_uv_present_still_uses_module_form_and_checks_mcp(self, capsys):
         with patch("subprocess.run") as mock_run, \
@@ -438,3 +440,278 @@ class TestShellDisplay:
         assert _display_cmd(["python", "-m", "pip"]) == "python -m pip"
         assert _display_cmd([r"C:\Users\x\py.exe"]) == r"C:\Users\x\py.exe"
         assert _display_cmd([r"C:\Program Files\py.exe"]) == r'"C:\Program Files\py.exe"'
+
+
+# ── #41 · uv tool installs: detection, install hint, bounded spec ──────────
+
+POSIX_TOOLS = "/home/u/.local/share/uv/tools"
+WIN_TOOLS = r"C:\Users\u\AppData\Roaming\uv\tools"
+
+
+@pytest.fixture
+def prefix(monkeypatch):
+    """Point sys.prefix at a fake venv (base_prefix elsewhere ⇒ "in a venv")."""
+    def _set(value):
+        monkeypatch.setattr(sys, "prefix", value)
+        monkeypatch.setattr(sys, "base_prefix", "/usr/local")
+    return _set
+
+
+class TestUvToolDetection:
+    def test_receipt_in_prefix_means_uv_tool(self, tmp_path, prefix):
+        from hub.cli import _detect_install_method
+        env = tmp_path / "uv" / "tools" / "moolmesh"
+        env.mkdir(parents=True)
+        (env / "uv-receipt.toml").write_text("[tool]\n")
+        prefix(str(env))
+        with patch("hub.cli._uv_tool_dir",
+                   side_effect=AssertionError("receipt is enough")):
+            assert _detect_install_method() == "uv-tool"
+
+    def test_has_uv_receipt_checks_the_receipt_file(self, tmp_path):
+        from hub.cli import _has_uv_receipt
+        assert _has_uv_receipt(str(tmp_path)) is False
+        (tmp_path / "uv-receipt.toml").write_text("[tool]\n")
+        assert _has_uv_receipt(str(tmp_path)) is True
+
+    def test_windows_prefix_with_receipt(self, prefix):
+        from hub.cli import _detect_install_method
+        win = WIN_TOOLS + r"\moolmesh"
+        prefix(win)
+        seen = []
+        with patch("hub.cli._has_uv_receipt",
+                   side_effect=lambda p: seen.append(p) or p == win):
+            assert _detect_install_method() == "uv-tool"
+        assert seen == [win]
+
+    def test_receipt_wins_over_a_pipx_substring(self, prefix):
+        from hub.cli import _detect_install_method
+        prefix("/home/u/pipx-stuff/uv/tools/moolmesh")
+        with patch("hub.cli._has_uv_receipt", return_value=True):
+            assert _detect_install_method() == "uv-tool"
+
+    @pytest.mark.parametrize("env,tools", [
+        (POSIX_TOOLS + "/moolmesh", POSIX_TOOLS),
+        (WIN_TOOLS + r"\moolmesh", WIN_TOOLS),
+        (WIN_TOOLS.lower() + "\\moolmesh", WIN_TOOLS),       # drive/dir case
+        (POSIX_TOOLS + "/moolmesh", POSIX_TOOLS + "/"),      # trailing separator
+        (WIN_TOOLS + r"\moolmesh", WIN_TOOLS.replace("\\", "/")),  # mixed seps
+    ])
+    def test_prefix_inside_uv_tool_dir_without_receipt(self, prefix, env, tools):
+        from hub.cli import _detect_install_method
+        prefix(env)
+        with patch("hub.cli._has_uv_receipt", return_value=False), \
+             patch("hub.cli._uv_tool_dir", return_value=tools):
+            assert _detect_install_method() == "uv-tool"
+
+    @pytest.mark.parametrize("env,tools", [
+        ("/home/u/work/widget/.venv", POSIX_TOOLS),
+        (POSIX_TOOLS + "-extra/moolmesh", POSIX_TOOLS),   # sibling, not a child
+        (POSIX_TOOLS, POSIX_TOOLS),                       # the dir itself
+        (r"C:\work\widget\.venv", WIN_TOOLS),
+        ("/home/u/work/widget/.venv", None),              # uv not installed
+    ])
+    def test_other_venvs_stay_venv(self, prefix, env, tools):
+        from hub.cli import _detect_install_method
+        prefix(env)
+        with patch("hub.cli._has_uv_receipt", return_value=False), \
+             patch("hub.cli._uv_tool_dir", return_value=tools):
+            assert _detect_install_method() == "venv"
+
+    @pytest.mark.parametrize("env", [
+        "/home/u/.local/pipx/venvs/moolmesh",
+        r"C:\Users\u\pipx\venvs\moolmesh",
+    ])
+    def test_pipx_still_detected(self, prefix, env):
+        from hub.cli import _detect_install_method
+        prefix(env)
+        with patch("hub.cli._has_uv_receipt", return_value=False):
+            assert _detect_install_method() == "pipx"
+
+    def test_system_python_is_pip_and_never_asks_uv(self, monkeypatch):
+        from hub.cli import _detect_install_method
+        monkeypatch.setattr(sys, "prefix", "/usr/local")
+        monkeypatch.setattr(sys, "base_prefix", "/usr/local")
+        with patch("hub.cli._has_uv_receipt", return_value=False), \
+             patch("hub.cli._uv_tool_dir",
+                   side_effect=AssertionError("not a venv")):
+            assert _detect_install_method() == "pip"
+
+
+class TestUvToolDirLookup:
+    def _which(self, found=True):
+        return patch("shutil.which", return_value="/usr/bin/uv" if found else None)
+
+    def test_returns_the_printed_directory(self):
+        from hub.cli import _uv_tool_dir
+        with self._which(), patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, f"{POSIX_TOOLS}\n", "")
+            assert _uv_tool_dir() == POSIX_TOOLS
+        assert run.call_args.args[0] == ["/usr/bin/uv", "tool", "dir"]
+
+    @pytest.mark.parametrize("effect", [
+        FileNotFoundError("uv"),
+        subprocess.TimeoutExpired("uv", 10),
+        subprocess.CalledProcessError(1, "uv"),
+    ])
+    def test_uv_errors_are_ignored(self, effect):
+        from hub.cli import _uv_tool_dir
+        with self._which(), patch("subprocess.run", side_effect=effect):
+            assert _uv_tool_dir() is None
+
+    def test_uv_not_installed_or_failing_or_mocked(self):
+        from hub.cli import _uv_tool_dir
+        with self._which(found=False):
+            assert _uv_tool_dir() is None
+        with self._which(), patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 2, "x\n", "boom")
+            assert _uv_tool_dir() is None
+            run.return_value = MagicMock(returncode=0)     # stdout is not a str
+            assert _uv_tool_dir() is None
+
+
+class TestMcpSpec:
+    def test_single_bounded_spec(self):
+        assert MCP_SPEC == "mcp>=1.2.0,<2"
+
+    def test_matches_the_server_inline_dependency(self):
+        src = (Path(__file__).parent.parent / "hub" / "mcp_server.py").read_text(
+            encoding="utf-8")
+        assert f'"{MCP_SPEC}"' in src
+
+
+PY = "/opt/env/bin/python"
+
+
+class TestInstallPlan:
+    def test_pipx(self):
+        from hub.cli import _mcp_install_plan
+        assert _mcp_install_plan("pipx", PY) == (
+            ["pipx", "inject", "moolmesh", MCP_SPEC], None)
+
+    def test_uv_tool_with_uv_installs_into_the_tool_env(self):
+        from hub.cli import _mcp_install_plan
+        with patch("shutil.which", return_value="/usr/bin/uv"):
+            cmd, blocker = _mcp_install_plan("uv-tool", PY)
+        assert cmd == ["uv", "pip", "install", "--python", PY, MCP_SPEC]
+        assert blocker is None
+
+    def test_uv_tool_without_uv_suggests_reinstall_with(self):
+        from hub.cli import _mcp_install_plan
+        with patch("shutil.which", return_value=None):
+            cmd, blocker = _mcp_install_plan("uv-tool", PY)
+        assert cmd == ["uv", "tool", "install", "--with", MCP_SPEC,
+                       "moolmesh", "--force"]
+        assert "not in PATH" in blocker
+
+    @pytest.mark.parametrize("method", ["venv", "pip"])
+    def test_pip_methods_use_python_m_pip(self, method):
+        from hub.cli import _mcp_install_plan
+        with patch("hub.cli._has_pip", return_value=True):
+            assert _mcp_install_plan(method, PY) == (
+                [PY, "-m", "pip", "install", MCP_SPEC], None)
+
+    def test_venv_without_pip_explains_instead_of_suggesting_python_m_pip(self):
+        from hub.cli import _mcp_install_plan
+        with patch("hub.cli._has_pip", return_value=False):
+            cmd, blocker = _mcp_install_plan("venv", PY)
+        assert cmd == ["uv", "pip", "install", "--python", PY, MCP_SPEC]
+        assert "no pip" in blocker and "ensurepip" in blocker
+
+
+def _setup(monkeypatch_method, install=False, dry_run=False, *, mcp_missing=True,
+           pip=True, uv=True, install_exc=None):
+    """Run `mcp setup json` with a given install method; return (calls, output)."""
+    import io
+    import contextlib
+    calls = []
+
+    def fake_run(argv, *a, **kw):
+        calls.append(list(argv))
+        if argv[1:3] == ["-c", "import mcp"]:
+            if mcp_missing:
+                raise subprocess.CalledProcessError(1, argv)
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        if install_exc:
+            raise install_exc
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    which = lambda name: f"/bin/{name}" if (name == "uv" and uv) else None  # noqa: E731
+    buf = io.StringIO()
+    with patch("hub.cli._detect_install_method", return_value=monkeypatch_method), \
+         patch("hub.cli._has_pip", return_value=pip), \
+         patch("subprocess.run", side_effect=fake_run), \
+         patch("shutil.which", side_effect=which), \
+         contextlib.redirect_stdout(buf):
+        cmd_mcp_setup(_make_args(target="json", install_mcp=install, dry_run=dry_run))
+    installs = [c for c in calls if c[1:3] != ["-c", "import mcp"]]
+    return installs, buf.getvalue()
+
+
+EXPECTED_INSTALL = {
+    "pipx": ["pipx", "inject", "moolmesh", MCP_SPEC],
+    "uv-tool": ["uv", "pip", "install", "--python", sys.executable, MCP_SPEC],
+    "venv": [sys.executable, "-m", "pip", "install", MCP_SPEC],
+    "pip": [sys.executable, "-m", "pip", "install", MCP_SPEC],
+}
+
+
+class TestInstallDeps:
+    @pytest.mark.parametrize("method", list(EXPECTED_INSTALL))
+    def test_hint_shows_the_bounded_spec_quoted(self, method):
+        from hub.cli import _display_cmd
+        installs, out = _setup(method)
+        assert installs == []                       # a hint never installs
+        assert MCP_SPEC in out
+        assert f"Run:  {_display_cmd(EXPECTED_INSTALL[method])}" in out
+        assert f'"{MCP_SPEC}"' in out               # pasteable: > and < are quoted
+        assert "Use --install-deps" in out
+
+    @pytest.mark.parametrize("method", list(EXPECTED_INSTALL))
+    def test_install_deps_runs_the_method_command(self, method):
+        installs, out = _setup(method, install=True)
+        assert installs == [EXPECTED_INSTALL[method]]
+        assert installs[0][-1] == MCP_SPEC          # one argv item, no literal quotes
+        assert not any('"' in a for a in installs[0])
+        assert "mcp installed successfully" in out
+        assert '"mcpServers"' in out                # carried on to the target
+
+    def test_venv_without_pip_fails_with_the_cause_and_installs_nothing(self):
+        installs, out = _setup("venv", install=True, pip=False)
+        assert installs == []
+        assert "cannot install here" in out
+        assert "no pip" in out and "uv-created" in out
+        assert '"mcpServers"' not in out
+
+    def test_venv_without_pip_hint_explains_without_offering_install_deps(self):
+        installs, out = _setup("venv", pip=False)
+        assert installs == []
+        assert MCP_SPEC in out and "no pip" in out
+        assert "Use --install-deps" not in out
+
+    def test_uv_tool_without_uv_on_path(self):
+        installs, out = _setup("uv-tool", install=True, uv=False)
+        assert installs == []
+        assert "'uv' is not in PATH" in out
+        assert f'uv tool install --with "{MCP_SPEC}" moolmesh --force' in out
+
+    def test_install_failure_is_reported_without_traceback(self):
+        installs, out = _setup(
+            "uv-tool", install=True,
+            install_exc=subprocess.CalledProcessError(2, ["uv"]))
+        assert len(installs) == 1 and "Failed" in out
+        assert '"mcpServers"' not in out
+
+    def test_missing_installer_binary_says_so(self):
+        _, out = _setup("pipx", install=True, install_exc=FileNotFoundError("pipx"))
+        assert "'pipx' not found in PATH" in out
+
+    def test_dry_run_with_install_deps_runs_nothing_but_shows_the_plan(self):
+        installs, out = _setup("uv-tool", install=True, dry_run=True)
+        assert installs == []
+        assert "Dry run — would run:" in out and MCP_SPEC in out
+        assert '"mcpServers"' in out                # registration plan still shown
+
+    def test_mcp_present_skips_everything(self):
+        installs, out = _setup("uv-tool", install=True, mcp_missing=False)
+        assert installs == [] and "not installed" not in out
