@@ -262,3 +262,179 @@ class TestMcpSetupDesktop:
         assert "other-server" in data["mcpServers"]
         assert "moolmesh" in data["mcpServers"]
         assert data["customSetting"] is True
+
+
+# ── #71 · claude-code: dry-run never mutates, `--` before the server command ──
+
+FAKE_CLAUDE = "/fake/bin/claude"
+
+
+class _FakeClaude:
+    """subprocess.run stand-in: records every call and scripts claude's answers."""
+
+    def __init__(self, add_rc=0, add_err="", add_exc=None, remove_rc=0):
+        self.add_rc, self.add_err = add_rc, add_err
+        self.add_exc, self.remove_rc = add_exc, remove_rc
+        self.calls = []
+
+    def __call__(self, argv, *args, **kwargs):
+        self.calls.append(list(argv))
+        if argv[1:3] == ["mcp", "add"]:
+            if self.add_exc:
+                raise self.add_exc
+            return subprocess.CompletedProcess(argv, self.add_rc, "", self.add_err)
+        if argv[1:3] == ["mcp", "remove"]:
+            return subprocess.CompletedProcess(argv, self.remove_rc, b"", b"")
+        return subprocess.CompletedProcess(argv, 0, "", "")  # `import mcp` probe
+
+    def claude(self, verb):
+        return [c for c in self.calls
+                if c[0] == FAKE_CLAUDE and c[1:3] == ["mcp", verb]]
+
+
+def _run_claude_code(tmp_path, fake, *, registered=False, dry_run=False):
+    """Run `mcp setup claude-code` with a fake claude and an isolated HOME."""
+    if registered:
+        (tmp_path / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"moolmesh": {}}}))
+    which = lambda name: FAKE_CLAUDE if name == "claude" else None  # noqa: E731
+    with patch("subprocess.run", side_effect=fake), \
+         patch("shutil.which", side_effect=which), \
+         patch("pathlib.Path.home", return_value=tmp_path):
+        cmd_mcp_setup(_make_args(target="claude-code", dry_run=dry_run))
+
+
+EXPECTED_ADD = [FAKE_CLAUDE, "mcp", "add", "--scope", "user", "--transport",
+                "stdio", "moolmesh", "--", sys.executable, "-m", "hub.mcp_server"]
+MANUAL_ADD = ('claude mcp add --scope user --transport stdio moolmesh -- '
+              f'"{sys.executable}" -m hub.mcp_server')
+
+
+class TestClaudeCodeDryRun:
+    def test_dry_run_with_existing_registration_runs_nothing(self, tmp_path, capsys):
+        fake = _FakeClaude()
+        _run_claude_code(tmp_path, fake, registered=True, dry_run=True)
+
+        assert fake.claude("remove") == [] and fake.claude("add") == []
+        assert [c for c in fake.calls if c[0] == FAKE_CLAUDE] == []
+        out = capsys.readouterr().out
+        assert "Dry run — no changes made" in out
+        assert f"claude mcp remove moolmesh -s user" in out
+        assert MANUAL_ADD in out
+        server = _parse_printed_json(out)["mcpServers"]["moolmesh"]
+        assert server == {"command": sys.executable, "args": MODULE_ARGS}
+
+    def test_dry_run_without_registration_shows_only_the_add(self, tmp_path, capsys):
+        fake = _FakeClaude()
+        _run_claude_code(tmp_path, fake, registered=False, dry_run=True)
+
+        assert [c for c in fake.calls if c[0] == FAKE_CLAUDE] == []
+        out = capsys.readouterr().out
+        assert "Dry run — no changes made" in out
+        assert "claude mcp remove" not in out
+        assert MANUAL_ADD in out
+
+    def test_dry_run_leaves_claude_json_untouched(self, tmp_path):
+        before = json.dumps({"mcpServers": {"moolmesh": {"command": "old"}}})
+        (tmp_path / ".claude.json").write_text(before)
+        _run_claude_code(tmp_path, _FakeClaude(), registered=False, dry_run=True)
+        assert (tmp_path / ".claude.json").read_text() == before
+
+
+class TestClaudeCodeAddArgv:
+    def test_add_argv_has_double_dash_right_before_the_server_command(self, tmp_path):
+        fake = _FakeClaude()
+        _run_claude_code(tmp_path, fake)
+
+        (add,) = fake.claude("add")
+        assert add == EXPECTED_ADD
+        dash = add.index("--")
+        assert add[dash + 1] == sys.executable
+        assert add.index("-m") > dash
+        # every claude option precedes the server name; nothing but `--` follows it
+        assert add.index("moolmesh") < dash
+        assert dash == add.index("moolmesh") + 1
+
+    def test_registering_via_shows_the_real_command_with_double_dash(self, tmp_path, capsys):
+        _run_claude_code(tmp_path, _FakeClaude())
+        out = capsys.readouterr().out
+        assert f"Registering via: {MANUAL_ADD}" in out
+
+    def test_happy_path_without_registration_is_one_add_and_no_remove(self, tmp_path, capsys):
+        fake = _FakeClaude()
+        _run_claude_code(tmp_path, fake, registered=False)
+
+        assert len(fake.claude("add")) == 1
+        assert fake.claude("remove") == []
+        assert "registered globally" in capsys.readouterr().out
+
+    def test_existing_registration_is_removed_before_the_add(self, tmp_path, capsys):
+        fake = _FakeClaude()
+        _run_claude_code(tmp_path, fake, registered=True)
+
+        verbs = [c[2] for c in fake.calls if c[0] == FAKE_CLAUDE]
+        assert verbs == ["remove", "add"]
+        assert fake.claude("remove")[0] == [FAKE_CLAUDE, "mcp", "remove",
+                                            "moolmesh", "-s", "user"]
+        assert "updated globally" in capsys.readouterr().out
+
+
+class TestClaudeCodeAddFailure:
+    @pytest.mark.parametrize("fake", [
+        _FakeClaude(add_rc=1, add_err="error: boom"),
+        _FakeClaude(add_exc=subprocess.TimeoutExpired("claude", 30)),
+        _FakeClaude(add_exc=FileNotFoundError("claude")),
+    ], ids=["nonzero-exit", "timeout", "vanished"])
+    def test_failed_add_after_remove_warns_prints_manual_command_and_exits_1(
+            self, tmp_path, capsys, fake):
+        with pytest.raises(SystemExit) as exc:
+            _run_claude_code(tmp_path, fake, registered=True)
+
+        assert exc.value.code == 1
+        assert len(fake.claude("remove")) == 1
+        out = capsys.readouterr().out
+        assert "the previous registration was removed and could not be re-added" in out
+        assert MANUAL_ADD in out.split("Re-add it manually:")[1]
+        assert "--" in MANUAL_ADD and f'"{sys.executable}"' in out
+        server = _parse_printed_json(out)["mcpServers"]["moolmesh"]
+        assert server["command"] == sys.executable
+
+    def test_failed_add_shows_claudes_own_error(self, tmp_path, capsys):
+        with pytest.raises(SystemExit):
+            _run_claude_code(tmp_path, _FakeClaude(add_rc=1, add_err="error: boom"),
+                             registered=True)
+        assert "error: boom" in capsys.readouterr().out
+
+    def test_failed_add_without_prior_registration_keeps_the_soft_path(
+            self, tmp_path, capsys):
+        """Nothing was removed → the user lost nothing: warn, show JSON, no exit."""
+        fake = _FakeClaude(add_rc=1, add_err="error: boom")
+        _run_claude_code(tmp_path, fake, registered=False)
+
+        out = capsys.readouterr().out
+        assert fake.claude("remove") == []
+        assert "claude mcp add returned: error: boom" in out
+        assert "could not be re-added" not in out
+        assert "mcpServers" in out
+
+    def test_failed_remove_is_not_reported_as_a_lost_registration(
+            self, tmp_path, capsys):
+        fake = _FakeClaude(remove_rc=1, add_rc=1, add_err="already exists")
+        _run_claude_code(tmp_path, fake, registered=True)  # no SystemExit
+
+        out = capsys.readouterr().out
+        assert "Could not remove the existing registration" in out
+        assert "could not be re-added" not in out
+
+
+class TestShellDisplay:
+    def test_spec_with_comparison_operators_is_quoted(self):
+        from hub.cli import _display_cmd
+        assert _display_cmd(["pipx", "inject", "moolmesh", "mcp>=1.2.0,<2"]) == \
+            'pipx inject moolmesh "mcp>=1.2.0,<2"'
+
+    def test_plain_and_windows_args_stay_bare_unless_they_have_spaces(self):
+        from hub.cli import _display_cmd
+        assert _display_cmd(["python", "-m", "pip"]) == "python -m pip"
+        assert _display_cmd([r"C:\Users\x\py.exe"]) == r"C:\Users\x\py.exe"
+        assert _display_cmd([r"C:\Program Files\py.exe"]) == r'"C:\Program Files\py.exe"'

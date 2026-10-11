@@ -783,35 +783,10 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
     if target == "claude-code":
         claude_bin = shutil.which("claude")
         if claude_bin:
-            already = _claude_code_has_mcp_user(claude_bin, "moolmesh")
-            if already:
-                print(dim("  Replacing existing user-scope registration."))
-                subprocess.run(
-                    [claude_bin, "mcp", "remove", "moolmesh", "-s", "user"],
-                    capture_output=True, timeout=15,
-                )
-
-            print(dim("  Registering via: claude mcp add --scope user"))
-            cmd = [
-                claude_bin, "mcp", "add",
-                "--scope", "user",
-                "--transport", "stdio",
-                "moolmesh",
-            ] + server_cmd
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True,
-                                        encoding="utf-8", errors="replace", timeout=30)
-                if result.returncode == 0:
-                    verb = "updated" if already else "registered"
-                    print(green(f"  ✓ MCP server 'moolmesh' {verb} globally in Claude Code."))
-                else:
-                    err = result.stderr.strip() or result.stdout.strip()
-                    print(yellow(f"  ⚠ claude mcp add returned: {err}"))
-                    print(dim("  You can add it manually — config shown below."))
-                    _print_mcp_json(config_block)
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                print(yellow("  ⚠ Could not run 'claude mcp add'."))
-                _print_mcp_json(config_block)
+            _register_claude_code(
+                claude_bin, server_cmd, config_block,
+                dry_run=getattr(args, "dry_run", False),
+            )
         else:
             print(yellow("  'claude' CLI not found in PATH."))
             print(dim("  Add this to ~/.claude.json under mcpServers:"))
@@ -853,6 +828,112 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
         _print_mcp_json(config_block)
 
     print()
+
+
+_SHELL_SPECIAL = frozenset(" \t<>|&^;()$`\"'")
+
+
+def _quote(arg: str, force: bool = False) -> str:
+    """Double-quote ``arg`` for display if a shell would misread it.
+
+    Double quotes work in POSIX shells, cmd and PowerShell. Display only — the
+    subprocess argv lists stay unquoted.
+    """
+    if force or not arg or any(c in _SHELL_SPECIAL for c in arg):
+        return '"' + arg.replace('"', '\\"') + '"'
+    return arg
+
+
+def _display_cmd(argv: list) -> str:
+    """An argv as a pasteable shell line (``<``/``>`` in specs get quoted)."""
+    return " ".join(_quote(str(a)) for a in argv)
+
+
+def _claude_mcp_add_argv(claude_bin: str, server_cmd: list) -> list:
+    """``claude mcp add`` argv: all options before the name, ``--`` right
+    before the server command. Without it claude takes ``-m`` as its own
+    option and fails with "unknown option '-m'" (#71)."""
+    return [claude_bin, "mcp", "add", "--scope", "user", "--transport", "stdio",
+            "moolmesh", "--", *server_cmd]
+
+
+def _claude_mcp_add_line(server_cmd: list) -> str:
+    """The pasteable ``claude mcp add`` line, interpreter path always quoted."""
+    head = _claude_mcp_add_argv("claude", [])
+    tail = [_quote(server_cmd[0], force=True)] + [_quote(str(a)) for a in server_cmd[1:]]
+    return " ".join([_display_cmd(head)] + tail)
+
+
+def _register_claude_code(
+    claude_bin: str, server_cmd: list, config_block: dict, dry_run: bool,
+) -> None:
+    """Register moolmesh in Claude Code at user scope (#71).
+
+    ``claude mcp add`` fails when the name already exists, so a present
+    registration is removed first. If the add then fails the user is left with
+    nothing: say so loudly, print the exact manual command and exit non-zero.
+    ``dry_run`` only reads state (``~/.claude.json``) — it never spawns remove/add.
+    """
+    import subprocess
+
+    remove_cmd = [claude_bin, "mcp", "remove", "moolmesh", "-s", "user"]
+    add_cmd = _claude_mcp_add_argv(claude_bin, server_cmd)
+    add_line = _claude_mcp_add_line(server_cmd)
+    already = _claude_code_has_mcp_user(claude_bin, "moolmesh")
+
+    if dry_run:
+        print(bold("  Dry run — no changes made."))
+        if already:
+            print(dim("  Existing user-scope registration found: it would be replaced."))
+        print(dim("  Would run:"))
+        if already:
+            print(f"    {_display_cmd(['claude'] + remove_cmd[1:])}")
+        print(f"    {add_line}")
+        _print_mcp_json(config_block)
+        return
+
+    removed = False
+    if already:
+        print(dim("  Replacing existing user-scope registration."))
+        try:
+            removed = subprocess.run(
+                remove_cmd, capture_output=True, timeout=15,
+            ).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            removed = False
+        if not removed:
+            print(yellow("  ⚠ Could not remove the existing registration — "
+                         "the add below may be rejected."))
+
+    print(dim(f"  Registering via: {add_line}"))
+    try:
+        result = subprocess.run(add_cmd, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    if result is not None and result.returncode == 0:
+        verb = "updated" if already else "registered"
+        print(green(f"  ✓ MCP server 'moolmesh' {verb} globally in Claude Code."))
+        return
+
+    detail = ("" if result is None
+              else result.stderr.strip() or result.stdout.strip())
+    if removed:
+        print(red("  ✗ claude mcp add failed — the previous registration was "
+                  "removed and could not be re-added."))
+        if detail:
+            print(dim(f"    {detail}"))
+        print("  Re-add it manually:")
+        print(f"    {add_line}")
+        _print_mcp_json(config_block)
+        sys.exit(1)
+
+    if result is None:
+        print(yellow("  ⚠ Could not run 'claude mcp add'."))
+    else:
+        print(yellow(f"  ⚠ claude mcp add returned: {detail}"))
+        print(dim("  You can add it manually — config shown below."))
+    _print_mcp_json(config_block)
 
 
 def _mcp_config_path(target: str, system: str):
