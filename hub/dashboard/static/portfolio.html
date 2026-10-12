@@ -11,6 +11,7 @@
     --green: #7A9E7E; --orange: #D4A054; --red: #D4645C;
     --purple: #A88EC8; --yellow: #D4B85C; --cyan: #5CA8A0;
     --blue: #7FA8D9;
+    --rose: #F7B5C9;
   }
   * { margin:0; padding:0; box-sizing:border-box; }
   body { background:var(--bg); color:var(--text); font-family:'SF Mono','Cascadia Code','Fira Code',monospace; font-size:13px; line-height:1.5; overflow-x:hidden; }
@@ -130,6 +131,7 @@
   .lg-claude { background:var(--cyan); } .lg-codex { background:var(--green); }
   .lg-opencode { background:var(--purple); } .lg-qwen { background:var(--orange); }
   .lg-cursor { background:var(--yellow); } .lg-pi { background:var(--blue); }
+  .lg-antigravity { background:var(--rose); }
   .lg-other { background:var(--muted); }
   .prod-scale { display:inline-flex; align-items:center; gap:3px; margin-left:auto; }
   .prod-scale i { width:11px; height:11px; border-radius:2px; display:inline-block; background:var(--cyan); }
@@ -279,9 +281,12 @@ function metaStr(r){ return `${r.session_touches||0}s / ${r.fs_touches||0}f / ${
 // provider; shade = session volume vs the window's busiest day. Hand-rolled
 // inline SVG, zero-dep. hide_project_names is honored server-side (labels come
 // already masked; we never fall back to project_key).
-const PROV_COLOR = {claude:'var(--cyan)', codex:'var(--green)', opencode:'var(--purple)', qwen:'var(--orange)', cursor:'var(--yellow)', pi:'var(--blue)'};
+const PROV_COLOR = {claude:'var(--cyan)', codex:'var(--green)', opencode:'var(--purple)', qwen:'var(--orange)', cursor:'var(--yellow)', pi:'var(--blue)', antigravity:'var(--rose)'};
+// Display names where the id is not what a person reads (identity is the text label, never the colour, #37).
+const PROV_LABEL = {antigravity:'Antigravity'};
+function provLabel(p){ return PROV_LABEL[p] || p; }
 function provColor(p){ return PROV_COLOR[p] || 'var(--muted)'; }
-function provClass(p){ return ['claude','codex','opencode','qwen','cursor','pi'].includes(p) ? 'lg-'+p : 'lg-other'; }
+function provClass(p){ return ['claude','codex','opencode','qwen','cursor','pi','antigravity'].includes(p) ? 'lg-'+p : 'lg-other'; }
 function ymd(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 function windowDaysList(n){
   const out=[]; const t=new Date(); t.setHours(0,0,0,0);
@@ -411,7 +416,7 @@ function renderStrip(daysList, dayData, maxCount){
     let top=null, topN=-1;
     for (const [prov,n] of Object.entries(rec)){ if(n>topN){topN=n; top=prov;} }
     const op = 0.35 + 0.65*(maxCount>0 ? Math.min(total,maxCount)/maxCount : 0);
-    const detail = Object.entries(rec).map(([p,n])=>`${p} ${n}`).join(', ');
+    const detail = Object.entries(rec).map(([p,n])=>`${provLabel(p)} ${n}`).join(', ');
     return `<span class="pc-cell" style="background:${provColor(top)};opacity:${op.toFixed(2)}" title="${esc(day)}: ${total} ses (${esc(detail)})"></span>`;
   }).join('');
   return `<span class="pc-strip" role="img" aria-label="Producción diaria">${cells}</span>`;
@@ -654,7 +659,7 @@ function renderProduction(data, daysN){
 
   // Legend: one swatch per provider seen + an intensity note.
   const provs = data.providers||[];
-  let leg = provs.map(pv => `<span><i class="${provClass(pv)}"></i>${esc(pv)}</span>`).join('');
+  let leg = provs.map(pv => `<span><i class="${provClass(pv)}"></i>${esc(provLabel(pv))}</span>`).join('');
   if (!data.deliverables_measurable){
     leg += `<span title="El watcher de filesystem es opt-in">Entregables sin medir — <code>mool workspace root add &lt;ruta&gt;</code></span>`;
   }

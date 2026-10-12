@@ -186,7 +186,7 @@ class DashboardServer:
 
         # Determine which providers to harvest
         active = set(providers) if providers else {
-            "claude", "codex", "qwen", "opencode", "cursor", "pi"
+            "claude", "codex", "qwen", "opencode", "cursor", "pi", "antigravity"
         }
 
         # Harvesters — write directly to SQLite, push to sse_buffer
@@ -219,6 +219,12 @@ class DashboardServer:
             from hub.watchers.pi_watcher import PiWatcher
             self.pi_watcher = PiWatcher(self.event_store, self.sse_buffer)
             self.watchers.append(("Pi", self.pi_watcher))
+        if "antigravity" in active:
+            from hub.watchers.antigravity_watcher import AntigravityWatcher
+            self.antigravity_watcher = AntigravityWatcher(
+                self.event_store, self.sse_buffer, project_filter
+            )
+            self.watchers.append(("Antigravity", self.antigravity_watcher))
 
         # GitHarvester — runs in background for registered repos
         self.git_store: GitStore | None = None

@@ -21,6 +21,7 @@
     --cyan: #5CA8A0;
     --magenta: #B898D8;
     --blue: #7FA8D9;
+    --rose: #F7B5C9;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -63,6 +64,7 @@
   .status-dot.active.opencode { background: var(--magenta, #B898D8); }
   .status-dot.active.cursor { background: var(--cyan, #56D4DD); }
   .status-dot.active.pi { background: var(--blue); }
+  .status-dot.active.antigravity { background: var(--rose); }
 
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
@@ -168,6 +170,7 @@
   .card-provider.opencode { background: rgba(184,152,216,0.15); color: var(--magenta, #B898D8); }
   .card-provider.cursor { background: rgba(86,212,221,0.15); color: var(--cyan, #56D4DD); }
   .card-provider.pi { background: rgba(127,168,217,0.15); color: var(--blue); }
+  .card-provider.antigravity { background: rgba(247,181,201,0.15); color: var(--rose); }
 
   .project-card .card-cwd {
     font-size: 10px;
@@ -209,6 +212,7 @@
   .card-bar-fill.qwen { background: var(--yellow); }
   .card-bar-fill.opencode { background: var(--magenta, #B898D8); }
   .card-bar-fill.pi { background: var(--blue); }
+  .card-bar-fill.antigravity { background: var(--rose); }
 
   /* ── Tool Chart ── */
   .tool-row {
@@ -309,6 +313,7 @@
   .fbtn.on-qwen { border-color: var(--yellow); color: var(--yellow); }
   .fbtn.on-opencode { border-color: var(--magenta, #B898D8); color: var(--magenta, #B898D8); }
   .fbtn.on-pi { border-color: var(--blue); color: var(--blue); }
+  .fbtn.on-antigravity { border-color: var(--rose); color: var(--rose); }
 
   #feed {
     flex: 1;
@@ -341,6 +346,7 @@
   .prov.qwen { background: rgba(227,179,65,0.15); color: var(--yellow); }
   .prov.opencode { background: rgba(184,152,216,0.15); color: var(--magenta, #B898D8); }
   .prov.pi { background: rgba(127,168,217,0.15); color: var(--blue); }
+  .prov.antigravity { background: rgba(247,181,201,0.15); color: var(--rose); }
   .ev .proj { font-size: 9px; color: var(--cyan); border: 1px solid rgba(57,210,192,0.25); background: rgba(57,210,192,0.06); padding: 0 5px; border-radius: 3px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ev .etype { font-size: 10px; min-width: 65px; }
   .t-user { color: var(--accent); }
@@ -379,6 +385,7 @@
   .tl-bar .tl-qwen { background: var(--yellow); }
   .tl-bar .tl-opencode { background: var(--magenta, #B898D8); }
   .tl-bar .tl-pi { background: var(--blue); }
+  .tl-bar .tl-antigravity { background: var(--rose); }
 
   .tl-segment {
     width: 100%;
@@ -409,6 +416,7 @@
     <div class="provider-status"><div class="status-dot" id="dot-qwen"></div><span>Qwen</span></div>
     <div class="provider-status"><div class="status-dot" id="dot-opencode"></div><span>OpenCode</span></div>
     <div class="provider-status"><div class="status-dot" id="dot-pi"></div><span>Pi</span></div>
+    <div class="provider-status"><div class="status-dot" id="dot-antigravity"></div><span>Antigravity</span></div>
     <div class="conn err" id="conn">disconnected</div>
   </div>
 </header>
@@ -468,6 +476,7 @@
         <button class="fbtn" data-f="qwen" onclick="setFilter('qwen')">Qwen</button>
         <button class="fbtn" data-f="opencode" onclick="setFilter('opencode')">OpenCode</button>
         <button class="fbtn" data-f="pi" onclick="setFilter('pi')">Pi</button>
+        <button class="fbtn" data-f="antigravity" onclick="setFilter('antigravity')">Antigravity</button>
       </div>
       <span id="feed-count">0</span>
     </div>
@@ -680,8 +689,8 @@
     if (!tlData.length) return;
     const now = Date.now()/1000;
     const bins = 30; // 30 bars = 2s each
-    const provs = ['claude','codex','qwen','opencode','pi'];
-    const counts = Array.from({length:bins}, () => ({claude:0, codex:0, qwen:0, opencode:0, pi:0}));
+    const provs = ['claude','codex','qwen','opencode','pi','antigravity'];
+    const counts = Array.from({length:bins}, () => ({claude:0, codex:0, qwen:0, opencode:0, pi:0, antigravity:0}));
     for (const d of tlData) {
       const age = now - d.t;
       const idx = Math.min(bins-1, Math.floor(age/2));

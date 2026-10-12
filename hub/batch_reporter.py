@@ -23,12 +23,14 @@ from hub.parsers.qwen_parser import QwenParser
 from hub.parsers.opencode_parser import OpenCodeParser
 from hub.parsers.cursor_parser import CursorParser
 from hub.parsers.pi_parser import PiParser
+from hub.parsers.antigravity_parser import AntigravityParser
 from hub.adapters.claude_adapter import ClaudeAdapter
 from hub.adapters.codex_adapter import CodexAdapter
 from hub.adapters.qwen_adapter import QwenAdapter
 from hub.adapters.opencode_adapter import OpenCodeAdapter
 from hub.adapters.cursor_adapter import CursorAdapter
 from hub.adapters.pi_adapter import PiAdapter
+from hub.adapters.antigravity_adapter import AntigravityAdapter
 from hub.renderers.markdown import MarkdownRenderer
 
 
@@ -39,6 +41,7 @@ _PARSERS = {
     Provider.OPENCODE: OpenCodeParser(),
     Provider.CURSOR: CursorParser(),
     Provider.PI: PiParser(),
+    Provider.ANTIGRAVITY: AntigravityParser(),
 }
 
 _ADAPTERS = {
@@ -48,6 +51,7 @@ _ADAPTERS = {
     Provider.OPENCODE: OpenCodeAdapter(),
     Provider.CURSOR: CursorAdapter(),
     Provider.PI: PiAdapter(),
+    Provider.ANTIGRAVITY: AntigravityAdapter(),
 }
 
 _opencode_cache: dict[Path, list] = {}
@@ -217,6 +221,7 @@ def generate_report(
             "opencode": discovery.discover_opencode,
             "cursor": discovery.discover_cursor,
             "pi": discovery.discover_pi,
+            "antigravity": discovery.discover_antigravity,
         }
         func = provider_map.get(provider_filter)
         all_projects = func() if func else []

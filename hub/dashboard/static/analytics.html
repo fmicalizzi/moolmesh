@@ -10,6 +10,7 @@
     --text: #D4D4D8; --muted: #8B8B94; --accent: #C8B88A;
     --green: #7A9E7E; --orange: #D4A054; --red: #D4645C;
     --purple: #A88EC8; --yellow: #D4B85C; --cyan: #5CA8A0;
+    --rose: #F7B5C9;
   }
   * { margin:0; padding:0; box-sizing:border-box; }
   body { background:var(--bg); color:var(--text); font-family:'SF Mono','Cascadia Code','Fira Code',monospace; font-size:13px; line-height:1.5; overflow-x:hidden; }
@@ -72,10 +73,12 @@
   .c-codex { color:var(--green); }
   .c-qwen { color:var(--yellow); }
   .c-pi { color:var(--blue, #7FA8D9); }
+  .c-antigravity { color:var(--rose); }
   .bg-claude { background:var(--accent); }
   .bg-codex { background:var(--green); }
   .bg-qwen { background:var(--yellow); }
   .bg-pi { background:var(--blue, #7FA8D9); }
+  .bg-antigravity { background:var(--rose); }
 
   /* ── Loading ── */
   .loading { text-align:center; padding:40px; color:var(--muted); }
@@ -167,7 +170,7 @@
   let refreshTimer = null;
 
   const $ = id => document.getElementById(id);
-  const PCOLORS = { claude:'#C8B88A', codex:'#7A9E7E', qwen:'#D4B85C', pi:'#7FA8D9' };
+  const PCOLORS = { claude:'#C8B88A', codex:'#7A9E7E', qwen:'#D4B85C', pi:'#7FA8D9', antigravity:'#F7B5C9' };
   const TCOLORS = { user:'#C8B88A', assistant:'#7A9E7E', tool_use:'#D4A054', tool_result:'#5CA8A0', thinking:'#A88EC8', system:'#8B8B94', summary:'#8B8B94' };
   const PALETTE = ['#C8B88A','#7A9E7E','#D4A054','#5CA8A0','#A88EC8','#D4645C','#D4B85C','#8B8B94','#A88EC8','#C87898'];
 
@@ -359,9 +362,9 @@
     const y = v => pad.t + h - (v / maxVal) * h;
 
     // Stacked areas: claude bottom, codex middle, qwen top
-    const providers = ['claude','codex','qwen','pi'];
-    const colors = { claude:'rgba(88,166,255,0.4)', codex:'rgba(63,185,80,0.4)', qwen:'rgba(227,179,65,0.4)', pi:'rgba(127,168,217,0.4)' };
-    const strokes = { claude:'#C8B88A', codex:'#7A9E7E', qwen:'#D4B85C', pi:'#7FA8D9' };
+    const providers = ['claude','codex','qwen','pi','antigravity'];
+    const colors = { claude:'rgba(88,166,255,0.4)', codex:'rgba(63,185,80,0.4)', qwen:'rgba(227,179,65,0.4)', pi:'rgba(127,168,217,0.4)', antigravity:'rgba(247,181,201,0.4)' };
+    const strokes = { claude:'#C8B88A', codex:'#7A9E7E', qwen:'#D4B85C', pi:'#7FA8D9', antigravity:'#F7B5C9' };
 
     let svgContent = '';
 
@@ -393,7 +396,14 @@
       svgContent += `<path d="${path}" fill="none" stroke="${strokes[prov]}" stroke-width="1.5"/>`;
     }
 
-    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${svgContent}</svg>`;
+    // Legend with text: a provider is never identified by colour alone (#37).
+    const labels = { claude:'Claude', codex:'Codex', qwen:'Qwen', pi:'Pi', antigravity:'Antigravity' };
+    const present = providers.filter(p => hourly.some(h => (h[p] || 0) > 0));
+    const legend = '<div class="donut-legend" style="flex-direction:row;flex-wrap:wrap;gap:6px 14px;margin-top:6px">' +
+      present.map(p => `<span class="legend-item"><span class="legend-dot" style="background:${strokes[p]}"></span><span>${labels[p]}</span></span>`).join('') +
+      '</div>';
+
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${svgContent}</svg>` + legend;
   }
 
   // ── SVG Gauge Ring ──
