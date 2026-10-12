@@ -6,6 +6,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.27.0] — 2026-10-12
+
+MoolMesh now observes **Antigravity CLI** (`agy`), Google's terminal agent (#74).
+No new dependencies, no schema migration.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- To import your existing Antigravity CLI history: `mool backfill --provider antigravity`.
+  On the first start only conversations modified in the last 12 h are picked up live.
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Added
+- **#74 — Antigravity CLI provider.**
+  - Reads `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript.jsonl`
+    (honors `ANTIGRAVITY_APP_DATA_DIR`). The transcript is append-only. The parser
+    is incremental and dedupes steps per conversation, because some transcripts
+    repeat a whole conversation or write steps out of order. Gaps in step numbers
+    are normal.
+  - Session metadata (title, workspace, parent conversation) comes from
+    `conversation_summaries.db`, opened read-only and filtered to the CLI's own rows
+    (the index also lists the desktop app's conversations). If the index is locked,
+    missing or of an unknown version, ingestion goes on with the transcripts alone.
+  - Subagents are separate sessions linked to their parent.
+  - File tools (`view_file`, `write_to_file`, `replace_file_content`, …) give
+    absolute `file_path` values for workspace attribution. `run_command` is a shell
+    tool, so its command never lands in `file_path`.
+  - Per-conversation SQLite files (`conversations/*.db`, protobuf payloads) are
+    never opened.
+  - Registered everywhere: daemon (with watcher health), `mool backfill`, catch-up,
+    CLI/MCP provider filters, and the dashboard (labelled, never color-only).
+  - Not available yet: model, tokens, cost and git branch. Some steps carry token
+    counts; mapping them is a follow-up.
+- **Docs.** `docs/PROVIDERS.md` has an Antigravity section (paths, format, what is
+  not read and why, format-stability risk). The README provider lists include
+  Antigravity.
+
+### Known limitations
+- The transcript layout is internal, not a documented API, and `agy` ships several
+  releases a week. Unknown step types and versions are skipped and logged once,
+  never fatal.
+- The Windows data directory is not documented upstream. MoolMesh uses
+  `%USERPROFILE%\.gemini\antigravity-cli`, which is not yet verified.
+- Identical system/tool-result steps in the same second can collapse into one event
+  (about 1% on real data). The per-step ids are already generated for #67.
+
 ## [1.26.2] — 2026-10-11
 
 Honest MCP servers. A MoolMesh MCP server lives as long as its agent session, so
