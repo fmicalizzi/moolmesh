@@ -1,8 +1,8 @@
 """Provider contract: every parser+adapter emits well-formed events.
 
-Six providers, one fixture each: JSONL files for claude / codex / qwen / pi, and
-an in-test SQLite database for opencode / cursor (their session store is a DB,
-not a file). The contract is the *minimum* every provider must uphold, and it is
+Seven providers, one fixture each: JSONL files for claude / codex / qwen / pi /
+antigravity, and an in-test SQLite database for opencode / cursor (their session
+store is a DB, not a file). The contract is the *minimum* every provider must uphold, and it is
 deliberately provider-agnostic:
 
   * ``provider`` is the expected enum member;
@@ -25,6 +25,7 @@ from typing import Callable
 
 import pytest
 
+from hub.adapters.antigravity_adapter import AntigravityAdapter
 from hub.adapters.base import BaseAdapter
 from hub.adapters.claude_adapter import ClaudeAdapter
 from hub.adapters.codex_adapter import CodexAdapter
@@ -33,6 +34,7 @@ from hub.adapters.opencode_adapter import OpenCodeAdapter
 from hub.adapters.pi_adapter import PiAdapter
 from hub.adapters.qwen_adapter import QwenAdapter
 from hub.models.base import SHELL_TOOLS, Provider
+from hub.parsers.antigravity_parser import AntigravityParser
 from hub.parsers.claude_parser import ClaudeParser
 from hub.parsers.codex_parser import CodexParser
 from hub.parsers.cursor_parser import CursorParser
@@ -76,6 +78,20 @@ def _jsonl_cases(parser, adapter, fixture: str) -> Callable[[Path], list[EntryCa
     return load
 
 
+def _antigravity_cases(tmp: Path) -> list[EntryCase]:
+    # Every Antigravity transcript is named alike: the session id is the
+    # conversation directory, so the fixture is copied into the real layout.
+    conv = "11111111-1111-4111-8111-111111111111"
+    path = tmp / "brain" / conv / ".system_generated" / "logs" / "transcript.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text((FIXTURES / "antigravity_sample.jsonl").read_text(encoding="utf-8"),
+                    encoding="utf-8")
+    adapter = AntigravityAdapter()
+    entries = AntigravityParser().parse_file(path)
+    # (test_antigravity_adapter holds every event of a multi-call step to the same bar)
+    return [(e, adapter) for e in entries]
+
+
 def _opencode_cases(tmp: Path) -> list[EntryCase]:
     from tests.test_opencode_parser import _create_opencode_db
 
@@ -110,6 +126,7 @@ CASES: dict[str, tuple[Provider, Callable[[Path], list[EntryCase]]]] = {
         QwenParser(), QwenAdapter(), "qwen_sample.jsonl")),
     "pi": (Provider.PI, _jsonl_cases(
         PiParser(), PiAdapter(), "pi_sample.jsonl")),
+    "antigravity": (Provider.ANTIGRAVITY, _antigravity_cases),
     "opencode": (Provider.OPENCODE, _opencode_cases),
     "cursor": (Provider.CURSOR, _cursor_cases),
 }

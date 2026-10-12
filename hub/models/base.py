@@ -16,6 +16,7 @@ class Provider(str, Enum):
     OPENCODE = "opencode"
     CURSOR = "cursor"
     PI = "pi"
+    ANTIGRAVITY = "antigravity"
 
 
 # Tool names whose ``file_path`` is a shell command, never a file (#58).
@@ -23,6 +24,7 @@ class Provider(str, Enum):
 # workspace attribution pass ignores any legacy row that still carries one.
 SHELL_TOOLS = frozenset({
     "Bash", "bash", "run_shell_command", "shell", "exec_command",
+    "run_command",  # Antigravity CLI
 })
 
 

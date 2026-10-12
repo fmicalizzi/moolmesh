@@ -9,8 +9,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hub.models.antigravity import AntigravitySummary
 from hub.models.base import Provider
 from hub.parsers.cursor_parser import decode_project_name, default_cursor_base
+from hub.parsers.antigravity_parser import (
+    TRANSCRIPT_NAME,
+    AntigravityParser,
+    conversation_id_from_path,
+    default_antigravity_base,
+)
 from hub.parsers.pi_parser import default_pi_base
 from hub.log import get as get_logger
 from hub.sqlite_ro import connect_ro
@@ -39,7 +46,7 @@ class DiscoveredSession:
 
 
 class ProjectDiscovery:
-    """Discovers projects from Claude, Codex, Qwen, and OpenCode CLI data directories."""
+    """Discovers projects from every supported agent's data directory."""
 
     def __init__(
         self,
@@ -49,6 +56,7 @@ class ProjectDiscovery:
         opencode_base: Path | None = None,
         cursor_base: Path | None = None,
         pi_base: Path | None = None,
+        antigravity_base: Path | None = None,
         skip_dir: Callable[[Path], bool] | None = None,
     ):
         home = Path.home()
@@ -64,6 +72,7 @@ class ProjectDiscovery:
         )
         self.cursor_base = cursor_base or default_cursor_base()
         self.pi_base = pi_base or default_pi_base()
+        self.antigravity_base = antigravity_base or default_antigravity_base()
 
     def _skip(self, path: Path) -> bool:
         return self._skip_dir is not None and self._skip_dir(path)
@@ -78,6 +87,7 @@ class ProjectDiscovery:
         projects.extend(self.discover_opencode())
         projects.extend(self.discover_cursor())
         projects.extend(self.discover_pi())
+        projects.extend(self.discover_antigravity())
         return projects
 
     def discover_claude(self) -> list[DiscoveredProject]:
@@ -393,6 +403,69 @@ class ProjectDiscovery:
             return data["cwd"]
         return ""
 
+    def discover_antigravity(
+        self, summaries: dict[str, AntigravitySummary] | None = None
+    ) -> list[DiscoveredProject]:
+        """Discover Antigravity CLI conversations under ``<app dir>/brain/<uuid>/``.
+
+        Every conversation keeps ``.system_generated/logs/transcript.jsonl``
+        (subagents are conversations of their own, so they are found too).
+        Conversations are grouped by their workspace: the first
+        ``workspace_uris`` entry of ``conversation_summaries.db``, else the
+        first ``run_command`` Cwd of the transcript; the ones with neither land
+        in one ``antigravity-sessions`` bucket, never dropped. ``summaries`` is
+        the caller's already-read index (the watcher reads it once per rescan);
+        None reads it here. ``brain/`` is walked with ``skip_dir`` applied
+        before any directory is listed (cloud-only dirs, #45).
+        """
+        from collections import defaultdict
+
+        projects: list[DiscoveredProject] = []
+        brain = self.antigravity_base / "brain"
+        if not brain.is_dir() or self._skip(brain):
+            return projects
+
+        parser = AntigravityParser()
+        if summaries is None:
+            summaries = parser.read_summaries(self.antigravity_base) or {}
+
+        try:
+            conversation_dirs = sorted(brain.iterdir())
+        except OSError:
+            return projects
+
+        by_cwd: dict[str, list[Path]] = defaultdict(list)
+        for conv_dir in conversation_dirs:
+            logs = conv_dir / ".system_generated" / "logs"
+            if self._skip(conv_dir) or self._skip(logs):
+                continue
+            transcript = logs / TRANSCRIPT_NAME
+            if not transcript.is_file():
+                continue
+            summary = summaries.get(conv_dir.name)
+            cwd = summary.cwd if summary else ""
+            if not cwd:
+                cwd = parser.scan_cwd(transcript)
+            by_cwd[cwd or "antigravity-sessions"].append(transcript)
+
+        for cwd, files in sorted(by_cwd.items()):
+            if cwd == "antigravity-sessions":
+                name, path = "antigravity-sessions", str(brain)
+            else:
+                name = self.extract_project_name(cwd)
+                path = cwd
+            projects.append(
+                DiscoveredProject(
+                    name=name,
+                    path=path,
+                    provider=Provider.ANTIGRAVITY,
+                    session_dir=brain,
+                    session_files=sorted(files),
+                    encoded_name=f"antigravity-{name}",
+                )
+            )
+        return projects
+
     def find_active_sessions(
         self, provider: Provider | None = None, minutes: int = 10
     ) -> list[DiscoveredSession]:
@@ -407,7 +480,13 @@ class ProjectDiscovery:
             for f in proj.session_files:
                 try:
                     if f.stat().st_mtime >= cutoff:
-                        sid = f.stem  # session ID is typically the filename
+                        # The session ID is typically the filename; Antigravity names
+                        # every transcript alike, its id is the conversation directory.
+                        sid = (
+                            conversation_id_from_path(f) or f.stem
+                            if proj.provider == Provider.ANTIGRAVITY
+                            else f.stem
+                        )
                         subagent_files = (
                             self.discover_claude_subagents(f.parent)
                             if proj.provider == Provider.CLAUDE
