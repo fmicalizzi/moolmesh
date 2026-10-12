@@ -207,6 +207,7 @@ systemctl --user status moolmesh
 | **Qwen CLI** | `~/.qwen/projects/` | JSONL por chat |
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | SQLite (sesion → mensaje → parte) |
 | **Cursor** | `~/Library/Application Support/Cursor/User/` (macOS) | SQLite (`state.vscdb` clave-valor: bubbles del composer) |
+| **Antigravity CLI** | `~/.gemini/antigravity-cli/` (`$ANTIGRAVITY_APP_DATA_DIR`) | JSONL de transcript por conversación + índice SQLite de sesiones (solo lectura) |
 
 Las sesiones se auto-descubren al iniciar. Sin configuración, sin claves API, sin servicios en la nube.
 
@@ -417,7 +418,7 @@ Opciones del dashboard / daemon:
   --port PORT            Puerto del servidor (por defecto: 5200)
   --host HOST            Host del servidor (por defecto: localhost)
   --project NAME         Filtrar por nombre de proyecto
-  --providers LIST       Separados por coma: claude,codex,qwen,opencode
+  --providers LIST       Separados por coma: claude,codex,qwen,opencode,cursor,pi,antigravity
 
 Opciones de reportes:
   --complete             Modo contenido completo: sin truncar
@@ -536,6 +537,7 @@ Consulta [ROADMAP.md](ROADMAP.md) para planes detallados, preguntas abiertas y p
 - **Python 3.11+** — utiliza `tomllib` de la biblioteca estandar
 - **Solo GitHub Projects v2** — Projects clasicos (v1) no estan soportados
 - **Limitaciones de Cursor** — Cursor no guarda timestamps por mensaje localmente (MoolMesh los aproxima desde la metadata del composer) y su esquema en disco es reverse-engineered, por lo que una actualización de Cursor puede reducir temporalmente la ingesta hasta ajustar el parser
+- **Limitaciones de Antigravity** — solo se observa el CLI (`agy`), no la app de escritorio ni el IDE; no se leen modelo, tokens, costo ni branch de git (el transcript no los trae de forma confiable), y el formato en disco no es una API documentada y el CLI publica varias versiones por semana, por lo que una actualización puede reducir temporalmente la ingesta hasta ajustar el parser (detalles en `docs/PROVIDERS.md`)
 
 ---
 

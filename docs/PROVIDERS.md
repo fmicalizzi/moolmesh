@@ -141,7 +141,7 @@ Workspace attribution (#39/#40) needs no per-provider code: absolute
 - **Contract test** (`tests/test_provider_contract.py`): add the fixture loader
   to `CASES`. It asserts provider, session id, parseable timestamp, valid
   event type, absolute-or-None `file_path` and the shell-tool rule for every
-  provider — one bar for all six.
+  provider — one bar for all seven.
 
 ## 5. Validate with real data (read-only)
 
@@ -161,3 +161,113 @@ Workspace attribution (#39/#40) needs no per-provider code: absolute
 - [ ] Real-data validation recorded in the issue/PR (read-only).
 - [ ] Any deviation (e.g. a format quirk, a deferred export path) documented as
       a follow-up issue rather than silently skipped.
+
+## 7. Provider notes
+
+Per-provider facts a maintainer needs when the format moves. The Pi section is
+the worked example above; Antigravity is the second file-based provider and
+shows what changes when a format is less friendly.
+
+### Antigravity CLI (`agy`, v1.27.0, #74)
+
+**Scope.** The CLI only (`~/.gemini/antigravity-cli`). The desktop app
+(`~/.gemini/antigravity`) and the IDE (`~/.gemini/antigravity-ide`) keep
+other data dirs and are out of scope. `mool mcp setup --target antigravity`
+is a separate unit (its server entry must be named `moolmesh`).
+
+**Data dir.** `$ANTIGRAVITY_APP_DATA_DIR` when set (a variable seen in the
+binary, not documented by the vendor), else `~/.gemini/antigravity-cli` on
+every platform. The vendor documents no Windows data dir: `%USERPROFILE%` plus
+the same relative path is used — unverified there.
+
+**What is read** (strictly read-only, never written):
+
+| File | Used for |
+| --- | --- |
+| `brain/<conversation-uuid>/.system_generated/logs/transcript.jsonl` | the events — plain JSONL, append-only, one step per line |
+| `conversation_summaries.db` (`PRAGMA user_version = 3`) | session metadata only: title, preview, `workspace_uris`, `parent_conversation_id`, `nesting_depth`, `last_modified_time` |
+
+**What is NOT read, and why.**
+`conversations/<uuid>.db` (SQLite in WAL with payloads in protobuf — opening it
+would take locks on a live store and needs a schema we do not have),
+`transcript_full.jsonl` (same step indices, untruncated: the bounded
+`transcript.jsonl` is the contract the vendor documents through hooks, and
+keeps stored text small, #52), `presence/<uuid>.lock` (created at start, never
+updated, left behind after a close: not a liveness signal), `history.jsonl`,
+`cache/*`, `log/*`, `annotations/`, `implicit/`, and anything holding accounts
+or credentials.
+
+**Format facts the parser relies on** (verified on real transcripts):
+
+- A transcript is append-only and a step is never rewritten (a `RUNNING` step
+  stays `RUNNING`); a resumed conversation keeps appending to the same file. No
+  tail refresh is needed.
+- `step_index` is **not** unique or ordered: some transcripts repeat their
+  steps (a copy restarting at 0), some write steps out of order, indices have
+  gaps. Every step is ingested once per conversation (first occurrence wins);
+  event order comes from `created_at`, never from the line order.
+- Every value in a tool call's `args` is a **JSON-encoded string** (a path
+  arrives as `"\"/a/b.py\""`). The parser decodes each value once; a value that
+  does not decode (cut by the writer) is never turned into a path.
+- Tool calls live on `PLANNER_RESPONSE` steps. Their results are separate steps
+  (`GENERIC`, `RUN_COMMAND`, `VIEW_FILE`, `LIST_DIRECTORY`, `FIND`, `CODE_ACTION`,
+  `INVOKE_SUBAGENT`, `ASK_QUESTION`) with only `content`; nothing pairs a call
+  with its result.
+- `created_at` has one-second resolution (`...Z`, UTC). `status` is
+  `DONE | RUNNING | ERROR` and informational.
+- `conversation_summaries.db` indexes **every** Antigravity surface. Rows are
+  kept only when `app_data_dir` (stored as a name relative to `~/.gemini`, e.g.
+  `antigravity-cli`) is this CLI's own. A subagent is an ordinary conversation
+  with its own transcript and a `parent_conversation_id`.
+
+**Mapping.** `USER_INPUT` → `user`; `PLANNER_RESPONSE` → `assistant` (content),
+`thinking` and one `tool_use` per call; any step's `tool_calls` become `tool_use`;
+result steps → `tool_result` (no `tool_name`, no `file_path`);
+`SYSTEM_MESSAGE` / `ERROR_MESSAGE` → `system`; `CHECKPOINT` /
+`CONVERSATION_HISTORY` → `summary`; `EPHEMERAL_MESSAGE` and unknown types are
+skipped (unknown ones are counted and logged once). `file_path` comes only from
+`view_file` (`AbsolutePath`) and `write_to_file` / `replace_file_content` /
+`multi_replace_file_content` (`TargetFile`); `run_command` is a shell tool and
+never a path (#58). Subagents are separate sessions (`is_sidechain`, parent in
+`metadata`), never folded into the parent. Project: first `workspace_uris`
+entry, else the first `run_command` `Cwd`, else a fallback.
+
+**Incremental read.** Streamed line by line from the byte offset, complete
+lines only. The set of seen `step_index` values is **derived, not persisted**: it
+is a pure function of the file up to the stored offset (append-only), so a
+parser that sees a new offset (daemon restart, history walk, a retry after a
+failed store, a truncated file) rebuilds it from the bytes before that offset;
+`events` and `file_registry` are unchanged. The offset is keyed by
+`antigravity:<path>` (`STABLE_KEY`). Session first/last event times are
+written from the chunk's earliest and latest `created_at`, because the last
+line is not necessarily the latest step.
+
+**Summaries index.** Read once per rescan, not per poll; the last good answer is
+kept. Absent, locked, corrupt, another schema or an unknown `user_version`
+means the transcripts alone are ingested (one warning, one notice when it reads
+again). With the CLI running its `-wal` sits next to the file and the index is
+opened `mode=ro`; with no `-wal` it is opened `mode=ro&immutable=1` so the read
+never leaves an empty `-wal`/`-shm` behind (#54).
+
+**Ids (ahead of #67).** `UnifiedMessage.id = <uuid>:<step_index>`,
+`ToolCall.tool_id = <uuid>:<step_index>:<k>`. The event fingerprint is
+unchanged, so two *identical* calls of one step (same tool, same args)
+collapse into one event, as Pi's do, and so do identical `system` /
+`tool_result` events of different steps written in the same second (0.9 % of
+the events of the real conversations checked; no `tool_use` ever). The ids
+above make #67 a pure schema change.
+
+**Gaps (left empty on purpose).** Model, tokens, cost and git branch. The
+transcript carries `input_tokens` / `output_tokens` / `cache_read_tokens` on
+some `PLANNER_RESPONSE` steps (about 5 % of steps in recent versions); they are
+**not** mapped in v1 — whether they are per call or cumulative is unverified —
+and the UI shows no token figure for the provider instead of a `0`. The
+per-conversation `.db` holds more in protobuf, which stays unread (zero
+dependencies).
+
+**Risk.** The layout is not documented as an API and the vendor ships several
+releases a week (the format already moved once, `.pb` → `.db`). Guards: lines
+without a numeric `step_index`, a `type` or a valid `created_at` are skipped
+(logged once per file and reason); an unknown `type` is counted and skipped; an
+unknown `user_version` ignores the index. None of them stops a watcher (#52,
+#65).

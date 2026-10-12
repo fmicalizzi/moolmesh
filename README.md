@@ -211,6 +211,7 @@ systemctl --user status moolmesh
 | **Qwen CLI** | `~/.qwen/projects/` | JSONL per chat |
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | SQLite (session → message → part) |
 | **Cursor** | `~/Library/Application Support/Cursor/User/` (macOS) | SQLite (`state.vscdb` key-value: composer bubbles) |
+| **Antigravity CLI** | `~/.gemini/antigravity-cli/` (`$ANTIGRAVITY_APP_DATA_DIR`) | JSONL transcript per conversation + SQLite session index (read-only) |
 
 Sessions are auto-discovered on startup. No configuration, no API keys, no cloud services.
 
@@ -466,7 +467,7 @@ Dashboard / daemon options:
   --port PORT            Server port (default: 5200)
   --host HOST            Server host (default: localhost)
   --project NAME         Filter to project name
-  --providers LIST       Comma-separated: claude,codex,qwen,opencode
+  --providers LIST       Comma-separated: claude,codex,qwen,opencode,cursor,pi,antigravity
 
 Report options:
   --complete             Full-content mode: no truncation
@@ -603,6 +604,7 @@ See [ROADMAP.md](ROADMAP.md) for detailed plans, open questions, and design prin
 - **Python 3.11+** — uses `tomllib` from stdlib
 - **GitHub Projects v2 only** — classic Projects (v1) not supported
 - **Cursor caveats** — Cursor stores no per-message timestamps locally (MoolMesh approximates them from composer metadata) and its on-disk schema is reverse-engineered, so a Cursor update may temporarily reduce ingestion until the parser is adjusted
+- **Antigravity caveats** — only the CLI (`agy`) is observed, not the desktop app or IDE; model, tokens, cost and git branch are not read (the transcript does not carry them reliably), and the on-disk layout is not a documented API and the CLI ships several releases a week, so an update may temporarily reduce ingestion until the parser is adjusted (details in `docs/PROVIDERS.md`)
 
 ---
 
