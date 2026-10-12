@@ -36,7 +36,7 @@ import os
 import posixpath
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -124,14 +124,15 @@ def _valid_step_index(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def _valid_timestamp(ts: Any) -> bool:
+def _parse_timestamp(ts: Any) -> datetime | None:
+    """``created_at`` as an aware datetime (a naive one is taken as UTC); None if unusable."""
     if not isinstance(ts, str) or not ts:
-        return False
+        return None
     try:
-        datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
-        return False
-    return True
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _run_command_cwd(tool_calls: list[AntigravityToolCall]) -> str:
@@ -404,6 +405,8 @@ class AntigravityParser(BaseParser):
             "session_title": "",
             "cwd_idx": None,
             "cwd": "",
+            "first_at": None,  # (datetime, created_at) of the earliest step seen
+            "last_at": None,  # ... of the latest one
         }
 
     def _consume(
@@ -445,9 +448,16 @@ class AntigravityParser(BaseParser):
         """Update the conversation context from one new step.
 
         Lines can arrive out of order, so "first" means the lowest
-        ``step_index`` seen so far, not the first line.
+        ``step_index`` seen so far, not the first line, and the session's time
+        range is the min / max ``created_at`` over every step seen.
         """
         idx = entry.step_index
+        when = _parse_timestamp(entry.timestamp)
+        if when is not None:
+            if ctx["first_at"] is None or when < ctx["first_at"][0]:
+                ctx["first_at"] = (when, entry.timestamp)
+            if ctx["last_at"] is None or when > ctx["last_at"][0]:
+                ctx["last_at"] = (when, entry.timestamp)
         if entry.step_type == "USER_INPUT" and entry.content.strip():
             if ctx["user_idx"] is None or idx < ctx["user_idx"]:
                 ctx["user_idx"] = idx
@@ -468,6 +478,9 @@ class AntigravityParser(BaseParser):
             entry.cwd = ctx["cwd"]
             entry.session_title = ctx["session_title"]
             entry.initial_prompt = ctx["initial_prompt"]
+            if ctx["first_at"] is not None:
+                entry.first_event_at = ctx["first_at"][1]
+                entry.last_event_at = ctx["last_at"][1]
 
     def _skip_file(self, path: Path, reason: str) -> None:
         self.skipped[reason] += 1
@@ -510,7 +523,7 @@ class AntigravityParser(BaseParser):
             self._skip_line(path, "sin type", count)
             return None
         created_at = data.get("created_at")
-        if not _valid_timestamp(created_at):
+        if _parse_timestamp(created_at) is None:
             self._skip_line(path, "sin created_at válido", count)
             return None
 

@@ -299,6 +299,45 @@ class TestParseAndAdapt:
         store.close()
 
 
+    def test_an_older_step_arriving_in_a_later_poll_does_not_move_last_event_back(self, tmp_path):
+        """upsert_session overwrites last_event_at: it must always be handed the conversation's latest."""
+        base = _base(tmp_path)
+        f = write_transcript(base, [step(0, "USER_INPUT", sec=1, content="start"),
+                                    step(3, sec=50, content="late step")])
+        store = _store(tmp_path)
+        w = AntigravityWatcher(store, None, antigravity_base=base)
+        w.discover_files()
+        key = w.registry_key(f)
+        events, offset = w._parse_and_adapt(f, 0)
+        store.store_with_offset(events, key, "antigravity", str(f), offset)
+        assert store.get_session_detail(CONV)["last_event_at"] == "2026-05-01T10:00:50Z"
+
+        # poll 2: only an older step (written out of order) shows up
+        append(f, [step(1, sec=20, content="written late, happened earlier")])
+        events, offset2 = w._parse_and_adapt(f, offset)
+        assert len(events) == 1
+        store.store_with_offset(events, key, "antigravity", str(f), offset2)
+        detail = store.get_session_detail(CONV)
+        assert detail["last_event_at"] == "2026-05-01T10:00:50Z"
+        assert detail["first_event_at"] == "2026-05-01T10:00:01Z"
+
+        # the same after a restart: a fresh watcher rebuilds the range from the bytes before the offset
+        append(f, [step(2, sec=30, content="another old one")])
+        w2 = AntigravityWatcher(store, None, antigravity_base=base)
+        w2.discover_files()
+        events, offset3 = w2._parse_and_adapt(f, offset2)
+        assert len(events) == 1
+        store.store_with_offset(events, key, "antigravity", str(f), offset3)
+        assert store.get_session_detail(CONV)["last_event_at"] == "2026-05-01T10:00:50Z"
+
+        # and a genuinely newer step still advances it
+        append(f, [step(9, sec=59, content="newest")])
+        events, offset4 = w2._parse_and_adapt(f, offset3)
+        store.store_with_offset(events, key, "antigravity", str(f), offset4)
+        assert store.get_session_detail(CONV)["last_event_at"] == "2026-05-01T10:00:59Z"
+        store.close()
+
+
 # ── conversation_summaries.db in the cycle ───────────────────────
 
 

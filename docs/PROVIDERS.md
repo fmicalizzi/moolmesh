@@ -239,8 +239,11 @@ parser that sees a new offset (daemon restart, history walk, a retry after a
 failed store, a truncated file) rebuilds it from the bytes before that offset;
 `events` and `file_registry` are unchanged. The offset is keyed by
 `antigravity:<path>` (`STABLE_KEY`). Session first/last event times are
-written from the chunk's earliest and latest `created_at`, because the last
-line is not necessarily the latest step.
+written from the conversation's earliest and latest `created_at` — tracked in
+the parser context and rebuilt from the prefix like the seen set — because the
+last line is not necessarily the latest step, and `upsert_session` overwrites
+`last_event_at` with whatever it is given: a late-written older step, in the
+same poll or a later one, must not move it back.
 
 **Summaries index.** Read once per rescan, not per poll; the last good answer is
 kept. Absent, locked, corrupt, another schema or an unknown `user_version`

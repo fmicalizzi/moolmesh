@@ -104,7 +104,6 @@ class AntigravityWatcher(BaseHarvester):
         # Session metadata once per conversation per chunk, from the LAST entry
         # (the parser stamped the full context on every entry of the chunk).
         meta_entries: dict[str, AntigravityEntry] = {}
-        times: dict[str, list[str]] = {}
         for entry in entries:
             self._apply_summary(entry)
             project = self._project_for(path, entry)
@@ -112,16 +111,17 @@ class AntigravityWatcher(BaseHarvester):
                 events.append(event.to_dict())
             if entry.session_id:
                 meta_entries[entry.session_id] = entry
-                times.setdefault(entry.session_id, []).append(entry.timestamp)
-        for session_id, entry in meta_entries.items():
+        for entry in meta_entries.values():
             meta = self._adapter.to_session_meta(entry, self._project_for(path, entry))
             if not meta:
                 continue
-            # Steps can arrive out of order (a repeated conversation restarts at
-            # step 0), so the last line is not the latest event: record the
-            # earliest and the latest timestamp of the chunk explicitly — the
-            # session's last_event_at must never go back.
-            first, last = min(times[session_id]), max(times[session_id])
+            # Steps can arrive out of order, in this chunk or in a later poll, so
+            # the last line is not the latest event: write the conversation's
+            # earliest and latest created_at (kept by the parser, rebuilt after a
+            # restart like the seen set). upsert_session overwrites last_event_at
+            # with what it is given, so it must never be handed an older step.
+            first = entry.first_event_at or entry.timestamp
+            last = entry.last_event_at or entry.timestamp
             self._store.upsert_session(meta.to_dict(), first)
             if last != first:
                 self._store.upsert_session(meta.to_dict(), last)

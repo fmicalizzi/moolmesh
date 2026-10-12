@@ -63,6 +63,11 @@ class AntigravityEntry:
     cwd: str = ""  # first ``run_command`` Cwd of the conversation
     session_title: str = ""  # first line of the first user prompt
     initial_prompt: str = ""
+    # Earliest / latest ``created_at`` of the whole conversation so far (not of
+    # this chunk): steps can arrive out of order, so a late-written older step
+    # must never move the session's last event back.
+    first_event_at: str = ""
+    last_event_at: str = ""
 
     # Stamped by the watcher from ``conversation_summaries.db`` (optional).
     parent_session: str = ""

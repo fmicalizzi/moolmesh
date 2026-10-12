@@ -419,6 +419,30 @@ class TestIncremental:
         assert [e.step_index for e in entries] == [0, 1, 2]
         assert new_off == path.stat().st_size
 
+    def test_the_session_time_range_covers_every_step_seen_not_just_the_chunk(self, tmp_path):
+        path = write_transcript(tmp_path, [step(0, "USER_INPUT", sec=5, content="a"),
+                                           step(3, sec=50, content="b")])
+        parser = AntigravityParser()
+        first, off = parser.parse_incremental(path, 0)
+        assert {(e.first_event_at, e.last_event_at) for e in first} == {
+            ("2026-05-01T10:00:05Z", "2026-05-01T10:00:50Z")}
+        append(path, [step(1, sec=20, content="older, written later")])
+        (older,), _ = parser.parse_incremental(path, off)
+        assert (older.first_event_at, older.last_event_at) == (
+            "2026-05-01T10:00:05Z", "2026-05-01T10:00:50Z")
+        # a restarted parser derives the same range from the prefix
+        (again,), _ = AntigravityParser().parse_incremental(path, off)
+        assert (again.first_event_at, again.last_event_at) == (
+            older.first_event_at, older.last_event_at)
+
+    def test_timestamps_with_and_without_fractions_or_offsets_compare_by_instant(self, tmp_path):
+        lines = [step(0, "USER_INPUT", content="a", created_at="2026-05-01T10:00:09.500Z"),
+                 step(1, content="b", created_at="2026-05-01T10:00:09Z"),
+                 step(2, content="c", created_at="2026-05-01T05:00:30-05:00")]  # = 10:00:30Z
+        entry = AntigravityParser().parse_file(write_transcript(tmp_path, lines))[0]
+        assert (entry.first_event_at, entry.last_event_at) == (
+            "2026-05-01T10:00:09Z", "2026-05-01T05:00:30-05:00")
+
     def test_missing_file_raises_oserror_for_the_harvester(self, tmp_path):
         with pytest.raises(OSError):
             AntigravityParser().parse_incremental(transcript_path(tmp_path), 0)
@@ -515,6 +539,27 @@ class TestSummaries:
         make_summaries_db(base, [summary_row(CONV)]).close()
         assert set(parser.read_summaries(base)) == {CONV}
         assert sum("vuelve a leerse" in r.getMessage() for r in caplog.records) == 1
+
+    def test_a_locked_index_with_a_wal_present_is_skipped_once_and_recovers(
+            self, tmp_path, monkeypatch, caplog):
+        caplog.set_level("INFO", logger=LOGGER)
+        base = tmp_path / "antigravity-cli"
+        owner = make_summaries_db(base, [summary_row(CONV)], wal=True)  # the CLI is running: -wal exists
+        assert (base / "conversation_summaries.db-wal").exists()
+        real = sqlite3.connect
+
+        def locked(database, *args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        parser = AntigravityParser()
+        monkeypatch.setattr(sqlite3, "connect", locked)
+        for _ in range(3):
+            assert parser.read_summaries(base) is None
+        assert sum(r.levelname == "WARNING" for r in caplog.records) == 1
+        monkeypatch.setattr(sqlite3, "connect", real)
+        assert set(parser.read_summaries(base)) == {CONV}
+        assert sum("vuelve a leerse" in r.getMessage() for r in caplog.records) == 1
+        owner.close()
 
     def test_a_different_schema_is_skipped_not_raised(self, tmp_path, caplog):
         caplog.set_level("WARNING", logger=LOGGER)
