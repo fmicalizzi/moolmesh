@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: October 2026 — v1.27.0
+Last updated: October 2026 — v1.27.1
 
 ---
 
@@ -220,6 +220,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.26.2** ([#70](https://github.com/fmicalizzi/moolmesh/issues/70), [#72](https://github.com/fmicalizzi/moolmesh/issues/72)): honest MCP servers. A server notices when the installed version no longer matches the code it is running (new `get_server_info` tool, `stale_server` on dict results) and `mool doctor` lists live servers and flags stale ones; `--install-deps` failures exit 1, single-repo full sync says why GitHub failed, and MCP client configs are read and written as UTF-8 and never overwritten when unreadable.
 
 - **v1.27.0** ([#74](https://github.com/fmicalizzi/moolmesh/issues/74)): **Antigravity CLI** provider. Reads `transcript.jsonl` per conversation plus session metadata from `conversation_summaries.db` (CLI rows only); subagents linked to their parent; file tools give absolute `file_path`; registered across daemon, backfill, catch-up, CLI/MCP filters and the dashboard. Model, tokens and cost stay empty in v1.
+
+- **v1.27.1** ([#75](https://github.com/fmicalizzi/moolmesh/issues/75), [#78](https://github.com/fmicalizzi/moolmesh/issues/78)): OpenCode no longer loses streamed text. The cursor waits for parts that are still streaming and no longer skips everything past 500 new parts per poll; `mool backfill --reparse opencode` recovers the replies, reasoning and tool details stored without text (and sessions that never arrived). OpenCode file tools now give full `file_path` values. On Windows, git/gh subprocesses of the daemon no longer flash console windows.
 
 ---
 

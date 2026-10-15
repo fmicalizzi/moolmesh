@@ -6,6 +6,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.27.1] — 2026-10-15
+
+OpenCode sessions no longer lose the agent's replies (#75), and the daemon no longer
+flashes console windows on Windows (#78). No new dependencies, no schema migration.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- **OpenCode users:** recover what earlier versions stored without text:
+  `mool backfill --reparse opencode` (a simulation that writes nothing), then
+  `mool backfill --reparse opencode --yes` (events.db is backed up first).
+  Sessions active in the last 10 minutes are skipped; run it again later for those.
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Fixed
+- **#75 — OpenCode replies, reasoning and tool details stored without text.**
+  - OpenCode inserts a `part` row when a stream starts and fills it in place. The
+    rowid cursor read parts before they finished, so most assistant, thinking and
+    tool events were stored as `[text]` / `[reasoning]` / `[tool]` placeholders.
+    A part is now emitted only when complete (`time.end` for text and reasoning,
+    `completed`/`error` for tools); the cursor waits just before the first part
+    still streaming. A part that never finishes is emitted after 10 minutes.
+  - Any poll with more than 500 new parts skipped everything past the first 500
+    (the cursor jumped to the table's global maximum). This hit the first start
+    and every catch-up after the daemon was down. The cursor now advances one
+    batch at a time.
+  - OpenCode's file tools name their argument `filePath`, which was ignored, so
+    read/edit/write events never carried a `file_path`. Paths are now kept whole
+    (only shell commands keep an 80-character preview), which feeds workspace
+    attribution.
+- **#78 — console windows on Windows.** Under `pythonw.exe` every `git` call of the
+  git harvester (and `gh auth token`) opened a console window that stole focus.
+  They now run with `CREATE_NO_WINDOW`, and `git fetch` never prompts for
+  credentials on a terminal (`GIT_TERMINAL_PROMPT=0`).
+
+### Added
+- `mool backfill --reparse opencode`: re-reads every session in `opencode.db`
+  (also sessions that never reached events.db) and replaces its events atomically,
+  one session at a time. Dry-run by default; `--yes` backs events.db up first; a
+  second run changes nothing; a session that can't be read is left untouched.
+
 ## [1.27.0] — 2026-10-12
 
 MoolMesh now observes **Antigravity CLI** (`agy`), Google's terminal agent (#74).
