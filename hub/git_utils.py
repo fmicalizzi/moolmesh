@@ -1,8 +1,10 @@
 """Utilidades git para MoolMesh."""
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import sys
 
 from hub.log import get
 
@@ -13,6 +15,25 @@ _log = get("GitUtils")
 # cp1252 y revienta con mensajes de commit acentuados — issue #32).
 _DECODE = {"encoding": "utf-8", "errors": "replace"}
 
+# subprocess.CREATE_NO_WINDOW only exists on Windows; same value as daemon.py.
+_CREATE_NO_WINDOW = 0x08000000
+
+
+def no_window() -> dict:
+    """``subprocess`` kwargs that keep a child from opening a console (#78).
+
+    The daemon runs under ``pythonw.exe`` on Windows (no console), so every
+    child without ``CREATE_NO_WINDOW`` gets a new console window that flashes
+    and steals focus. Elsewhere: no kwargs. ``sys.platform`` is read per call.
+    """
+    if sys.platform == "win32":
+        return {"creationflags": _CREATE_NO_WINDOW}
+    return {}
+
+
+def _run_kwargs() -> dict:
+    return {**_DECODE, **no_window()}
+
 
 def is_git_repo(path: str) -> bool:
     """Verifica que path es un repositorio git."""
@@ -21,7 +42,7 @@ def is_git_repo(path: str) -> bool:
             ["git", "-C", path, "rev-parse", "--git-dir"],
             capture_output=True,
             timeout=5,
-            **_DECODE,
+            **_run_kwargs(),
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -35,7 +56,7 @@ def get_remote_url(path: str, remote: str = "origin") -> str | None:
             ["git", "-C", path, "remote", "get-url", remote],
             capture_output=True,
             timeout=5,
-            **_DECODE,
+            **_run_kwargs(),
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -97,7 +118,10 @@ def git_fetch(path: str) -> bool:
             ["git", "-C", path, "fetch", "--all", "--quiet"],
             capture_output=True,
             timeout=60,
-            **_DECODE,
+            # Never prompt for credentials from the daemon; credential
+            # helpers don't depend on the terminal prompt.
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            **_run_kwargs(),
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -115,7 +139,7 @@ def get_remote_refs(path: str) -> dict[str, str]:
              "--format=%(refname) %(objectname)"],
             capture_output=True,
             timeout=10,
-            **_DECODE,
+            **_run_kwargs(),
         )
         refs = {}
         if result.returncode == 0:
@@ -145,7 +169,7 @@ def git_log_range(path: str, old_sha: str, new_sha: str) -> str | None:
              f"--format={fmt}", "--numstat"],
             capture_output=True,
             timeout=30,
-            **_DECODE,
+            **_run_kwargs(),
         )
         if result.returncode == 0:
             return result.stdout
@@ -174,7 +198,7 @@ def git_log_since(path: str, since_date: str) -> str | None:
              f"--format={fmt}", "--numstat"],
             capture_output=True,
             timeout=60,
-            **_DECODE,
+            **_run_kwargs(),
         )
         if result.returncode == 0:
             return result.stdout
@@ -202,7 +226,7 @@ def git_log_all(path: str) -> str | None:
              f"--format={fmt}", "--numstat"],
             capture_output=True,
             timeout=300,
-            **_DECODE,
+            **_run_kwargs(),
         )
         if result.returncode == 0:
             return result.stdout

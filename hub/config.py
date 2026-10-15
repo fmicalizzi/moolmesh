@@ -360,13 +360,15 @@ def get_github_token(config: HubConfig) -> str | None:
     
     # 3. gh auth token (subprocess, timeout 5s)
     try:
+        from hub.git_utils import no_window
         result = subprocess.run(
             ["gh", "auth", "token"],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=5
+            timeout=5,
+            **no_window(),
         )
         if result.returncode == 0:
             return result.stdout.strip()
