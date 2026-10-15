@@ -148,6 +148,11 @@ version after the upgrade and `mool daemon restart`. Servers started by 1.26.1 o
 earlier can't report that they are stale and are not listed — only a restart
 replaces them.
 
+**OpenCode users:** after upgrading to 1.27.1, run `mool backfill --reparse opencode`
+(a simulation that writes nothing) and then `mool backfill --reparse opencode --yes`
+to recover the replies, reasoning and tool details that earlier versions stored
+without their text (events.db is backed up first).
+
 **Windows:** a running daemon can lock files inside the pipx venv and make
 `pipx upgrade` fail or apply only partially — stop it first
 (`mool daemon stop`), upgrade, then `mool daemon start`. If you installed with

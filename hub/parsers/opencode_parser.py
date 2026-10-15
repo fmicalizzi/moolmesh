@@ -85,14 +85,20 @@ class OpenCodeParser(BaseParser):
             _log.warning("No se pudo leer %s en solo lectura; se saltea", path, exc_info=True)
             return []
 
-    def parse_session(self, path: Path, session_id: str) -> list[OpenCodeEntry]:
-        """Parse a single session by ID."""
+    def parse_session(
+        self, path: Path, session_id: str, now_ms: int | None = None
+    ) -> list[OpenCodeEntry]:
+        """Parse a single session by ID.
+
+        With ``now_ms``, parts still streaming (``_is_complete``, including its
+        staleness cap) are left out — the ``--reparse opencode`` path (#75).
+        """
         if not path.exists():
             return []
         try:
             conn = self._connect(path)
             try:
-                return self._extract_session(conn, session_id)
+                return self._extract_session(conn, session_id, now_ms)
             finally:
                 conn.close()
         except sqlite3.Error:
@@ -214,9 +220,14 @@ class OpenCodeParser(BaseParser):
         rows = conn.execute(query).fetchall()
         return [e for row in rows if (e := self._row_to_entry(row)) is not None]
 
-    def _extract_session(self, conn: sqlite3.Connection, session_id: str) -> list[OpenCodeEntry]:
-        query = self._QUERY + " WHERE s.id = ? ORDER BY pt.time_created ASC"
+    def _extract_session(
+        self, conn: sqlite3.Connection, session_id: str, now_ms: int | None = None
+    ) -> list[OpenCodeEntry]:
+        # pt.session_id keeps the lookup on part_session_idx.
+        query = self._QUERY + " WHERE pt.session_id = ? ORDER BY pt.time_created ASC"
         rows = conn.execute(query, (session_id,)).fetchall()
+        if now_ms is not None:
+            rows = [r for r in rows if self._row_is_complete(r, now_ms)]
         return [e for row in rows if (e := self._row_to_entry(row)) is not None]
 
     def _row_to_entry(self, row: sqlite3.Row) -> OpenCodeEntry | None:

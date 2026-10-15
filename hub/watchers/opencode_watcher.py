@@ -52,6 +52,14 @@ class OpenCodeWatcher(BaseHarvester):
 
     def _parse_and_adapt(self, path: Path, offset: int) -> tuple[list[dict], int]:
         entries, new_offset = self._parser.parse_incremental(path, offset)
+        return self.adapt_entries(entries), new_offset
+
+    def adapt_entries(self, entries: list) -> list[dict]:
+        """Entries → event dicts, upserting each session's metadata once.
+
+        Shared with ``mool backfill --reparse opencode`` (#75), which passes a
+        null session sink as the store in ``--dry-run``.
+        """
         events = []
         seen_sessions: set[str] = set()
         for entry in entries:
@@ -64,4 +72,4 @@ class OpenCodeWatcher(BaseHarvester):
                 meta = self._adapter.to_session_meta(entry, project)
                 if meta:
                     self._store.upsert_session(meta.to_dict(), entry.timestamp)
-        return events, new_offset
+        return events

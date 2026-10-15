@@ -162,6 +162,12 @@ que sigue sirviendo la versión vieja después de actualizar y de `mool daemon r
 Los servidores iniciados por 1.26.1 o anteriores no pueden avisar que están
 desactualizados y no aparecen en la lista: solo un reinicio los reemplaza.
 
+**Usuarios de OpenCode:** después de actualizar a 1.27.1, corré
+`mool backfill --reparse opencode` (una simulación que no escribe nada) y luego
+`mool backfill --reparse opencode --yes` para recuperar las respuestas, el
+razonamiento y el detalle de las herramientas que las versiones anteriores guardaron
+sin texto (antes se hace un backup de events.db).
+
 **Windows:** un daemon en ejecución puede bloquear archivos dentro del venv de pipx y
 hacer que `pipx upgrade` falle o se aplique a medias: detenelo antes
 (`mool daemon stop`), actualizá y luego `mool daemon start`. Si instalaste con Scoop u

@@ -416,6 +416,8 @@ class ReparseReport:
     elapsed: float = 0.0
     interrupted: bool = False
     needs_yes: bool = False
+    source_sessions: int = 0       # opencode: sessions in opencode.db
+    new_sessions: int = 0          # opencode: re-parsed sessions absent from events.db
 
 
 class _NullSessionSink:
@@ -460,13 +462,15 @@ def _row_key(e: dict) -> tuple:
     )
 
 
-def _stored_rows(conn: sqlite3.Connection, session_ids: list[str]) -> list[tuple]:
+def _stored_rows(
+    conn: sqlite3.Connection, session_ids: list[str], provider: str = "codex"
+) -> list[tuple]:
     marks = ",".join("?" * len(session_ids))
     return [tuple(r) for r in conn.execute(
         f"""SELECT fingerprint, event_type, timestamp, summary, NULLIF(session_id, ''),
                    project, file_path, tool_name, model, cwd, tokens_json
-            FROM events WHERE provider = 'codex' AND session_id IN ({marks})""",
-        session_ids,
+            FROM events WHERE provider = ? AND session_id IN ({marks})""",
+        [provider, *session_ids],
     )]
 
 
@@ -645,6 +649,145 @@ def run_reparse_codex(
             store.refresh_session_stats("codex", sids)
     except KeyboardInterrupt:
         # replace_session_events already rolled its group back.
+        report.interrupted = True
+    finally:
+        ro.close()
+        report.elapsed = time.monotonic() - t0
+    return report
+
+
+# ── OpenCode re-parse (#75) ────────────────────────────────────────────────
+#
+# Before v1.27.1 the live OpenCode cursor read parts while they were still
+# streaming (stored as "[text]" / "[reasoning]" / "[tool]" placeholders) and
+# skipped every part past the first 500 of a poll. ``run_reparse_opencode``
+# re-reads EVERY session in opencode.db — also those that never reached
+# events.db — one session at a time (``part_session_idx``; the 5 GB DB is
+# never loaded whole) and swaps each session's events atomically. Same safety
+# contract as the Codex re-parse: dry-run by default, ``yes`` + online backup
+# before the first deletion, idempotent, sessions the daemon is live-reading
+# (a part updated in the last ``OPENCODE_LIVE_MS``) are left alone.
+
+OPENCODE_LIVE_MS = 10 * 60 * 1000
+
+
+def run_reparse_opencode(
+    store: EventStore | None,
+    dry_run: bool = True,
+    yes: bool = False,
+    db_path: Path | None = None,
+    backup_dir: Path | None = None,
+    opencode_db: Path | None = None,
+    now: float | None = None,
+    report: ReparseReport | None = None,
+) -> ReparseReport:
+    """Re-ingest every OpenCode session from opencode.db (see notes above).
+
+    The daemon's rowid cursor (``file_registry``) is never touched: rows are
+    replaced per session, and the live watcher's fingerprint dedup absorbs
+    any overlap. ``now`` (s epoch) is injectable for tests.
+    """
+    from hub.cache.event_store import DEFAULT_DB_PATH
+    from hub.sqlite_ro import connect_ro
+    from hub.watchers.opencode_watcher import OpenCodeWatcher, _DEFAULT_DB
+
+    t0 = time.monotonic()
+    db_path = db_path or DEFAULT_DB_PATH
+    opencode_db = opencode_db or _DEFAULT_DB
+    report = report if report is not None else ReparseReport()
+    report.dry_run = dry_run or not yes
+    if not dry_run and not yes:
+        report.needs_yes = True
+    if not report.dry_run and store is None:
+        raise ValueError("run_reparse_opencode needs a store for a real run")
+    if not db_path.exists() or not opencode_db.exists():
+        report.elapsed = time.monotonic() - t0
+        return report
+
+    now_ms = int((time.time() if now is None else now) * 1000)
+    # Parse with a null session sink: an up-to-date session must not get its
+    # metadata re-upserted (that would date last_event_at at its first part).
+    watcher = OpenCodeWatcher(_NullSessionSink(), None, opencode_db=opencode_db)
+    ro = _open_ro(db_path)
+    try:
+        stored = {r[0] for r in ro.execute(
+            "SELECT DISTINCT session_id FROM events "
+            "WHERE provider = 'opencode' AND session_id IS NOT NULL AND session_id != ''"
+        )}
+        report.stored_sessions = len(stored)
+        src = connect_ro(opencode_db)
+        try:
+            session_ids = sorted(r[0] for r in src.execute("SELECT id FROM session"))
+        finally:
+            src.close()
+        report.source_sessions = len(session_ids)
+        report.no_rollout = len(stored - set(session_ids))
+
+        for sid in session_ids:
+            src = connect_ro(opencode_db)
+            try:
+                last = src.execute(
+                    "SELECT MAX(time_updated) FROM part WHERE session_id = ?", (sid,)
+                ).fetchone()[0]
+            finally:
+                src.close()
+            try:
+                live = last is not None and now_ms - int(last) <= OPENCODE_LIVE_MS
+            except (TypeError, ValueError):
+                live = False
+            if live:
+                report.in_window += 1
+                continue
+            try:
+                entries = watcher._parser.parse_session(opencode_db, sid, now_ms=now_ms)
+                events = [e for e in watcher.adapt_entries(entries) if e.get("session_id")]
+            except Exception:
+                _log.warning("reparse: parse failed for opencode session %s", sid, exc_info=True)
+                report.failed += 1
+                continue
+            if not events and sid not in stored:
+                continue  # nothing to ingest, nothing stored
+
+            new_keys: dict[str, tuple] = {}
+            for e in events:
+                k = _row_key(e)
+                new_keys.setdefault(k[0], k)
+            sids = sorted({e["session_id"] for e in events} | {sid})
+            old_rows = _stored_rows(ro, sids, "opencode")
+            if sorted(old_rows, key=repr) == sorted(new_keys.values(), key=repr):
+                report.up_to_date += 1
+                continue
+
+            report.groups += 1
+            report.sessions += len(sids)
+            if sid not in stored:
+                report.new_sessions += 1
+            report.events_to_delete += len(old_rows)
+            report.events_to_insert += len(new_keys)
+            if report.dry_run:
+                continue
+
+            if not report.backup_path:
+                report.backup_path = str(backup_events_db(db_path, backup_dir))
+            try:
+                if entries:  # a session new to events.db needs its sessions row
+                    first = entries[0]
+                    project = first.project_name or first.project_dir or "opencode"
+                    meta = watcher._adapter.to_session_meta(first, project)
+                    if meta:
+                        store.upsert_session(meta.to_dict(), first.timestamp)
+                report.events_inserted += store.replace_session_events(
+                    "opencode", sids, events, []
+                )
+            except KeyboardInterrupt:
+                raise
+            except Exception:
+                _log.warning("reparse: opencode session rolled back %s", sids, exc_info=True)
+                report.failed += 1
+                continue
+            store.refresh_session_stats("opencode", sids)
+    except KeyboardInterrupt:
+        # replace_session_events already rolled its session back.
         report.interrupted = True
     finally:
         ro.close()

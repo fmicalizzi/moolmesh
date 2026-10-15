@@ -498,18 +498,20 @@ def _print_backfill_report(report, verbose: bool) -> None:
 
 
 def cmd_backfill_reparse(args: argparse.Namespace) -> None:
-    """``mool backfill --reparse codex``: re-ingest stored Codex sessions (#45)."""
-    from hub.backfill import ReparseReport, run_reparse_codex
+    """``mool backfill --reparse codex|opencode``: re-ingest stored sessions (#45, #75)."""
+    from hub.backfill import ReparseReport, run_reparse_codex, run_reparse_opencode
     from hub.cache.event_store import DEFAULT_DB_PATH, EventStore
 
     from hub.backfill import EventsDbUnreadable
 
+    provider = args.reparse
+    opencode = provider == "opencode"
     real = args.yes and not args.dry_run
     store = EventStore() if real else None
     report = ReparseReport()
+    run = run_reparse_opencode if opencode else run_reparse_codex
     try:
-        run_reparse_codex(store, dry_run=not real, yes=args.yes,
-                          db_path=DEFAULT_DB_PATH, report=report)
+        run(store, dry_run=not real, yes=args.yes, db_path=DEFAULT_DB_PATH, report=report)
     except EventsDbUnreadable as exc:
         print(red(f"  No se pudo abrir events.db en solo lectura: {exc}"))
         sys.exit(1)
@@ -517,32 +519,46 @@ def cmd_backfill_reparse(args: argparse.Namespace) -> None:
         if store is not None:
             store.close()
 
-    title = "Re-parseo de Codex" + ("" if real else " (simulación, no escribe)")
+    name = "OpenCode" if opencode else "Codex"
+    title = f"Re-parseo de {name}" + ("" if real else " (simulación, no escribe)")
     print(f"\n  {bold(title)} — {report.elapsed:.1f}s")
     print(f"  {'─' * 66}")
-    print(f"    sesiones de Codex guardadas:  {report.stored_sessions:>7,}")
-    print(f"    a re-parsear:                 {report.sessions:>7,}   "
-          f"({report.groups:,} grupos de rollouts)")
+    if opencode:
+        print(f"    sesiones en opencode.db:      {report.source_sessions:>7,}")
+        print(f"    sesiones de OpenCode guardadas:{report.stored_sessions:>6,}")
+        print(f"    a re-parsear:                 {report.sessions:>7,}   "
+              f"({report.new_sessions:,} nuevas en events.db)")
+    else:
+        print(f"    sesiones de Codex guardadas:  {report.stored_sessions:>7,}")
+        print(f"    a re-parsear:                 {report.sessions:>7,}   "
+              f"({report.groups:,} grupos de rollouts)")
     print(f"    eventos a borrar:             {report.events_to_delete:>7,}")
     print(f"    eventos a insertar:           {report.events_to_insert:>7,}")
     if real:
         print(f"    eventos insertados:           {report.events_inserted:>7,}")
     print(f"    ya al día:                    {report.up_to_date:>7,}")
-    print(f"    sin rollout en disco:         {report.no_rollout:>7,}   (no se tocan)")
-    print(f"    en ventana del daemon:        {report.in_window:>7,}   (no se tocan)")
+    if opencode:
+        print(f"    ya no están en opencode.db:   {report.no_rollout:>7,}   (no se tocan)")
+        print(f"    con actividad reciente:       {report.in_window:>7,}   "
+              "(no se tocan; el daemon las está leyendo)")
+    else:
+        print(f"    sin rollout en disco:         {report.no_rollout:>7,}   (no se tocan)")
+        print(f"    en ventana del daemon:        {report.in_window:>7,}   (no se tocan)")
     if report.unreadable:
         print(yellow(f"    rollouts ilegibles:           {report.unreadable:>7,}   (no se tocan)"))
     if report.skipped_cloud:
         print(yellow(f"    rollouts en la nube:          {report.skipped_cloud:>7,}   (no se tocan)"))
     if report.failed:
-        print(red(f"    grupos revertidos por error:  {report.failed:>7,}   (ver log)"))
+        unit = "sesiones" if opencode else "grupos"
+        print(red(f"    {unit} revertidos por error:".ljust(34) + f"{report.failed:>7,}   (ver log)"))
     if report.backup_path:
         print(green(f"  Backup previo de events.db: {report.backup_path}"))
-    if report.needs_yes:
-        print(yellow("  Para ejecutarlo: mool backfill --reparse codex --yes "
+    if report.needs_yes or (opencode and not real and report.sessions):
+        print(yellow(f"  Para ejecutarlo: mool backfill --reparse {provider} --yes "
                      "(se hace un backup de events.db antes de borrar)."))
     if report.interrupted:
-        print(yellow("  Interrumpido: el grupo en curso se revirtió; volvé a correr."))
+        unit = "la sesión en curso se revirtió" if opencode else "el grupo en curso se revirtió"
+        print(yellow(f"  Interrumpido: {unit}; volvé a correr."))
     print()
     if report.interrupted:
         sys.exit(130)
@@ -1365,8 +1381,9 @@ def main() -> None:
                     help="Process at most N files with new data, then stop (re-run continues)")
     bf.add_argument("--verbose", action="store_true",
                     help="List processed/skipped files (masked under hide_project_names)")
-    bf.add_argument("--reparse", choices=["codex"],
-                    help="Re-ingest stored sessions with the current parser (backs up events.db)")
+    bf.add_argument("--reparse", choices=["codex", "opencode"],
+                    help="Re-ingest sessions with the current parser (backs up events.db); "
+                         "opencode re-reads every session in opencode.db")
     bf.add_argument("--yes", action="store_true",
                     help="Confirm --reparse (without it, --reparse only simulates)")
     bf.add_argument("--full", action="store_true", help=argparse.SUPPRESS)  # legacy no-op
