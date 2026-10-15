@@ -252,6 +252,38 @@ class TestReparseOpencode:
         ).fetchone() == (3,)
         store.close()
 
+    def test_read_error_skips_the_session_and_keeps_its_rows(self, env, monkeypatch):
+        from hub.parsers.opencode_parser import OpenCodeParser
+        _session(env["oc"], "ses_bad")
+        _session(env["oc"], "ses_good")
+        store = _store_legacy(env, ["ses_bad", "ses_good"])
+        before = _rows(store, "ses_bad")
+        real = OpenCodeParser._extract_session
+
+        def flaky(self, conn, sid, now_ms=None):
+            if sid == "ses_bad":
+                raise sqlite3.OperationalError("database is locked")
+            return real(self, conn, sid, now_ms)
+
+        monkeypatch.setattr(OpenCodeParser, "_extract_session", flaky)
+        rep = _reparse(env, store, dry_run=False, yes=True)
+        assert rep.unreadable == 1 and rep.sessions == 1
+        assert _rows(store, "ses_bad") == before
+        assert ("assistant", "the module looks fine", None) in _rows(store, "ses_good")
+        store.close()
+
+    def test_empty_read_never_wipes_a_stored_session(self, env, monkeypatch):
+        from hub.parsers.opencode_parser import OpenCodeParser
+        _session(env["oc"], "ses_old")
+        store = _store_legacy(env, ["ses_old"])
+        before = _rows(store, "ses_old")
+        monkeypatch.setattr(OpenCodeParser, "_extract_session",
+                            lambda self, conn, sid, now_ms=None: [])
+        rep = _reparse(env, store, dry_run=False, yes=True)
+        assert rep.unreadable == 1 and rep.events_to_delete == 0
+        assert _rows(store, "ses_old") == before
+        store.close()
+
 
 class TestReparseOpencodeCli:
     def test_cli_without_yes_only_simulates(self, env, monkeypatch, capsys):

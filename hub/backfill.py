@@ -724,26 +724,40 @@ def run_reparse_opencode(
         report.no_rollout = len(stored - set(session_ids))
 
         for sid in session_ids:
-            src = connect_ro(opencode_db)
+            # One read-only connection per session; a read error (busy past
+            # the timeout, WAL hiccup) skips that session — never a parse that
+            # silently came back empty and would wipe its stored rows.
             try:
-                last = src.execute(
-                    "SELECT MAX(time_updated) FROM part WHERE session_id = ?", (sid,)
-                ).fetchone()[0]
-            finally:
-                src.close()
-            try:
-                live = last is not None and now_ms - int(last) <= OPENCODE_LIVE_MS
-            except (TypeError, ValueError):
-                live = False
-            if live:
-                report.in_window += 1
+                src = connect_ro(opencode_db)
+                try:
+                    last = src.execute(
+                        "SELECT MAX(time_updated) FROM part WHERE session_id = ?", (sid,)
+                    ).fetchone()[0]
+                    try:
+                        live = last is not None and now_ms - int(last) <= OPENCODE_LIVE_MS
+                    except (TypeError, ValueError):
+                        live = False
+                    if live:
+                        report.in_window += 1
+                        continue
+                    src.row_factory = sqlite3.Row
+                    entries = watcher._parser._extract_session(src, sid, now_ms)
+                finally:
+                    src.close()
+            except sqlite3.Error:
+                _log.warning("reparse: opencode session %s unreadable", sid, exc_info=True)
+                report.unreadable += 1
                 continue
             try:
-                entries = watcher._parser.parse_session(opencode_db, sid, now_ms=now_ms)
                 events = [e for e in watcher.adapt_entries(entries) if e.get("session_id")]
             except Exception:
                 _log.warning("reparse: parse failed for opencode session %s", sid, exc_info=True)
                 report.failed += 1
+                continue
+            if not events and sid in stored:
+                # Parts can't vanish wholesale from a readable session: keep
+                # what is stored rather than delete it on an empty read.
+                report.unreadable += 1
                 continue
             if not events and sid not in stored:
                 continue  # nothing to ingest, nothing stored

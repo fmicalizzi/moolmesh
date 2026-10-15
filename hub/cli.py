@@ -545,7 +545,8 @@ def cmd_backfill_reparse(args: argparse.Namespace) -> None:
         print(f"    sin rollout en disco:         {report.no_rollout:>7,}   (no se tocan)")
         print(f"    en ventana del daemon:        {report.in_window:>7,}   (no se tocan)")
     if report.unreadable:
-        print(yellow(f"    rollouts ilegibles:           {report.unreadable:>7,}   (no se tocan)"))
+        label = "sesiones ilegibles:" if opencode else "rollouts ilegibles:"
+        print(yellow(f"    {label:<30}{report.unreadable:>7,}   (no se tocan)"))
     if report.skipped_cloud:
         print(yellow(f"    rollouts en la nube:          {report.skipped_cloud:>7,}   (no se tocan)"))
     if report.failed:
