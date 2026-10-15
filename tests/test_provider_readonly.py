@@ -34,13 +34,14 @@ def _opencode_db(path: Path, wal: bool = False) -> sqlite3.Connection:
         CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT,
             time_created TEXT, data TEXT);
         CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
-            time_created TEXT, data TEXT);
+            time_created TEXT, time_updated TEXT, data TEXT);
         INSERT INTO project VALUES ('p1', '/Users/test/app', 'app');
         INSERT INTO session VALUES ('s1', 'p1', '/Users/test/app', 'T', '', 0, 't');
         INSERT INTO message VALUES ('m1', 's1', '2026-06-01T10:00:00', '{"role": "user"}');
     """)
     conn.execute(
-        "INSERT INTO part VALUES ('pt1', 'm1', 's1', '2026-06-01T10:00:01', ?)",
+        "INSERT INTO part VALUES ('pt1', 'm1', 's1', '2026-06-01T10:00:01',"
+        " '2026-06-01T10:00:01', ?)",
         (json.dumps({"type": "text", "content": "hello"}),),
     )
     conn.commit()
@@ -89,7 +90,8 @@ class TestConnectRo:
         db = tmp_path / "opencode.db"
         owner = _opencode_db(db, wal=True)
         owner.execute(
-            "INSERT INTO part VALUES ('pt2', 'm1', 's1', '2026-06-01T10:00:02', ?)",
+            "INSERT INTO part VALUES ('pt2', 'm1', 's1', '2026-06-01T10:00:02',"
+            " '2026-06-01T10:00:02', ?)",
             (json.dumps({"type": "text", "content": "pending in wal"}),),
         )
         owner.commit()

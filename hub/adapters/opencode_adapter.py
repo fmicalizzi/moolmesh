@@ -46,8 +46,16 @@ class OpenCodeAdapter(BaseAdapter):
         file_path = None
         if entry.tool_call:
             tool_name = entry.tool_call.name
-            file_path = (entry.tool_call.input_data.get("path", "")
-                         or entry.tool_call.input_data.get("command", ""))[:80]
+            # OpenCode's read/edit/write tools name their file ``filePath``
+            # (#75). A path is kept whole — cutting it breaks workspace
+            # attribution; only a shell command keeps its short preview.
+            data = entry.tool_call.input_data
+            path = data.get("filePath") or data.get("path")
+            if isinstance(path, str) and path:
+                file_path = path
+            else:
+                command = data.get("command", "")
+                file_path = command[:80] if isinstance(command, str) else ""
 
         raw_text = entry.text.strip()
         text = raw_text.replace("\n", " ")

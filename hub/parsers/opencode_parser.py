@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,48 @@ from hub.parsers.base import BaseParser
 from hub.sqlite_ro import connect_ro
 
 _log = get_logger("OpenCodeParser")
+
+# OpenCode inserts a ``part`` row when a stream starts and UPDATEs it in place
+# as text/tool state arrives (#75). A part still streaming after this long is
+# treated as complete: a cut stream or crashed session never gets its end mark.
+_STALE_MS = 10 * 60 * 1000
+_BATCH = 500
+
+
+def _is_complete(part_data: dict, role: str, time_updated: object, now_ms: int) -> bool:
+    """Whether a ``part`` row has its final content (#75).
+
+    * ``text`` / ``reasoning``: complete once ``data.time.end`` is set. A user
+      ``text`` part has no ``data.time`` and is complete when inserted; a part
+      with no ``time`` at all carries no streaming signal and counts as complete.
+    * ``tool``: complete when ``data.state.status`` is ``completed``/``error``;
+      ``pending``/``running`` are in progress. No status = no signal = complete.
+    * Anything else (``step-start``, ``step-finish``, ``patch``, ``file``,
+      ``compaction``, unknown types) is complete when read.
+
+    An in-progress part whose ``time_updated`` (ms epoch) is older than
+    ``_STALE_MS`` — or unreadable — is treated as complete, so a stream that
+    never finishes can't pin the cursor forever.
+    """
+    if not isinstance(part_data, dict):
+        return True
+    part_type = part_data.get("type", "")
+    in_progress = False
+    if part_type in ("text", "reasoning"):
+        t = part_data.get("time")
+        if not (part_type == "text" and role == "user") and isinstance(t, dict):
+            in_progress = not t.get("end")
+    elif part_type == "tool":
+        state = part_data.get("state")
+        if isinstance(state, dict):
+            in_progress = state.get("status") in ("pending", "running")
+    if not in_progress:
+        return True
+    try:
+        updated = int(time_updated)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return True
+    return now_ms - updated > _STALE_MS
 
 
 class OpenCodeParser(BaseParser):
@@ -56,29 +99,36 @@ class OpenCodeParser(BaseParser):
             _log.warning("No se pudo leer %s en solo lectura; se saltea", path, exc_info=True)
             return []
 
-    def parse_incremental(self, path: Path, offset: int) -> tuple[list[OpenCodeEntry], int]:
+    def parse_incremental(
+        self, path: Path, offset: int, now_ms: int | None = None
+    ) -> tuple[list[OpenCodeEntry], int]:
         """Incremental parse using rowid as cursor. offset = last processed rowid.
 
-        A DB that can't be read (e.g. a WAL whose ``-shm`` can't be created)
-        is skipped for this cycle — never reopened read-write.
+        Reads one batch of ``_BATCH`` parts after ``offset`` (#75):
+
+        * complete parts (``_is_complete``) are emitted;
+        * a part still streaming is NOT emitted and holds the cursor at its
+          rowid - 1, so its later UPDATEs are read on a next poll. Complete
+          parts after it are emitted now and re-read then; the event
+          fingerprint + ``INSERT OR IGNORE`` drop the repeats (no SSE either);
+        * otherwise the cursor moves to the batch's last rowid — never to the
+          table's global MAX(rowid), which skipped everything past the first
+          500 new parts of a poll.
+
+        ``now_ms`` (ms epoch) is injectable for tests. A DB that can't be read
+        (e.g. a WAL whose ``-shm`` can't be created) is skipped for this cycle
+        — never reopened read-write.
         """
         if not path.exists():
             return [], offset
+        now_ms = int(time.time() * 1000) if now_ms is None else now_ms
         try:
             conn = self._connect(path)
             try:
                 rows = conn.execute(
-                    self._QUERY + " WHERE pt.rowid > ? ORDER BY pt.rowid ASC LIMIT 500",
-                    (offset,),
+                    self._QUERY + " WHERE pt.rowid > ? ORDER BY pt.rowid ASC LIMIT ?",
+                    (offset, _BATCH),
                 ).fetchall()
-                if not rows:
-                    result: tuple[list[OpenCodeEntry], int] = ([], offset)
-                else:
-                    entries = [e for row in rows if (e := self._row_to_entry(row)) is not None]
-                    new_offset = conn.execute(
-                        "SELECT MAX(rowid) FROM part WHERE rowid > ?", (offset,)
-                    ).fetchone()[0] or offset
-                    result = (entries, new_offset)
             finally:
                 conn.close()
         except (sqlite3.Error, OSError):
@@ -92,7 +142,31 @@ class OpenCodeParser(BaseParser):
         if self._failing:
             self._failing = False
             _log.info("%s vuelve a leerse en solo lectura", path)
-        return result
+        if not rows:
+            return [], offset
+
+        entries: list[OpenCodeEntry] = []
+        pending_rid: int | None = None
+        for row in rows:
+            if not self._row_is_complete(row, now_ms):
+                if pending_rid is None:
+                    pending_rid = row["rid"]
+                continue
+            if (e := self._row_to_entry(row)) is not None:
+                entries.append(e)
+        new_offset = pending_rid - 1 if pending_rid is not None else rows[-1]["rid"]
+        return entries, max(new_offset, offset)
+
+    @staticmethod
+    def _row_is_complete(row: sqlite3.Row, now_ms: int) -> bool:
+        """``_is_complete`` on a raw query row (bad JSON counts as complete)."""
+        try:
+            part_data = json.loads(row["part_data"]) if row["part_data"] else {}
+            msg_data = json.loads(row["message_data"]) if row["message_data"] else {}
+        except (json.JSONDecodeError, TypeError):
+            return True
+        role = msg_data.get("role", "") if isinstance(msg_data, dict) else ""
+        return _is_complete(part_data, role, row["part_updated"], now_ms)
 
     @staticmethod
     def can_parse(path: Path) -> bool:
@@ -124,9 +198,11 @@ class OpenCodeParser(BaseParser):
             m.id AS message_id,
             m.data AS message_data,
             m.time_created AS message_time,
+            pt.rowid AS rid,
             pt.id AS part_id,
             pt.data AS part_data,
-            pt.time_created AS part_time
+            pt.time_created AS part_time,
+            pt.time_updated AS part_updated
         FROM part pt
         JOIN message m ON pt.message_id = m.id
         JOIN session s ON pt.session_id = s.id

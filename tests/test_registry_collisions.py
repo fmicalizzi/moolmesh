@@ -305,7 +305,7 @@ def _opencode_db(path: Path, parts: int, start: int = 0) -> None:
         CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT,
             time_created TEXT, data TEXT);
         CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT,
-            session_id TEXT, time_created TEXT, data TEXT);
+            session_id TEXT, time_created TEXT, time_updated TEXT, data TEXT);
         INSERT OR IGNORE INTO project VALUES ('p1', '/Users/test/app', 'app');
         INSERT OR IGNORE INTO session VALUES ('s1', 'p1', '/Users/test/app', 'T', '', 0, '');
         INSERT OR IGNORE INTO message VALUES ('m1', 's1', '2026-06-01T10:00:00',
@@ -313,8 +313,8 @@ def _opencode_db(path: Path, parts: int, start: int = 0) -> None:
     """)
     for i in range(start, start + parts):
         conn.execute(
-            "INSERT INTO part VALUES (?, 'm1', 's1', ?, ?)",
-            (f"pt{i}", f"2026-06-01T10:{i:02d}:00",
+            "INSERT INTO part VALUES (?, 'm1', 's1', ?, ?, ?)",
+            (f"pt{i}", f"2026-06-01T10:{i:02d}:00", f"2026-06-01T10:{i:02d}:00",
              json.dumps({"type": "text", "content": f"hello {i}"})),
         )
     conn.commit()
