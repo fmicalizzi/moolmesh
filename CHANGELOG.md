@@ -6,6 +6,50 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.31.0] — 2026-11-04
+
+Versioned snapshot export (#82) and outage days dated correctly (#101). No new
+dependencies. One events.db migration that rewrites rows (after a backup) and
+a one-time re-derivation in workspace.db (after a backup).
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- If the daemon was down at some point before v1.28.1, the events it caught up
+  on when it came back were dated on the day it returned, and the portfolio
+  showed the outage days empty. On the first start, MoolMesh backs up
+  `events.db` (`~/.moolmesh/backups/events-<date>.db`) and marks as historical
+  the events ingested more than 12 h after their own time. On the next
+  attribution cycle it backs up `workspace.db` (`workspace-<date>.db`) and
+  recomputes each session's activity day per project. `daemon.log` shows how
+  many events (`migración 8: …`) and edges (`atribución: … aristas cambiaron de
+  día`) moved. Nothing is lost or duplicated; if a backup fails the change is
+  retried on the next start or cycle. Recent events and events with an
+  unreadable time do not change.
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Added
+- **Versioned snapshot export** (#82): `mool snapshot export --repo OWNER/REPO
+  --since D --until D [--output FILE] [--allow-incomplete]` and the MCP tool
+  `get_snapshot` return the same deterministic JSON: local days, issues
+  opened/closed, totals at the cut, merged PRs with their stats and closing
+  references, and a freshness block. Contract in `docs/schema/snapshot.v1.md`
+  (`schema_version` "1.0"). A range newer than the repo's last GitHub sync is
+  refused (exit 3) unless `--allow-incomplete`, which marks it
+  `freshness.complete = false`.
+
+### Fixed
+- **Outage days empty in the portfolio** (#101): events.db migration 8 applies
+  the #62 ingest rule to live rows stored before it existed, and a one-time
+  full attribution pass replaces each edge's activity clock so those sessions
+  land on the days they happened.
+
+---
+
 ## [1.30.0] — 2026-11-04
 
 Board repos, remote-only repos and clients spanning several owners (#93, #94,
