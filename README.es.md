@@ -12,7 +12,7 @@ Observabilidad unificada, telemetría y coordinación entre agentes — ejecutá
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
-[![Tests: 2232 passing](https://img.shields.io/badge/Tests-2232%20passing-green.svg)](#desarrollo)
+[![Tests: 2247 passing](https://img.shields.io/badge/Tests-2247%20passing-green.svg)](#desarrollo)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#)
 [![PyPI](https://img.shields.io/pypi/v/moolmesh.svg)](https://pypi.org/project/moolmesh/)
 
@@ -655,7 +655,7 @@ pytest tests/ -v
 pytest tests/ -v --cov=hub
 ```
 
-2232 tests. Cero dependencias externas. Python stdlib + SQLite.
+2247 tests. Cero dependencias externas. Python stdlib + SQLite.
 
 Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para las guías de contribución.
 
