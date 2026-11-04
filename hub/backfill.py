@@ -789,7 +789,7 @@ def run_reparse_opencode(
                     project = first.project_name or first.project_dir or "opencode"
                     meta = watcher._adapter.to_session_meta(first, project)
                     if meta:
-                        store.upsert_session(meta.to_dict(), first.timestamp)
+                        store.upsert_session(meta.to_dict(), meta.first_event_at)
                 report.events_inserted += store.replace_session_events(
                     "opencode", sids, events, []
                 )

@@ -71,5 +71,6 @@ class OpenCodeWatcher(BaseHarvester):
                 seen_sessions.add(entry.session_id)
                 meta = self._adapter.to_session_meta(entry, project)
                 if meta:
-                    self._store.upsert_session(meta.to_dict(), entry.timestamp)
+                    # ISO from the adapter, never the raw ms-epoch (#79).
+                    self._store.upsert_session(meta.to_dict(), meta.first_event_at)
         return events

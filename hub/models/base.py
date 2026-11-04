@@ -146,6 +146,10 @@ class SessionMeta:
     is_sidechain: bool = False
     initial_prompt: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    # ISO time of the entry that produced this meta, for the caller's
+    # ``upsert_session(meta, timestamp)`` (#79). Optional; not in to_dict().
+    first_event_at: str = ""
+    last_event_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {

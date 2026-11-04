@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from hub.adapters.base import BaseAdapter
+from hub.localtime import utc_iso_from_epoch
 from hub.models.base import (
     MessageRole, Provider, SessionMeta, TokenUsage, ToolCall, UnifiedEvent, UnifiedMessage,
 )
@@ -62,8 +63,7 @@ class OpenCodeAdapter(BaseAdapter):
         summary = text[:120] if text else f"[{entry.part_type}]"
         full_text = raw_text if raw_text else None
 
-        parsed_ts = self._parse_timestamp(entry.timestamp)
-        ts_str = parsed_ts.isoformat() if parsed_ts else str(entry.timestamp)
+        ts_str = self.iso_timestamp(entry.timestamp) or str(entry.timestamp)
 
         return UnifiedEvent(
             provider=Provider.OPENCODE,
@@ -79,6 +79,9 @@ class OpenCodeAdapter(BaseAdapter):
         )
 
     def to_session_meta(self, entry: OpenCodeEntry, project: str) -> SessionMeta | None:
+        # ISO, never the raw ms-epoch (#79): sessions.first_event_at /
+        # last_event_at are compared as text against ISO event timestamps.
+        at = self.iso_timestamp(entry.timestamp) or ""
         return SessionMeta(
             id=entry.session_id,
             provider=Provider.OPENCODE,
@@ -87,6 +90,8 @@ class OpenCodeAdapter(BaseAdapter):
             cwd=entry.cwd or "",
             model=entry.model_id or "",
             cost=entry.cost or 0.0,
+            first_event_at=at,
+            last_event_at=at,
         )
 
     def _map_role(self, entry: OpenCodeEntry) -> MessageRole | None:
@@ -149,6 +154,23 @@ class OpenCodeAdapter(BaseAdapter):
                 return "other"
 
     @staticmethod
+    def iso_timestamp(ts: str | int | float) -> str | None:
+        """An OpenCode clock as the ISO string stored in ``events.timestamp``.
+
+        OpenCode's ``time_created`` is a ms epoch: it becomes fixed-width UTC
+        (``utc_iso_from_epoch``), never the machine's local offset — that ISO
+        string feeds the event fingerprint, which must not change with DST or
+        a zone change (#79). An ISO input keeps its own offset.
+        """
+        if not ts or isinstance(ts, bool):
+            return None
+        iso = utc_iso_from_epoch(ts)
+        if iso:
+            return iso
+        parsed = OpenCodeAdapter._parse_timestamp(ts)
+        return parsed.isoformat() if parsed else None
+
+    @staticmethod
     def _parse_timestamp(ts: str | int | float) -> datetime | None:
         if not ts:
             return None
@@ -156,8 +178,9 @@ class OpenCodeAdapter(BaseAdapter):
             try:
                 if ts > 1e12:
                     ts = ts / 1000
-                return datetime.fromtimestamp(ts, tz=datetime.now().astimezone().tzinfo)
-            except (ValueError, TypeError, OSError):
+                # The instant in UTC — never the machine's *current* offset (#79).
+                return datetime.fromtimestamp(ts, tz=timezone.utc)
+            except (ValueError, TypeError, OSError, OverflowError):
                 return None
         try:
             return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
