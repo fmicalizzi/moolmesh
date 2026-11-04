@@ -6,6 +6,61 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.33.0] — 2026-11-04
+
+Robustness and cleanup batch. No new dependencies. One additive events.db
+migration (no rows rewritten).
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- events.db migration 9 adds a nullable `events.parent_id`. Nothing existing
+  is rewritten, so no backup is taken. Only sessions ingested after the
+  upgrade carry it.
+- The first rollup after the upgrade deletes orphan workspaces (no edges,
+  touches, rollup rows, candidates or active days; never a registered repo).
+  These rows are derived and come back if anything resolves to them again.
+  `daemon.log` shows the count (`rollup: N workspace(s) huérfano(s)
+  eliminados`).
+- Numbers that change on purpose: tool-call counts no longer include the
+  per-directory extras of multi-directory Codex calls, and "files" counters no
+  longer count cwd-fallback edges (now reported as `cwd_edges`).
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Added
+- **Active branch of tree sessions** (#67): Pi and Claude store each entry's
+  parent (`events.parent_id`); `mool export` and the MCP session events show
+  only the branch the user is on. Abandoned branches stay in the database and
+  in every other view.
+- **`mool mcp setup antigravity`** (#77, also `--target antigravity`): writes
+  `~/.gemini/config/mcp_config.json` → `mcpServers.moolmesh`. Idempotent; a
+  JSONC file or unexpected structure is never rewritten (the block to add by
+  hand is printed instead).
+
+### Fixed
+- **Cloud placeholders in `.git` reads** (#52): the workspace resolver never
+  opens a `.git` config, gitdir or commondir that is an online-only
+  placeholder, so it never triggers a download.
+- **`search_events` order** (#52): newest by event time (ISO or epoch), then
+  live before historical; a backfill no longer pushes recent matches down.
+- **Orphan workspaces** (#46): pruned at the end of each rollup, so
+  `list_workspaces` stops listing them.
+- **Codex attribution** (#47): the latest `turn_context.cwd` is the per-turn
+  base; drive-letter and UNC paths attribute on any host; `world_state` and
+  `token_usage_record` lines are recognized and ignored.
+- **Read-surface counts** (#48): tool stats count calls, not directories;
+  "files" excludes cwd-fallback edges.
+- **Cleanups** (#49): the dashboard closes `workspace_store` on shutdown once
+  its threads joined; the freshness line stops re-announcing itself to screen
+  readers; a test no longer re-imports the conftest.
+- **Docs** (#77): Pi row in the README agent tables.
+
+---
+
 ## [1.32.0] — 2026-11-04
 
 Days worked in the portfolio (#114, the second cause of #101). No new

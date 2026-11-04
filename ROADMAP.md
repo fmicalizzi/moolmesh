@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.32.0
+Last updated: November 2026 — v1.33.0
 
 ---
 
@@ -242,6 +242,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.31.2** ([#111](https://github.com/fmicalizzi/moolmesh/issues/111)): `daemon start` tells a daemon that is still starting from one that is shutting down, and waits for the first instead of reporting "still shutting down".
 
 - **v1.32.0** ([#114](https://github.com/fmicalizzi/moolmesh/issues/114), #101 cause 2): the portfolio production strip counts a session on every local day it worked a project; range totals count distinct sessions.
+
+- **v1.33.0** ([#67](https://github.com/fmicalizzi/moolmesh/issues/67), [#52](https://github.com/fmicalizzi/moolmesh/issues/52), [#46](https://github.com/fmicalizzi/moolmesh/issues/46), [#47](https://github.com/fmicalizzi/moolmesh/issues/47), [#48](https://github.com/fmicalizzi/moolmesh/issues/48), [#49](https://github.com/fmicalizzi/moolmesh/issues/49), [#77](https://github.com/fmicalizzi/moolmesh/issues/77)): active branch of tree sessions in export and MCP (`events.parent_id`); `mool mcp setup antigravity`; resolver skips cloud placeholders; `search_events` by event time; orphan workspaces pruned; Codex per-turn cwd and Windows paths; tool stats count calls and "files" exclude cwd edges; shutdown and accessibility cleanups.
 
 ---
 
