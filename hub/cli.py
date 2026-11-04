@@ -91,6 +91,7 @@ def _launch_daemon(args: argparse.Namespace, *, restarted: bool) -> None:
     """
     from hub.daemon import (
         daemonize, wait_for_daemon_ready, DaemonStartError, _is_supervised, LOG_FILE,
+        SLOW_START_NOTICE, START_SLOW_TIMEOUT,
     )
     from hub.dashboard.server import DashboardStartError
 
@@ -130,7 +131,11 @@ def _launch_daemon(args: argparse.Namespace, *, restarted: bool) -> None:
             providers=providers,
             fixed_port=True,
         )
-        wait_for_daemon_ready(pid, args.host, port)
+        wait_for_daemon_ready(
+            pid, args.host, port,
+            on_slow=lambda: print(dim(f"  PID {pid} {SLOW_START_NOTICE} "
+                                      f"(waiting up to {START_SLOW_TIMEOUT:g}s)")),
+        )
     except DaemonStartError as exc:
         _report_daemon_failure(exc)
         sys.exit(1)
@@ -268,6 +273,11 @@ def _autostart_delegates(args: argparse.Namespace) -> bool:
     return autostart.managed_state() is not None
 
 
+# How long a supervised start/restart waits for /health before a new daemon
+# PID that is alive turns it into a slow-start wait (#108).
+SUPERVISED_START_TIMEOUT = 15.0
+
+
 def _delegate_to_supervisor(args: argparse.Namespace) -> int:
     """Run start/stop/restart through the supervisor that owns the daemon.
 
@@ -277,8 +287,9 @@ def _delegate_to_supervisor(args: argparse.Namespace) -> int:
     """
     from hub import autostart
     from hub.daemon import (
-        read_pid, stop_daemon, wait_for_pid_exit, _fetch_health, _probe_host,
-        DaemonStopTimeout, STOP_TIMEOUT,
+        read_pid, stop_daemon, wait_for_pid_exit, wait_until_serving,
+        _fetch_health, _probe_host, DaemonStopTimeout, STOP_TIMEOUT,
+        SLOW_START_NOTICE, START_SLOW_TIMEOUT,
     )
 
     state = autostart.managed_state()
@@ -330,23 +341,49 @@ def _delegate_to_supervisor(args: argparse.Namespace) -> int:
         print(dim("  It starts again at the next login, or with: mool daemon start"))
         return 0
 
-    import time
-    deadline = time.monotonic() + 15
-    health = None
-    while time.monotonic() < deadline:
-        health = _fetch_health(_probe_host(host), port)
+    # Wait for the new daemon's /health. Past SUPERVISED_START_TIMEOUT a new
+    # PID that is alive is a slow start (a migration backing up events.db):
+    # keep waiting up to START_SLOW_TIMEOUT instead of a false error (#108).
+    probe = _probe_host(host)
+    found: dict = {}
+    seen: list[int] = []
+
+    def ready() -> bool:
+        health = _fetch_health(probe, port)
         if (health and health.get("status") in ("healthy", "degraded")
                 and (old_pid is None or health.get("pid") != old_pid)):
-            break
-        health = None
-        time.sleep(0.5)
+            found["health"] = health
+            return True
+        return False
+
+    def alive() -> bool | None:
+        # The supervised daemon writes the pidfile before opening the DBs.
+        pid = read_pid()   # None when absent or no longer alive
+        if pid and pid != old_pid:
+            if pid not in seen:
+                seen.append(pid)
+            return True
+        return False if seen else None
+
+    def on_slow() -> None:
+        print(dim(f"  PID {seen[-1]} {SLOW_START_NOTICE} "
+                  f"(waiting up to {START_SLOW_TIMEOUT:g}s)"))
+
+    outcome = wait_until_serving(ready, alive, timeout=SUPERVISED_START_TIMEOUT,
+                                 on_slow=on_slow)
     verb = "restarted" if action == "restart" else "started"
-    if health:
+    if outcome == "ready":
+        health = found["health"]
         print(green(f"MoolMesh daemon {verb} via {name} (PID {health.get('pid')})"))
         print(f"  Dashboard → http://{host}:{port}")
         return 0
-    print(red(f"Error: {name} {verb} the daemon but nothing answered on port "
-              f"{port} within 15s"), file=sys.stderr)
+    if outcome == "exited":
+        print(red(f"Error: {name} {verb} the daemon but it (PID {seen[-1]}) exited "
+                  f"before answering on port {port}"), file=sys.stderr)
+    else:
+        waited = START_SLOW_TIMEOUT if seen else SUPERVISED_START_TIMEOUT
+        print(red(f"Error: {name} {verb} the daemon but nothing answered on port "
+                  f"{port} within {waited:g}s"), file=sys.stderr)
     if state.mechanism == "systemd":
         print(dim(f"  Logs → journalctl --user -u {autostart.SYSTEMD_UNIT}"), file=sys.stderr)
     else:

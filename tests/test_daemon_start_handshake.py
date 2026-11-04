@@ -105,7 +105,8 @@ class TestWaitForDaemonReady:
         monkeypatch.setattr(daemon, "_POLL_INTERVAL", 0.01)
 
         with pytest.raises(DaemonStartError, match="no healthy answer"):
-            daemon.wait_for_daemon_ready(4242, "127.0.0.1", 65500, timeout=0.05)
+            daemon.wait_for_daemon_ready(4242, "127.0.0.1", 65500, timeout=0.05,
+                                        slow_timeout=0.05)
         assert terminated == [4242]
 
     def test_timeout_terminates_the_child(self, monkeypatch):
@@ -116,7 +117,8 @@ class TestWaitForDaemonReady:
         monkeypatch.setattr(daemon, "_POLL_INTERVAL", 0.01)
 
         with pytest.raises(DaemonStartError, match="no healthy answer"):
-            daemon.wait_for_daemon_ready(4242, "127.0.0.1", 65502, timeout=0.05)
+            daemon.wait_for_daemon_ready(4242, "127.0.0.1", 65502, timeout=0.05,
+                                        slow_timeout=0.05)
         assert terminated == [4242]
 
     def test_wildcard_host_is_probed_on_loopback(self, monkeypatch):
@@ -149,7 +151,7 @@ class TestCLIBackgroundHandshake:
         ready: list = []
         monkeypatch.setattr(
             daemon, "wait_for_daemon_ready",
-            lambda pid, host, port: ready.append((pid, host, port)),
+            lambda pid, host, port, **kw: ready.append((pid, host, port)),
         )
         monkeypatch.setattr(sys, "argv", ["mool", "daemon", "start", "--port", "5555"])
 
@@ -167,7 +169,7 @@ class TestCLIBackgroundHandshake:
         log_file.write_text("Port 5556 in use by another process\nboom\n", encoding="utf-8")
         monkeypatch.setattr(daemon, "LOG_FILE", log_file)
 
-        def fail(pid, host, port):
+        def fail(pid, host, port, **kw):
             raise DaemonStartError("the daemon exited before becoming healthy (port 5556)")
 
         monkeypatch.setattr(daemon, "wait_for_daemon_ready", fail)
@@ -206,7 +208,7 @@ class TestCLIBackgroundHandshake:
         monkeypatch.setattr(daemon, "daemon_status", lambda: None)
         monkeypatch.setattr(
             daemon, "wait_for_daemon_ready",
-            lambda pid, host, port: (_ for _ in ()).throw(
+            lambda pid, host, port, **kw: (_ for _ in ()).throw(
                 DaemonStartError("no healthy answer on port 5557 within 10s")
             ),
         )
@@ -224,7 +226,7 @@ class TestCLIBackgroundHandshake:
 
         self._prepare(monkeypatch)
         monkeypatch.setattr(daemon, "daemon_status", lambda: None)
-        monkeypatch.setattr(daemon, "wait_for_daemon_ready", lambda pid, host, port: None)
+        monkeypatch.setattr(daemon, "wait_for_daemon_ready", lambda pid, host, port, **kw: None)
         monkeypatch.setattr(sys, "argv", ["mool", "daemon", "restart", "--port", "5558"])
 
         cli.main()

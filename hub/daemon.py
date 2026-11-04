@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 _IS_WINDOWS = sys.platform.startswith("win")
@@ -18,6 +19,12 @@ LOG_FILE = CONFIG_DIR / "daemon.log"
 # How long the parent waits for a just-launched daemon to answer /health (#55b).
 DEFAULT_START_TIMEOUT = 10.0
 _POLL_INTERVAL = 0.2
+# A start whose new process is still alive past that window is not failed
+# (#108): a first start after an upgrade can run a migration that backs up a
+# large events.db before the server answers. It is waited for up to this
+# long, with SLOW_START_NOTICE printed once.
+START_SLOW_TIMEOUT = 180.0
+SLOW_START_NOTICE = "starting (migrating databases?) …"
 
 # How long ``stop`` (every mechanism) and a ``start`` that finds a daemon
 # shutting down wait for the old PID to exit (#96). Shutdown takes well under
@@ -245,41 +252,90 @@ def _terminate_pid(pid: int, *, wait_seconds: float = 3.0) -> None:
         pass
 
 
+def wait_until_serving(
+    ready: Callable[[], bool],
+    alive: Callable[[], bool | None],
+    *,
+    timeout: float,
+    slow_timeout: float | None = None,
+    on_slow: Callable[[], None] | None = None,
+) -> str:
+    """Poll ``ready()`` for a starting daemon, extending while it lives (#108).
+
+    ``alive()`` answers True (the new process is up), False (it was up and is
+    gone) or None (not known yet — a supervisor may not have spawned it).
+    Returns ``"ready"``; ``"exited"`` as soon as ``alive()`` is False; or
+    ``"timeout"`` when nothing is ready after ``timeout`` seconds with no live
+    process, or after ``slow_timeout`` (default ``START_SLOW_TIMEOUT``) with
+    one. ``on_slow`` runs once, when the wait goes past ``timeout`` because
+    the process is alive.
+    """
+    if slow_timeout is None:
+        slow_timeout = START_SLOW_TIMEOUT
+    start = time.monotonic()
+    slow = False
+    while True:
+        if ready():
+            return "ready"
+        state = alive()
+        if state is False:
+            return "exited"
+        elapsed = time.monotonic() - start
+        if elapsed >= timeout:
+            if state is not True or elapsed >= slow_timeout:
+                return "timeout"
+            if not slow:
+                slow = True
+                if on_slow is not None:
+                    on_slow()
+        time.sleep(_POLL_INTERVAL)
+
+
 def wait_for_daemon_ready(
     pid: int,
     host: str,
     port: int,
     *,
     timeout: float | None = None,
+    slow_timeout: float | None = None,
+    on_slow: Callable[[], None] | None = None,
 ) -> None:
     """Wait until the just-launched daemon answers /health as itself (#55b).
 
     Success: ``/health`` reports ``status == "healthy"`` and ``pid == pid``
     (the health payload carries the serving process id). Failure: the process
-    is gone, or ``timeout`` seconds (default ``DEFAULT_START_TIMEOUT``) pass
-    without a healthy answer; on timeout the process is stopped so a slow
-    start cannot leave a daemon running behind a reported failure.
+    is gone, or it is still not healthy after ``slow_timeout`` (default
+    ``START_SLOW_TIMEOUT``). Past ``timeout`` (default
+    ``DEFAULT_START_TIMEOUT``) a live process is a slow start — a migration —
+    and is waited for, with ``on_slow`` called once (#108). On the final
+    timeout the process is stopped so a hung start cannot leave a daemon
+    running behind a reported failure.
 
     Raises ``DaemonStartError`` for the caller to report and exit 1 on.
     """
     if timeout is None:
         timeout = DEFAULT_START_TIMEOUT
+    if slow_timeout is None:
+        slow_timeout = START_SLOW_TIMEOUT
     probe = _probe_host(host)
-    deadline = time.monotonic() + timeout
-    while True:
+
+    def ready() -> bool:
         health = _fetch_health(probe, port)
-        if health and health.get("status") == "healthy" and health.get("pid") == pid:
-            return
-        if not _pid_alive(pid):
-            raise DaemonStartError(
-                f"the daemon exited before becoming healthy (port {port})"
-            )
-        if time.monotonic() >= deadline:
-            _terminate_pid(pid)
-            raise DaemonStartError(
-                f"no healthy answer on port {port} within {timeout:g}s"
-            )
-        time.sleep(_POLL_INTERVAL)
+        return bool(health and health.get("status") == "healthy"
+                    and health.get("pid") == pid)
+
+    outcome = wait_until_serving(ready, lambda: _pid_alive(pid), timeout=timeout,
+                                 slow_timeout=slow_timeout, on_slow=on_slow)
+    if outcome == "ready":
+        return
+    if outcome == "exited":
+        raise DaemonStartError(
+            f"the daemon exited before becoming healthy (port {port})"
+        )
+    _terminate_pid(pid)
+    raise DaemonStartError(
+        f"no healthy answer on port {port} within {max(timeout, slow_timeout):g}s"
+    )
 
 
 def log_tail(max_lines: int = 10) -> str:
