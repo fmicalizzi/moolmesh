@@ -276,6 +276,7 @@ systemctl --user status moolmesh
 | **Qwen CLI** | `~/.qwen/projects/` | JSONL por chat |
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | SQLite (sesion → mensaje → parte) |
 | **Cursor** | `~/Library/Application Support/Cursor/User/` (macOS) | SQLite (`state.vscdb` clave-valor: bubbles del composer) |
+| **Pi** | `~/.pi/agent/sessions/` (`$PI_CODING_AGENT_DIR`) | Árbol de sesión JSONL por sesión |
 | **Antigravity CLI** | `~/.gemini/antigravity-cli/` (`$ANTIGRAVITY_APP_DATA_DIR`) | JSONL de transcript por conversación + índice SQLite de sesiones (solo lectura) |
 
 Las sesiones se auto-descubren al iniciar. Sin configuración, sin claves API, sin servicios en la nube.
@@ -375,6 +376,7 @@ mool mcp setup cursor           # Cursor IDE
 mool mcp setup codex            # Codex (OpenAI CLI)
 mool mcp setup qwen             # Qwen CLI
 mool mcp setup opencode         # OpenCode
+mool mcp setup antigravity      # Antigravity (~/.gemini/config/mcp_config.json)
 mool mcp setup json             # Imprimir JSON para cualquier cliente MCP
 ```
 
@@ -497,7 +499,7 @@ Comandos:
   daemon install         Arrancar el daemon al iniciar sesión (launchd / systemd --user / Task Scheduler)
   daemon uninstall       Quitar el autoarranque creado por daemon install
   status [--json]        Atajo rápido para daemon status
-  mcp setup [TARGET]     Configurar servidor MCP (claude-code|claude-desktop|cursor|codex|qwen|opencode|json)
+  mcp setup [TARGET]     Configurar servidor MCP (claude-code|claude-desktop|cursor|codex|qwen|opencode|antigravity|json)
   doctor                 Ejecutar diagnóstico del sistema
   install                Instalar comando mool globalmente (~/.local/bin)
   report                 Generar reportes de análisis en Markdown por lotes

@@ -1534,13 +1534,14 @@ def cmd_mcp_setup(args: argparse.Namespace) -> None:
             _print_mcp_json(config_block)
 
     # ── Target: JSON-config clients ───────────────────────────────
-    elif target in ("claude-desktop", "cursor", "qwen"):
+    elif target in ("claude-desktop", "cursor", "qwen", "antigravity"):
         config_path = _mcp_config_path(target, platform.system())
         if not config_path:
             print(red(f"  Unsupported platform: {platform.system()}"))
             _print_mcp_json(config_block)
             return
-        client_names = {"claude-desktop": "Claude Desktop", "cursor": "Cursor", "qwen": "Qwen CLI"}
+        client_names = {"claude-desktop": "Claude Desktop", "cursor": "Cursor",
+                        "qwen": "Qwen CLI", "antigravity": "Antigravity"}
         _write_mcp_json_config(config_path, config_block, client_names[target], args)
 
     # ── Target: opencode (different JSON schema) ───────────────────
@@ -1698,6 +1699,9 @@ def _mcp_config_path(target: str, system: str):
         return Path.home() / ".config" / "opencode" / "opencode.json"
     elif target == "codex":
         return Path.home() / ".codex" / "config.toml"
+    elif target == "antigravity":
+        # Antigravity (#77.2): stdio servers under ``mcpServers``.
+        return Path.home() / ".gemini" / "config" / "mcp_config.json"
     return None
 
 
@@ -1718,12 +1722,27 @@ def _write_mcp_json_config(config_path, config_block: dict, client_name: str, ar
         except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
             # The file is the user's: leave it untouched and say how to add the
             # server by hand. Non-zero because the registration did not happen.
+            # A JSONC file (comments, trailing commas) lands here too: the
+            # stdlib cannot round-trip its comments, so it is never rewritten.
             print(red(f"  ✗ Cannot parse {config_path}: {exc}"))
+            print(dim("  It may contain comments or trailing commas (JSONC), which"
+                      " MoolMesh cannot preserve."))
+            print(dim(f"  Left {config_path} unchanged. Add manually:"))
+            _print_mcp_json(config_block)
+            sys.exit(1)
+        if not isinstance(existing, dict) or not isinstance(
+                existing.get("mcpServers", {}), dict):
+            print(red(f"  ✗ Unexpected structure in {config_path}"
+                      " (expected an object with an \"mcpServers\" object)."))
             print(dim(f"  Left {config_path} unchanged. Add manually:"))
             _print_mcp_json(config_block)
             sys.exit(1)
 
     mcp_servers = existing.setdefault("mcpServers", {})
+    if mcp_servers.get("moolmesh") == config_block:
+        # Idempotent: an identical entry is left as is (file not rewritten).
+        print(green(f"  ✓ Already configured in {config_path}"))
+        return
     already = "moolmesh" in mcp_servers
     if already:
         print(yellow(f"  ⚠ 'moolmesh' already exists in {client_name} config."))
@@ -2242,11 +2261,15 @@ def main() -> None:
     mcp_sub = mcp_parser.add_subparsers(dest="mcp_command")
 
     mcp_setup = mcp_sub.add_parser("setup", help="Configure MCP server for an AI client")
+    _mcp_targets = ["claude-code", "claude-desktop", "cursor", "codex", "qwen",
+                    "opencode", "antigravity", "json"]
     mcp_setup.add_argument(
-        "target", nargs="?", default="claude-code",
-        choices=["claude-code", "claude-desktop", "cursor", "codex", "qwen", "opencode", "json"],
+        "target", nargs="?", default="claude-code", choices=_mcp_targets,
         help="Target client (default: claude-code)",
     )
+    # ``--target X`` is the same as the positional (#77.2: docs spell it so).
+    mcp_setup.add_argument("--target", dest="target_opt", choices=_mcp_targets,
+                           help=argparse.SUPPRESS)
     mcp_setup.add_argument("--install-deps", action="store_true", dest="install_mcp",
                            help="Auto-install the 'mcp' package if missing")
     mcp_setup.add_argument("--dry-run", action="store_true",
@@ -2300,6 +2323,8 @@ def main() -> None:
             cmd_detect_links(args)
         case "mcp":
             if getattr(args, "mcp_command", None) == "setup":
+                if getattr(args, "target_opt", None):
+                    args.target = args.target_opt
                 cmd_mcp_setup(args)
             else:
                 mcp_parser.print_help()

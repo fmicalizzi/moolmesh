@@ -21,7 +21,7 @@ Unified observability, telemetry, and inter-agent coordination — running entir
 
 Modern software development isn't human-to-keyboard anymore. It's an ecosystem of AI agents working in parallel — each with its own logs, token counters, and reasoning traces, all locked in separate silos.
 
-When Claude Code gets stuck in a loop, your other agents don't know. When you spend tokens across five providers, you can't see which git commit justified it. When your team uses different AI tools on the same repo, nobody has the full picture.
+When Claude Code gets stuck in a loop, your other agents don't know. When you spend tokens across several providers, you can't see which git commit justified it. When your team uses different AI tools on the same repo, nobody has the full picture.
 
 **MoolMesh congregates what is scattered.** It auto-discovers sessions from every major AI coding agent, normalizes them into a single queryable database, and exposes that state to both humans (via a dashboard) and machines (via MCP).
 
@@ -300,6 +300,7 @@ systemctl --user status moolmesh
 | **Qwen CLI** | `~/.qwen/projects/` | JSONL per chat |
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | SQLite (session → message → part) |
 | **Cursor** | `~/Library/Application Support/Cursor/User/` (macOS) | SQLite (`state.vscdb` key-value: composer bubbles) |
+| **Pi** | `~/.pi/agent/sessions/` (`$PI_CODING_AGENT_DIR`) | JSONL session tree per session |
 | **Antigravity CLI** | `~/.gemini/antigravity-cli/` (`$ANTIGRAVITY_APP_DATA_DIR`) | JSONL transcript per conversation + SQLite session index (read-only) |
 
 Sessions are auto-discovered on startup. No configuration, no API keys, no cloud services.
@@ -444,6 +445,7 @@ mool mcp setup cursor           # Cursor IDE
 mool mcp setup codex            # Codex (OpenAI CLI)
 mool mcp setup qwen             # Qwen CLI
 mool mcp setup opencode         # OpenCode
+mool mcp setup antigravity      # Antigravity (~/.gemini/config/mcp_config.json)
 mool mcp setup json             # Print config JSON for any MCP client
 ```
 
@@ -566,7 +568,7 @@ Commands:
   daemon install         Start the daemon at login (launchd / systemd --user / Task Scheduler)
   daemon uninstall       Remove the autostart created by daemon install
   status [--json]        Quick alias for daemon status
-  mcp setup [TARGET]     Configure MCP server (claude-code|claude-desktop|cursor|codex|qwen|opencode|json)
+  mcp setup [TARGET]     Configure MCP server (claude-code|claude-desktop|cursor|codex|qwen|opencode|antigravity|json)
   doctor                 Run system diagnostics
   install                Install mool command globally (~/.local/bin)
   report                 Generate batch Markdown analysis reports
