@@ -87,6 +87,8 @@ class BaseHarvester(ABC):
         self._quarantine_until: dict[Path, float] = {}
         self._logged_file_error: dict[Path, str] = {}
         self._logged_loop_error: str | None = None
+        # Cloud-only paths the live rescan skipped (#52), logged once each.
+        self._cloud_skipped: set[Path] = set()
 
     @property
     @abstractmethod
@@ -293,13 +295,29 @@ class BaseHarvester(ABC):
             self._last_error = None
 
     def _rescan(self) -> None:
-        """Discover files, register new ones, unregister stale ones."""
+        """Discover files, register new ones, unregister stale ones.
+
+        Cloud-only placeholders (#52, the #45 detection applied live) are
+        never read: a dataless directory is not listed by the file-based
+        providers' discovery and a placeholder file is neither registered nor
+        given a last harvest — opening it would trigger the download.
+        """
+        from hub.cloudfiles import PlaceholderSkipper, is_cloud_placeholder
+        skipper = PlaceholderSkipper()
         try:
-            current_files = self.discover_files()
+            # Only the file-based providers' discovery takes ``skip_dir``.
+            current_files = (self.discover_files(skip_dir=skipper) if self.CATCHUP
+                             else self.discover_files())
         except OSError:
             return
 
-        current_set = set(current_files)
+        placeholders = {p for p in current_files if is_cloud_placeholder(p)}
+        for skipped in [*skipper.skipped, *placeholders]:
+            if skipped not in self._cloud_skipped:
+                self._cloud_skipped.add(skipped)
+                _log.info("%s: %s está solo en la nube; no lo leo",
+                          self.provider_name, skipped)
+        current_set = set(current_files) - placeholders
         watched_set = set(self._watched_files.keys())
 
         # Register new files
@@ -310,9 +328,9 @@ class BaseHarvester(ABC):
 
         # Unregister stale files (outside time window)
         for path in watched_set - current_set:
-            # Harvest any remaining data before dropping
+            # Harvest any remaining data before dropping (never a placeholder)
             fp = self._watched_files.get(path)
-            if fp:
+            if fp and path not in placeholders:
                 self._harvest_file(path, fp)
             self._watched_files.pop(path, None)
             # Forget per-file error state so it cannot linger (#65).

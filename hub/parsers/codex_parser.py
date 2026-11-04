@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from hub.models.codex import CodexEntry, CodexFunctionCall, CodexFunctionOutput
-from hub.parsers.base import BaseParser
+from hub.parsers.base import BaseParser, iter_complete_lines
 
 
 def _scalar(value: Any, *, max_len: int = 200) -> str:
@@ -94,27 +94,8 @@ class CodexParser(BaseParser):
             # in an earlier run, so re-seed from the file's first line.
             self._seed_session_ctx(path, ctx)
         entries: list[CodexEntry] = []
-        with open(path, "rb") as f:
-            f.seek(0, 2)
-            file_size = f.tell()
-            if offset > file_size:
-                offset = 0
-            f.seek(offset)
-            data = f.read()
-        if not data:
-            return entries, offset
-
-        last_nl = data.rfind(b"\n")
-        if last_nl == -1:
-            return entries, offset
-
-        complete = data[:last_nl + 1]
-        new_offset = offset + len(complete)
-
-        for line in complete.decode("utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        new_offset = offset
+        for line, new_offset in iter_complete_lines(path, offset):
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError:

@@ -46,6 +46,9 @@ def _normalize_path(path: str) -> str:
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 # Default for `[daemon] stale_after_minutes` (issue #76).
 DEFAULT_STALE_AFTER_MINUTES = 60
+# Default for `[daemon] full_text_max_chars` (issue #52): characters of full
+# text stored per event (head + tail kept over it).
+DEFAULT_FULL_TEXT_MAX_CHARS = 256_000
 
 
 @dataclass
@@ -144,6 +147,9 @@ class HubConfig:
     # Minutes after which the last git / GitHub API sync counts as stale: MCP
     # tools, the dashboard and `mool doctor` then flag the data as not current.
     stale_after_minutes: int = DEFAULT_STALE_AFTER_MINUTES
+    # Tope de caracteres del texto completo guardado por evento (issue #52):
+    # sobre el tope se conservan la cabeza y la cola. 0 = sin tope.
+    full_text_max_chars: int = DEFAULT_FULL_TEXT_MAX_CHARS
 
 
 def _serialize_toml(config: HubConfig) -> str:
@@ -216,9 +222,14 @@ def _serialize_toml(config: HubConfig) -> str:
 
     # Sección [daemon] (issue #76) — sólo si difiere del default, como las
     # listas opcionales; escalares antes de cualquier array-de-tablas.
+    daemon_lines = []
     if config.stale_after_minutes != DEFAULT_STALE_AFTER_MINUTES:
+        daemon_lines.append(f"stale_after_minutes = {int(config.stale_after_minutes)}")
+    if config.full_text_max_chars != DEFAULT_FULL_TEXT_MAX_CHARS:
+        daemon_lines.append(f"full_text_max_chars = {int(config.full_text_max_chars)}")
+    if daemon_lines:
         lines.append("[daemon]")
-        lines.append(f"stale_after_minutes = {int(config.stale_after_minutes)}")
+        lines.extend(daemon_lines)
         lines.append("")
 
     # Sección [[repos]] - array de tablas
@@ -254,6 +265,17 @@ def _parse_stale_after(value) -> int:
     except (TypeError, ValueError):
         return DEFAULT_STALE_AFTER_MINUTES
     return minutes if minutes > 0 else DEFAULT_STALE_AFTER_MINUTES
+
+
+def _parse_full_text_max(value) -> int:
+    """``[daemon] full_text_max_chars``: an integer >= 0 (0 = no cap), else the default."""
+    if isinstance(value, bool):
+        return DEFAULT_FULL_TEXT_MAX_CHARS
+    try:
+        chars = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_FULL_TEXT_MAX_CHARS
+    return chars if chars >= 0 else DEFAULT_FULL_TEXT_MAX_CHARS
 
 
 def load_config() -> HubConfig:
@@ -354,6 +376,9 @@ def load_config() -> HubConfig:
     if "daemon" in data:
         config.stale_after_minutes = _parse_stale_after(
             data["daemon"].get("stale_after_minutes"))
+        if "full_text_max_chars" in data["daemon"]:
+            config.full_text_max_chars = _parse_full_text_max(
+                data["daemon"]["full_text_max_chars"])
 
     # Parse [[workspace_roots]] array (issue #21, opt-in)
     if "workspace_roots" in data:

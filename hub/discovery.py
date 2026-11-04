@@ -45,6 +45,11 @@ class DiscoveredSession:
     subagent_files: list[Path] = field(default_factory=list)
 
 
+def _real(path: str | Path) -> str:
+    """``os.path.realpath`` as a string — the one spelling compared for Codex."""
+    return os.path.realpath(str(path))
+
+
 class ProjectDiscovery:
     """Discovers projects from every supported agent's data directory."""
 
@@ -156,10 +161,14 @@ class ProjectDiscovery:
                     ).fetchall()
                 finally:
                     conn.close()
+                real_dirs: dict[str, str] = {}  # realpath once per directory
                 for rpath, cwd, tokens_used, source in rows:
                     if not rpath:
                         continue
-                    norm_rpath = str(Path(rpath))
+                    head, name = os.path.split(str(Path(rpath)))
+                    if head not in real_dirs:
+                        real_dirs[head] = _real(head)
+                    norm_rpath = os.path.join(real_dirs[head], name)
                     rollout_cwd[norm_rpath] = cwd or "/"
                     if source == "exec" and (tokens_used or 0) == 0 and cwd == "/":
                         continue
@@ -170,15 +179,22 @@ class ProjectDiscovery:
         # Collect all rollout files, filtering out noise if we have SQLite data
         all_rollouts: list[Path] = []
         all_on_disk: list[Path] = []
+        # Both sides are compared after realpath (#52): with a symlinked
+        # ~/.codex, state_5.sqlite stores one spelling of the path and
+        # os.walk yields the other, so nothing matched and every exec
+        # rollout leaked in through the fallback below.
+        real_paths: dict[Path, str] = {}
         for root, _dirs, files in os.walk(sessions_dir):
             if self._skip_dir is not None:
                 # Prune in place so os.walk never lists a skipped directory.
                 _dirs[:] = [d for d in _dirs if not self._skip(Path(root) / d)]
+            real_root = _real(root)  # one realpath per directory, not per file
             for f in files:
                 if f.startswith("rollout-") and f.endswith(".jsonl"):
                     full = Path(root) / f
                     all_on_disk.append(full)
-                    if active_rollouts and str(full) not in active_rollouts:
+                    real_paths[full] = os.path.join(real_root, f)
+                    if active_rollouts and real_paths[full] not in active_rollouts:
                         continue
                     all_rollouts.append(full)
 
@@ -194,7 +210,7 @@ class ProjectDiscovery:
         by_project: dict[str, list[Path]] = defaultdict(list)
 
         for rollout_path in all_rollouts:
-            cwd = rollout_cwd.get(str(rollout_path), "/")
+            cwd = rollout_cwd.get(real_paths[rollout_path], "/")
             if cwd and cwd != "/":
                 name = self.extract_project_name(cwd)
             else:
@@ -206,7 +222,7 @@ class ProjectDiscovery:
             # Use the CWD of the first rollout with a real path
             path = str(self.codex_base)
             for r in rollouts:
-                cwd = rollout_cwd.get(str(r), "/")
+                cwd = rollout_cwd.get(real_paths[r], "/")
                 if cwd and cwd != "/":
                     path = cwd
                     break

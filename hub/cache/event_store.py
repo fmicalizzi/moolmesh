@@ -12,6 +12,8 @@ import threading
 from pathlib import Path
 from typing import Any, Iterator
 
+from hub.config import DEFAULT_FULL_TEXT_MAX_CHARS
+
 _log = logging.getLogger("moolmesh.event_store")
 
 # Default location for the database
@@ -359,6 +361,43 @@ def _scalar(value: Any) -> Any:
     return text[:_SCALAR_MAX_LEN]
 
 
+# Per-event cap on ``event_content.full_text`` (issue #52): one Codex
+# ``tool_result`` reached 21 MB and a re-parse added ~114 MB. Over the cap the
+# text keeps its head and its tail (where commands print their summary and
+# errors) around a marker. ``[daemon] full_text_max_chars`` in config.toml
+# overrides it; 0 disables the cap. The default lives in ``hub.config``.
+
+
+def cap_full_text(text: str, max_chars: int) -> str:
+    """``text`` cut to about ``max_chars`` keeping head and tail (0 = no cap).
+
+    The result never exceeds ``max_chars`` (plus a marker shorter than 80
+    characters when the cap is tiny). Deterministic, so a re-read of the
+    same event stores the same text.
+    """
+    if not isinstance(text, str) or max_chars <= 0 or len(text) <= max_chars:
+        return text
+    omitted_guess = len(text) - max_chars
+    marker = f"\n\n[… {omitted_guess} caracteres omitidos por MoolMesh …]\n\n"
+    keep = max(0, max_chars - len(marker))
+    head = keep - keep // 2
+    tail = keep // 2
+    omitted = len(text) - head - tail
+    marker = f"\n\n[… {omitted} caracteres omitidos por MoolMesh …]\n\n"
+    return text[:head] + marker + (text[-tail:] if tail else "")
+
+
+def _configured_full_text_cap() -> int:
+    """``[daemon] full_text_max_chars`` from config.toml, else the default."""
+    try:
+        from hub.config import load_config
+        return int(load_config().full_text_max_chars)
+    except Exception:  # noqa: BLE001 — a broken config never blocks the store
+        _log.warning("no pude leer full_text_max_chars; uso el default",
+                     exc_info=True)
+        return DEFAULT_FULL_TEXT_MAX_CHARS
+
+
 def _tokens_json(value: Any) -> str | None:
     """``json.dumps`` of a tokens payload, or None when absent/unserializable."""
     if not value:
@@ -402,9 +441,10 @@ def _compute_fingerprint(event_dict: dict[str, Any]) -> str:
 
 
 def _insert_event_row(
-    conn: sqlite3.Connection, e: dict[str, Any], now: float, historical: bool = False
+    conn: sqlite3.Connection, e: dict[str, Any], now: float, historical: bool = False,
+    full_text_max_chars: int = DEFAULT_FULL_TEXT_MAX_CHARS,
 ) -> int:
-    """INSERT OR IGNORE one event (+ its full text); 1 if inserted, else 0."""
+    """INSERT OR IGNORE one event (+ its capped full text); 1 if inserted, else 0."""
     e = _normalize_event(e)
     cursor = conn.execute(
         """INSERT OR IGNORE INTO events
@@ -426,7 +466,7 @@ def _insert_event_row(
     if full_text and cursor.lastrowid:
         conn.execute(
             "INSERT OR IGNORE INTO event_content (event_id, full_text) VALUES (?, ?)",
-            (cursor.lastrowid, full_text),
+            (cursor.lastrowid, cap_full_text(full_text, full_text_max_chars)),
         )
     return 1
 
@@ -434,8 +474,14 @@ def _insert_event_row(
 class EventStore:
     """Thread-safe SQLite event persistence."""
 
-    def __init__(self, db_path: Path | None = None):
+    def __init__(self, db_path: Path | None = None,
+                 full_text_max_chars: int | None = None):
         self.db_path = db_path or DEFAULT_DB_PATH
+        # Per-event full-text cap (#52); None = config.toml / default.
+        self.full_text_max_chars = (
+            _configured_full_text_cap() if full_text_max_chars is None
+            else int(full_text_max_chars)
+        )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         try:
@@ -998,7 +1044,7 @@ class EventStore:
             if cursor.rowcount > 0 and full_text and cursor.lastrowid:
                 conn.execute(
                     "INSERT OR IGNORE INTO event_content (event_id, full_text) VALUES (?, ?)",
-                    (cursor.lastrowid, full_text),
+                    (cursor.lastrowid, cap_full_text(full_text, self.full_text_max_chars)),
                 )
 
     def store_batch(self, events: list[dict[str, Any]]) -> None:
@@ -1040,7 +1086,7 @@ class EventStore:
                 if cursor.rowcount > 0 and full_text and cursor.lastrowid:
                     conn.execute(
                         "INSERT OR IGNORE INTO event_content (event_id, full_text) VALUES (?, ?)",
-                        (cursor.lastrowid, full_text),
+                        (cursor.lastrowid, cap_full_text(full_text, self.full_text_max_chars)),
                     )
 
     def load_recent(self, limit: int = 500) -> list[dict[str, Any]]:
@@ -1550,7 +1596,8 @@ class EventStore:
                         if full_text and cursor.lastrowid:
                             conn.execute(
                                 "INSERT OR IGNORE INTO event_content (event_id, full_text) VALUES (?, ?)",
-                                (cursor.lastrowid, full_text),
+                                (cursor.lastrowid,
+                                 cap_full_text(full_text, self.full_text_max_chars)),
                             )
                         result_events.append(ev)
 
@@ -1625,7 +1672,10 @@ class EventStore:
                     )
                 for e in events:
                     # Re-parsed history, not live activity (#45).
-                    inserted += _insert_event_row(conn, e, now, historical=True)
+                    inserted += _insert_event_row(
+                        conn, e, now, historical=True,
+                        full_text_max_chars=self.full_text_max_chars,
+                    )
                 for fp, path, off in file_offsets:
                     conn.execute(
                         """INSERT INTO file_registry

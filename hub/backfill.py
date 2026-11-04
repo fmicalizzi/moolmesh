@@ -475,7 +475,11 @@ def _stored_rows(
 
 
 def backup_events_db(db_path: Path, backup_dir: Path | None = None) -> Path:
-    """Consistent copy of events.db via sqlite3's online backup API."""
+    """Consistent copy of events.db via sqlite3's online backup API.
+
+    Older ``events-*.db`` copies beyond ``hub.backups.BACKUP_KEEP`` are pruned
+    after the copy succeeds; the new one is never pruned (#52).
+    """
     backup_dir = backup_dir or db_path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
     dest = backup_dir / f"events-{time.strftime('%Y%m%d-%H%M%S')}.db"
@@ -490,6 +494,8 @@ def backup_events_db(db_path: Path, backup_dir: Path | None = None) -> Path:
     finally:
         dst.close()
         src.close()
+    from hub.backups import prune_backups
+    prune_backups(backup_dir, "events", protect=dest)  # keep the newest N (#52)
     return dest
 
 

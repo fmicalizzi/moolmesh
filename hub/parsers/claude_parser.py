@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from hub.models.claude import ClaudeContentBlock, ClaudeEntry, ClaudeUsage
-from hub.parsers.base import BaseParser
+from hub.parsers.base import BaseParser, iter_complete_lines
 
 # Entry types we skip entirely
 _SKIP_TYPES = frozenset({"file-history-snapshot"})
@@ -33,30 +33,8 @@ class ClaudeParser(BaseParser):
 
     def parse_incremental(self, path: Path, offset: int) -> tuple[list[ClaudeEntry], int]:
         entries: list[ClaudeEntry] = []
-        with open(path, "rb") as f:
-            # Truncation detection: if offset > file size, file was rewritten
-            f.seek(0, 2)  # seek to end
-            file_size = f.tell()
-            if offset > file_size:
-                offset = 0
-            f.seek(offset)
-            data = f.read()
-        if not data:
-            return entries, offset
-
-        # Chunk-and-tail: only advance offset to last complete newline
-        last_nl = data.rfind(b"\n")
-        if last_nl == -1:
-            # No complete line yet — don't advance offset, re-read next time
-            return entries, offset
-
-        complete = data[:last_nl + 1]
-        new_offset = offset + len(complete)
-
-        for line in complete.decode("utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        new_offset = offset
+        for line, new_offset in iter_complete_lines(path, offset):
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError:

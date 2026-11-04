@@ -378,6 +378,8 @@ def backup_workspace_db(conn: sqlite3.Connection, db_path: Path,
         conn.backup(dst)
     finally:
         dst.close()
+    from hub.backups import prune_backups
+    prune_backups(backup_dir, "workspace", protect=dest)  # keep the newest N (#52)
     return dest
 
 

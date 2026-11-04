@@ -161,6 +161,16 @@ when the daemon is down or the last git / GitHub API sync is older than
 dashboard shows a banner on every page in that case, and `mool doctor` prints a
 freshness line. `daemon.log` is rotated to `daemon.log.1` past 10 MB.
 
+**Storage bounds.** The full text stored per event (a tool's output, a long
+message) is capped at `[daemon] full_text_max_chars` characters (default
+256000; `0` = no cap): over it MoolMesh keeps the head and the tail around a
+`[… N caracteres omitidos por MoolMesh …]` marker, so a 20 MB tool output can no
+longer bloat `events.db`. The cap applies to new rows; text stored earlier is
+left as is. Before rewriting existing rows, migrations and `mool backfill
+--reparse` copy the database to `~/.moolmesh/backups/`; only the newest 5
+`events-*` and 5 `workspace-*` copies are kept (older ones are deleted after
+each new backup, never the one just made).
+
 **Local day.** Digests, the workspace rollup and `get_portfolio_production`
 share one definition of "which day": the zone in `[user] timezone` (an IANA
 name such as `"America/Costa_Rica"`; unset = the system zone; an unknown name
