@@ -14,7 +14,7 @@ from typing import Any, Iterator
 
 from hub.config import DEFAULT_FULL_TEXT_MAX_CHARS
 
-_log = logging.getLogger("moolmesh.event_store")
+_log = logging.getLogger("hub.event_store")
 
 # Default location for the database
 DEFAULT_DB_PATH = Path.home() / ".moolmesh" / "events.db"

@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-_log = logging.getLogger("moolmesh.mcp_registry")
+_log = logging.getLogger("hub.mcp_registry")
 
 _PATTERN = "mcp-*.json"
 

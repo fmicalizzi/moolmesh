@@ -245,7 +245,7 @@ class TestHarvestFileResilience:
             bad, good = _fake_files(tmp_path)
             w = _FakeHarvester(store, [bad, good])
             bad_fp = w.registry_key(bad)
-            with caplog.at_level(logging.WARNING, logger="moolmesh.watcher"):
+            with caplog.at_level(logging.WARNING, logger="hub.watcher"):
                 for _ in range(6):
                     w._harvest_file(bad, bad_fp)
             messages = [r.getMessage() for r in caplog.records]

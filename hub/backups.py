@@ -18,7 +18,7 @@ import logging
 import re
 from pathlib import Path
 
-_log = logging.getLogger("moolmesh.backups")
+_log = logging.getLogger("hub.backups")
 
 # Newest copies kept per kind (events-, workspace-).
 BACKUP_KEEP = 5

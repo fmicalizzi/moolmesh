@@ -40,7 +40,7 @@ from hub.cache.event_store import (
 )
 from hub.cloudfiles import PlaceholderSkipper, is_cloud_placeholder
 
-_log = logging.getLogger("moolmesh.backfill")
+_log = logging.getLogger("hub.backfill")
 
 FILE_PROVIDERS = ("claude", "codex", "qwen", "pi", "antigravity")
 

@@ -523,7 +523,7 @@ class DashboardServer:
         starts a fresh thread.
         """
         import logging
-        log = logging.getLogger("moolmesh.supervisor")
+        log = logging.getLogger("hub.supervisor")
         while not self._supervisor_stop.wait(self.SUPERVISOR_INTERVAL):
             for label, watcher in self.watchers:
                 if not watcher.running or watcher.alive:

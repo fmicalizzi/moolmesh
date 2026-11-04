@@ -178,7 +178,7 @@ class TestStaleness:
 class TestWarnsOncePerProcess:
     def test_one_warning_however_many_times_it_is_detected(self, server, caplog):
         server.installed["v"] = "1.27.0"
-        with caplog.at_level(logging.WARNING, logger="moolmesh.mcp_server"):
+        with caplog.at_level(logging.WARNING, logger="hub.mcp_server"):
             for _ in range(5):
                 server.mod._staleness()
             server.mod._get_server_info()
@@ -187,14 +187,14 @@ class TestWarnsOncePerProcess:
         assert "1.26.2" in warnings[0].getMessage() and "1.27.0" in warnings[0].getMessage()
 
     def test_no_warning_while_versions_match(self, server, caplog):
-        with caplog.at_level(logging.WARNING, logger="moolmesh.mcp_server"):
+        with caplog.at_level(logging.WARNING, logger="hub.mcp_server"):
             server.mod._staleness()
             server.mod._get_server_info()
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
     def test_the_warning_waits_for_the_first_detection(self, server, caplog):
         """Fresh at first, stale after an upgrade: the one warning fires then."""
-        with caplog.at_level(logging.WARNING, logger="moolmesh.mcp_server"):
+        with caplog.at_level(logging.WARNING, logger="hub.mcp_server"):
             server.mod._staleness()
             server.installed["v"] = "1.27.0"
             server.mod._staleness()
@@ -423,7 +423,7 @@ class TestRunFile:
         hooks = []
         monkeypatch.setattr("atexit.register", lambda fn, *a, **k: hooks.append(fn))
 
-        with caplog.at_level(logging.WARNING, logger="moolmesh.mcp_server"):
+        with caplog.at_level(logging.WARNING, logger="hub.mcp_server"):
             assert mcp_server._register_run_file() is None
 
         assert any("run file" in r.getMessage() for r in caplog.records)

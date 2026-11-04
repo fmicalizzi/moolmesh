@@ -22,7 +22,7 @@ from typing import Any
 
 from hub.cache.event_store import EventStore, file_fingerprint, registry_path
 
-_log = logging.getLogger("moolmesh.watcher")
+_log = logging.getLogger("hub.watcher")
 
 
 class BaseHarvester(ABC):

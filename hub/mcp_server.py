@@ -24,7 +24,7 @@ from typing import Any, Optional
 # Default ``tz`` of the portfolio: the ``[user] timezone`` zone (#81).
 from hub.localtime import CONFIGURED as _CONFIGURED_TZ
 
-_log = logging.getLogger("moolmesh.mcp_server")
+_log = logging.getLogger("hub.mcp_server")
 
 # ── Database paths ──────────────────────────────────────────────────
 EVENTS_DB = os.path.expanduser("~/.moolmesh/events.db")
