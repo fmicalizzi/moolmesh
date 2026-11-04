@@ -62,19 +62,43 @@ def read_pid() -> int | None:
     the daemon on Windows (#55).
     """
     try:
-        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
-    except (FileNotFoundError, ValueError, OSError):
+        text = PID_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        pid = int(text.strip())
+    except ValueError:
+        # Garbage, not a half-written file: write_pid replaces atomically.
         PID_FILE.unlink(missing_ok=True)
         return None
     if not _pid_alive(pid):
-        PID_FILE.unlink(missing_ok=True)
+        _clear_pidfile(pid)
         return None
     return pid
 
 
+def _clear_pidfile(pid: int) -> None:
+    """Remove the pidfile only if it still names ``pid`` (#96).
+
+    A ``start`` that waited out a shutdown may already have launched the
+    next daemon, which rewrote the pidfile; an unconditional unlink by the
+    old stop (or the old daemon's own exit) would orphan the new one.
+    A missing or unreadable pidfile is left alone.
+    """
+    try:
+        current = int(PID_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    if current == pid:
+        PID_FILE.unlink(missing_ok=True)
+
+
 def write_pid(pid: int) -> None:
+    """Write the pidfile atomically, so a reader never sees it half-written."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(pid), encoding="utf-8")
+    tmp = PID_FILE.with_name(f"{PID_FILE.name}.{os.getpid()}.tmp")
+    tmp.write_text(str(pid), encoding="utf-8")
+    os.replace(tmp, PID_FILE)
 
 
 def _is_supervised() -> bool:
@@ -185,13 +209,13 @@ def wait_out_shutdown(pid: int, host: str, port: int,
     polls = max(1, round(timeout / _POLL_INTERVAL))
     for _ in range(polls):
         if not _pid_alive(pid):
-            PID_FILE.unlink(missing_ok=True)
+            _clear_pidfile(pid)
             return "exited"
         if daemon_serves(pid, host, port):
             return "running"
         time.sleep(_POLL_INTERVAL)
     if not _pid_alive(pid):
-        PID_FILE.unlink(missing_ok=True)
+        _clear_pidfile(pid)
         return "exited"
     return "stuck"
 
@@ -566,7 +590,7 @@ def _run_server(
         server.start()
     finally:
         rotation_stop.set()
-        PID_FILE.unlink(missing_ok=True)
+        _clear_pidfile(os.getpid())
 
 
 def stop_daemon() -> bool:
@@ -590,11 +614,11 @@ def stop_daemon() -> bool:
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
-            PID_FILE.unlink(missing_ok=True)
+            _clear_pidfile(pid)
             return True
 
     if wait_for_pid_exit(pid, STOP_GRACE):
-        PID_FILE.unlink(missing_ok=True)
+        _clear_pidfile(pid)
         return True
 
     # Force kill
@@ -607,7 +631,7 @@ def stop_daemon() -> bool:
         pass
     if not wait_for_pid_exit(pid, 5.0):
         raise DaemonStopTimeout(pid, STOP_GRACE + 5.0)
-    PID_FILE.unlink(missing_ok=True)
+    _clear_pidfile(pid)
     return True
 
 

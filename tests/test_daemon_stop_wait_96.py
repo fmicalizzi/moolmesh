@@ -245,6 +245,86 @@ class TestRestart:
         assert "still shutting down" in capsys.readouterr().err
 
 
+# ── the pidfile belongs to whoever wrote it last (round 2) ──────────
+
+class _Handover(FakeDaemon):
+    """OLD_PID exits after ``alive_polls``; at poll ``handover`` a new
+    daemon (a concurrent ``start``) has already rewritten the pidfile."""
+
+    def __init__(self, alive_polls: int, handover: int):
+        super().__init__(alive_polls)
+        self.handover = handover
+
+    def alive(self, pid: int) -> bool:
+        if pid == NEW_PID:
+            return True
+        result = super().alive(pid)
+        if self.probes == self.handover:
+            daemon.write_pid(NEW_PID)
+        return result
+
+
+class TestPidfileOwnership:
+    def test_stop_does_not_delete_the_next_daemons_pidfile(
+            self, home, monkeypatch, capsys):
+        """The orchestrator's repro: stop of A in the background, start of
+        B meanwhile; A's stop finishing must not orphan B."""
+        fake = _Handover(alive_polls=10, handover=4)
+        monkeypatch.setattr(daemon, "_pid_alive", fake.alive)
+        assert daemon.stop_daemon() is True
+        assert daemon.PID_FILE.read_text(encoding="utf-8") == str(NEW_PID)
+        assert daemon.read_pid() == NEW_PID      # a later stop still finds B
+
+    def test_forced_stop_does_not_delete_the_next_daemons_pidfile(
+            self, home, monkeypatch):
+        fake = _Handover(alive_polls=60, handover=55)   # past STOP_GRACE
+        monkeypatch.setattr(daemon, "_pid_alive", fake.alive)
+        assert daemon.stop_daemon() is True
+        assert daemon.PID_FILE.read_text(encoding="utf-8") == str(NEW_PID)
+
+    def test_start_wait_does_not_delete_the_next_daemons_pidfile(
+            self, home, monkeypatch):
+        fake = _Handover(alive_polls=6, handover=3)
+        monkeypatch.setattr(daemon, "_pid_alive", fake.alive)
+        monkeypatch.setattr(daemon, "_fetch_health", lambda h, p: None)
+        assert daemon.wait_out_shutdown(OLD_PID, "localhost", 5299) == "exited"
+        assert daemon.PID_FILE.read_text(encoding="utf-8") == str(NEW_PID)
+
+    def test_read_pid_of_a_dead_pid_keeps_a_rewritten_file(self, home, monkeypatch):
+        def alive(pid):
+            daemon.write_pid(NEW_PID)   # rewritten between read and check
+            return False
+        monkeypatch.setattr(daemon, "_pid_alive", alive)
+        assert daemon.read_pid() is None
+        assert daemon.PID_FILE.read_text(encoding="utf-8") == str(NEW_PID)
+
+    def test_exiting_daemon_leaves_a_newer_pidfile(self, home, monkeypatch):
+        server = MagicMock()
+        server.start.side_effect = lambda: daemon.write_pid(NEW_PID)
+        monkeypatch.setattr("hub.dashboard.server.DashboardServer",
+                            lambda **kw: server)
+        monkeypatch.setattr("hub.log.setup", lambda **kw: None)
+        monkeypatch.setattr(daemon.signal, "signal", lambda *a: None)
+        daemon._run_server("127.0.0.1", 5299, None, None)
+        assert daemon.PID_FILE.read_text(encoding="utf-8") == str(NEW_PID)
+
+    def test_clear_pidfile_only_removes_its_own_pid(self, home):
+        daemon.write_pid(OLD_PID)
+        daemon._clear_pidfile(NEW_PID)
+        assert daemon.PID_FILE.exists()
+        daemon._clear_pidfile(OLD_PID)
+        assert not daemon.PID_FILE.exists()
+        daemon._clear_pidfile(OLD_PID)            # missing: tolerated
+        daemon.PID_FILE.write_text("garbage", encoding="utf-8")
+        daemon._clear_pidfile(OLD_PID)            # unreadable: left alone
+        assert daemon.PID_FILE.exists()
+
+    def test_write_pid_leaves_no_temp_file(self, home):
+        daemon.write_pid(NEW_PID)
+        assert [p.name for p in daemon.PID_FILE.parent.iterdir()
+                if p.name.startswith("moolmesh.pid")] == ["moolmesh.pid"]
+
+
 # ── the loops wake on stop (the ~26 s shutdown) ─────────────────────
 
 class _IdleHarvester:
