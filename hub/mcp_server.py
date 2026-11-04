@@ -71,7 +71,10 @@ STALE_HINT = (
 )
 _SERVER_INSTRUCTIONS = (
     "If results look inconsistent, call get_server_info: "
-    "a stale server must be restarted."
+    "a stale server must be restarted. "
+    "If a result carries `stale: true` (see its `freshness`), its numbers are "
+    "not current: the MoolMesh daemon is down or its sync is old — say so "
+    "instead of presenting them as today's."
 )
 _stale_logged = False
 
@@ -129,10 +132,59 @@ def _get_server_info() -> dict[str, Any]:
         "stale": stale is not None,
         "started_at": STARTED_AT,
         "pid": os.getpid(),
+        # Data freshness (#76) — distinct from `stale` above, which is about
+        # this server's code, not the data it reads.
+        "freshness": _freshness(),
     }
     if stale is not None:
         info["hint"] = STALE_HINT
     return info
+
+
+# ── Stale-data flag (#76) ───────────────────────────────────────────
+# Measured from the data (last git / GitHub API sync), not from "the process
+# lives". Cached a few seconds: several tool calls in a row share one read.
+FRESHNESS_TTL = 5.0
+_freshness_cache: tuple[float, tuple, dict] | None = None
+
+
+def _freshness() -> dict[str, Any]:
+    """``hub.freshness.compute_freshness`` for this server's DBs; never raises."""
+    global _freshness_cache
+    import time as _time
+    key = (EVENTS_DB, GITHUB_DB)
+    now = _time.monotonic()
+    cached = _freshness_cache
+    if cached is not None and cached[1] == key and now - cached[0] < FRESHNESS_TTL:
+        return dict(cached[2])
+    try:
+        from hub.freshness import compute_freshness
+        result = compute_freshness(EVENTS_DB, GITHUB_DB)
+    except Exception:  # noqa: BLE001 — a freshness failure must not break the tool
+        _log.warning("could not compute data freshness", exc_info=True)
+        return {"stale": None, "error": "freshness unavailable"}
+    _freshness_cache = (now, key, result)
+    return dict(result)
+
+
+def _freshness_aware(fn):
+    """Add ``freshness`` (and top-level ``stale: true``) to a dict result (#76).
+
+    For tools that read the portfolio or the GitHub cache. Same shape as
+    ``_stale_aware``: applied at the MCP layer only; list-returning tools are
+    not wrapped (their type must not change) — ``get_server_info`` covers them.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        result = fn(*args, **kwargs)
+        if not isinstance(result, dict):
+            return result
+        fresh = _freshness()
+        out = {**result, "freshness": fresh}
+        if fresh.get("stale"):
+            out["stale"] = True
+        return out
+    return wrapper
 
 
 def _stale_aware(fn):
@@ -1461,6 +1513,12 @@ if _mcp is not None:
         `stale: true` significa que hay que reiniciar esta sesión (o su servidor
         MCP) para cargar la versión instalada; `installed_version: null`, que no
         se pudo verificar. Los servidores <= 1.26.1 no pueden avisar solos.
+
+        `freshness` dice si los DATOS están al día (#76): `daemon_running`,
+        `last_git_sync_at`, `last_github_sync_at`, `repos_stale`,
+        `last_ingest_at`, `data_age_seconds` y `stale`. `freshness.stale: true`
+        = el daemon no corre o el último sync de git / API de GitHub es más
+        viejo que `[daemon] stale_after_minutes`: los números no son actuales.
         """
         return _get_server_info()
 
@@ -1720,6 +1778,7 @@ if _mcp is not None:
 
     @_mcp.tool()
     @_stale_aware
+    @_freshness_aware
     def get_portfolio_grouped(
         since: Optional[str] = None,
     ) -> dict[str, Any]:
@@ -1743,6 +1802,9 @@ if _mcp is not None:
         Vacío si no se corrió `mool workspace classify` (o `rollup`). Con
         `hide_project_names`, los nombres se enmascaran.
 
+        Trae `freshness` (#76); con `stale: true` arriba, los números NO son
+        actuales (daemon caído o sync viejo) — decilo antes de usarlos.
+
         Args:
             since: Fecha ISO 8601 desde (compara por día). None = todo.
         """
@@ -1750,6 +1812,7 @@ if _mcp is not None:
 
     @_mcp.tool()
     @_stale_aware
+    @_freshness_aware
     def get_portfolio_production(days: int = 30) -> dict[str, Any]:
         """Producción por proyecto en el tiempo — esfuerzo, no duración (#24).
 
@@ -1778,6 +1841,9 @@ if _mcp is not None:
         totales de esfuerzo NO son aditivos entre filas). Ordenado por actividad
         más reciente. Con `hide_project_names`, los labels se enmascaran (los
         conteos de outcome y el `state` son enteros/tokens — nada que enmascarar).
+
+        Trae `freshness` (#76); con `stale: true` arriba, los números NO son
+        actuales (daemon caído o sync viejo) — decilo antes de usarlos.
 
         Args:
             days: Ventana en días (1–90, default 30).

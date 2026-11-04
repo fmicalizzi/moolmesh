@@ -205,7 +205,8 @@ class TestWarnsOncePerProcess:
 # ── get_server_info ─────────────────────────────────────────────────
 
 class TestGetServerInfo:
-    KEYS = {"running_version", "installed_version", "stale", "started_at", "pid"}
+    KEYS = {"running_version", "installed_version", "stale", "started_at", "pid",
+            "freshness"}  # freshness: #76
 
     def test_fresh(self, server):
         info = server.mod._get_server_info()
@@ -253,9 +254,11 @@ class TestToolLayer:
     def test_fastmcp_gets_an_instructions_line_about_get_server_info(self, loaded):
         name, kwargs = loaded.registry["init"]
         assert name == "moolmesh"
-        assert kwargs["instructions"] == (
+        assert kwargs["instructions"].startswith(
             "If results look inconsistent, call get_server_info: "
             "a stale server must be restarted.")
+        # #76: one more line about stale DATA.
+        assert "`stale: true`" in kwargs["instructions"]
 
     def test_an_sdk_without_instructions_still_imports(self, monkeypatch):
         """mcp>=1.2.0 is the floor; a TypeError from FastMCP must not break the import."""
@@ -290,7 +293,12 @@ class TestToolLayer:
         monkeypatch.setattr(loaded.mod, target, lambda *a, **k: dict(payload))
         fn = loaded.tools[tool]
 
-        assert fn(*args) == payload                       # fresh: untouched, no key
+        def data(result):
+            # The portfolio tools also carry the stale-DATA flag (#76),
+            # covered in test_freshness.py; this test is about stale_server.
+            return {k: v for k, v in result.items() if k not in ("freshness", "stale")}
+
+        assert data(fn(*args)) == payload                 # fresh: untouched, no key
         assert "stale_server" not in fn(*args)
 
         loaded.installed["v"] = "1.27.0"
@@ -298,7 +306,7 @@ class TestToolLayer:
         assert result["stale_server"]["running"] == "1.26.2"
         assert result["stale_server"]["installed"] == "1.27.0"
         assert "Restart" in result["stale_server"]["hint"]
-        assert {k: v for k, v in result.items() if k != "stale_server"} == payload
+        assert {k: v for k, v in data(result).items() if k != "stale_server"} == payload
 
         loaded.installed["v"] = None                      # unverifiable: no flag
         assert "stale_server" not in fn(*args)
