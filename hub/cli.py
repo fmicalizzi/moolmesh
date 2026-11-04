@@ -153,6 +153,15 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     )
 
     match args.daemon_command:
+        case "install":
+            raise SystemExit(cmd_daemon_install(args))
+
+        case "uninstall":
+            raise SystemExit(cmd_daemon_uninstall(args))
+
+        case "start" | "stop" | "restart" if _autostart_delegates(args):
+            raise SystemExit(_delegate_to_supervisor(args))
+
         case "start":
             existing = read_pid()
             if existing:
@@ -189,7 +198,314 @@ def cmd_daemon(args: argparse.Namespace) -> None:
                 raise SystemExit(code)
 
         case _:
-            print("Uso: mool daemon {start|stop|status|restart}")
+            print("Uso: mool daemon {start|stop|status|restart|install|uninstall}")
+
+
+# ── Run at login (#76) ───────────────────────────────────────────────
+
+def _autostart_delegates(args: argparse.Namespace) -> bool:
+    """Should start/stop/restart go through the supervisor? (#76, 1b)
+
+    Yes when ``mool daemon install`` registered the daemon, unless this call
+    is the supervised process itself (``--foreground`` or running under
+    systemd): delegating there would recurse.
+    """
+    from hub import autostart
+    from hub.daemon import _is_supervised
+    if getattr(args, "foreground", False) or _is_supervised():
+        return False
+    return autostart.managed_state() is not None
+
+
+def _delegate_to_supervisor(args: argparse.Namespace) -> int:
+    """Run start/stop/restart through the supervisor that owns the daemon.
+
+    Chosen over "detect and warn": the supervisor stays the single owner of
+    the process, so a manual start can never add a second daemon next to the
+    supervised one, and the supervisor's state never drifts from reality.
+    """
+    from hub import autostart
+    from hub.daemon import read_pid, stop_daemon, _fetch_health, _probe_host
+
+    state = autostart.managed_state()
+    action = args.daemon_command
+    name = autostart.MECHANISM_NAMES[state.mechanism]
+
+    if action == "start":
+        existing = read_pid()
+        if existing:
+            print(yellow(f"MoolMesh daemon already running (PID {existing})"))
+            return 0
+    ignored = [f for f in ("host", "port", "project", "providers")
+               if getattr(args, f, None) not in (None, "localhost")]
+    if action != "stop" and ignored:
+        print(yellow(f"  Autostart is installed: --{', --'.join(ignored)} ignored; "
+                     f"the registered command is used ({state.path})."))
+        print(dim("  To change it: mool daemon install --host H --port P"))
+
+    commands = autostart.supervisor_commands(action, state.mechanism)
+    if action in ("stop", "restart") and state.mechanism == "schtasks":
+        # Task Scheduler never revives a stopped process: stop it directly.
+        stop_daemon()
+    for cmd in commands or []:
+        result = autostart._run(cmd)
+        if result.returncode != 0:
+            print(red(f"Error: {autostart.display(cmd)} failed "
+                      f"(exit {result.returncode})"), file=sys.stderr)
+            detail = (result.stderr or result.stdout or "").strip()
+            if detail:
+                print(dim(f"  {detail}"), file=sys.stderr)
+            print(dim("  The autostart registration may be out of date: "
+                      "mool daemon install"), file=sys.stderr)
+            return 1
+
+    if action == "stop":
+        print(green(f"MoolMesh daemon stopped via {name}"))
+        print(dim("  It starts again at the next login, or with: mool daemon start"))
+        return 0
+
+    host = state.host or "localhost"
+    port = state.port or 5200
+    import time
+    deadline = time.monotonic() + 15
+    health = None
+    while time.monotonic() < deadline:
+        health = _fetch_health(_probe_host(host), port)
+        if health and health.get("status") in ("healthy", "degraded"):
+            break
+        time.sleep(0.5)
+    verb = "restarted" if action == "restart" else "started"
+    if health:
+        print(green(f"MoolMesh daemon {verb} via {name} (PID {health.get('pid')})"))
+        print(f"  Dashboard → http://{host}:{port}")
+        return 0
+    print(red(f"Error: {name} {verb} the daemon but nothing answered on port "
+              f"{port} within 15s"), file=sys.stderr)
+    if state.mechanism == "systemd":
+        print(dim(f"  Logs → journalctl --user -u {autostart.SYSTEMD_UNIT}"), file=sys.stderr)
+    else:
+        from hub.daemon import LOG_FILE
+        print(dim(f"  Logs → {LOG_FILE}"), file=sys.stderr)
+    return 1
+
+
+def _dev_interpreter_warning() -> str | None:
+    """Warn when the interpreter is a development venv, not pipx/uv tool."""
+    method = _detect_install_method()
+    if method == "venv":
+        return (f"{sys.executable} is a development virtualenv (not pipx / uv "
+                "tool): the autostart breaks if that venv is moved or deleted.")
+    return None
+
+
+def cmd_daemon_install(args: argparse.Namespace) -> int:
+    """``mool daemon install`` — register the daemon to start at login (#76).
+
+    Exit codes: 0 installed (or dry run); 1 a hand-written file is in the way
+    (rerun with --force), or a supervisor command failed; 2 unsupported OS.
+    """
+    from hub import autostart
+    from hub.daemon import read_pid, stop_daemon, _pid_is_supervised
+
+    mechanism = autostart.detect_mechanism()
+    if mechanism is None:
+        print(red(f"Error: no supported autostart mechanism on {sys.platform}"),
+              file=sys.stderr)
+        return 2
+    dry = args.dry_run
+    plan = autostart.build_install_plan(mechanism, args.host, args.port)
+    name = autostart.MECHANISM_NAMES[mechanism]
+    print(bold(f"MoolMesh autostart — {name}"))
+    print(f"  File: {plan.path}")
+
+    warning = _dev_interpreter_warning()
+    if warning:
+        print(yellow(f"  Warning: {warning}"))
+    for note in plan.notes:
+        print(yellow(f"  Warning: {note}"))
+
+    # A registration not created by `install` is never overwritten silently.
+    current = autostart.inspect(mechanism)
+    foreign_text: str | None = None
+    if mechanism == "schtasks":
+        if not current.exists and not dry and autostart.windows_task_exists():
+            foreign_text = autostart.windows_task_xml()
+    elif current.exists and not current.managed:
+        try:
+            foreign_text = current.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            foreign_text = ""
+    if foreign_text is not None:
+        what = (f"a Task Scheduler task named {autostart.WINDOWS_TASK}"
+                if mechanism == "schtasks" else str(current.path))
+        if not args.force:
+            print(red(f"Error: {what} already exists and was not created by "
+                      "`mool daemon install`."), file=sys.stderr)
+            if mechanism != "schtasks":
+                diff = autostart.unified_diff(foreign_text, plan.content, current.path)
+                if diff:
+                    print(diff, file=sys.stderr)
+            print(dim("  Rerun with --force to replace it (a backup copy is "
+                      "saved first)."), file=sys.stderr)
+            return 1
+
+    if dry:
+        print(dim("  Dry run — nothing is written or executed."))
+        print()
+        print(plan.content.rstrip("\n"))
+        print()
+        if foreign_text is not None:
+            print(dim(f"  Would back up the existing file to "
+                      f"{autostart.backup_path(current.path, mechanism)}"))
+        pid = read_pid()
+        if pid and not _pid_is_supervised(pid):
+            print(dim(f"  Would stop the running daemon (PID {pid}) first."))
+        print("  Commands:")
+        for cmd in plan.activate:
+            print(f"    {autostart.display(cmd)}")
+        if plan.fallback:
+            print(dim("  If those fail: "
+                      + " ; ".join(autostart.display(c) for c in plan.fallback)))
+        if mechanism == "systemd":
+            print(dim('  Then checks linger: loginctl show-user "$USER" -p Linger'))
+        return 0
+
+    if foreign_text is not None:
+        if mechanism == "schtasks":
+            backup = autostart.backup_path(
+                Path.home() / ".moolmesh" / f"{autostart.WINDOWS_TASK}-task.xml",
+                mechanism)
+        else:
+            backup = autostart.backup_path(current.path, mechanism)
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup.write_text(foreign_text, encoding="utf-8")
+        print(yellow(f"  Backed up the existing registration → {backup}"))
+
+    # A daemon started by hand would hold the port and make the supervised
+    # one fail its bind: stop it so exactly one daemon remains.
+    pid = read_pid()
+    if pid and not _pid_is_supervised(pid):
+        print(dim(f"  Stopping the running daemon (PID {pid}) so the supervisor owns it"))
+        stop_daemon()
+
+    plan.path.parent.mkdir(parents=True, exist_ok=True)
+    plan.path.write_text(plan.content, encoding="utf-8")
+    print(green(f"  ✓ Wrote {plan.path}"))
+
+    if not _run_activation(plan.activate, plan.fallback, mechanism):
+        return 1
+
+    if mechanism == "systemd":
+        _report_linger()
+    print(green(f"MoolMesh autostart installed ({name})"))
+    print(dim(f"  Command: {autostart.display(plan.argv)}"))
+    print(dim("  Remove with: mool daemon uninstall"))
+    return 0
+
+
+def _run_activation(commands: list, fallback: list, mechanism: str) -> bool:
+    """Run activation commands; launchd falls back to load/unload -w."""
+    from hub import autostart
+    for i, cmd in enumerate(commands):
+        result = autostart._run(cmd)
+        if result.returncode == 0:
+            print(dim(f"  ✓ {autostart.display(cmd)}"))
+            continue
+        # launchd: `bootout` of a job that is not loaded fails — expected.
+        if mechanism == "launchd" and cmd[1] == "bootout":
+            continue
+        if fallback:
+            print(yellow(f"  {autostart.display(cmd)} failed (exit "
+                         f"{result.returncode}); trying the legacy commands"))
+            ok = True
+            for fb in fallback:
+                r = autostart._run(fb)
+                legacy_unload = fb[1] == "unload"
+                if r.returncode != 0 and not legacy_unload:
+                    ok = False
+                    print(red(f"Error: {autostart.display(fb)} failed: "
+                              f"{(r.stderr or r.stdout or '').strip()}"), file=sys.stderr)
+            return ok
+        print(red(f"Error: {autostart.display(cmd)} failed (exit "
+                  f"{result.returncode})"), file=sys.stderr)
+        detail = (result.stderr or result.stdout or "").strip()
+        if detail:
+            print(dim(f"  {detail}"), file=sys.stderr)
+        return False
+    return True
+
+
+def _report_linger() -> None:
+    from hub import autostart
+    linger = autostart.linger_enabled()
+    if linger is True:
+        print(green("  ✓ Linger is enabled: the daemon starts at boot, before any login"))
+    elif linger is False:
+        print(yellow("  Warning: linger is off — after a reboot the daemon only "
+                     "starts once you log in."))
+        print(yellow('  To start it at boot: loginctl enable-linger "$USER"'))
+    else:
+        print(dim('  Could not read linger (loginctl show-user "$USER" -p Linger)'))
+
+
+def cmd_daemon_uninstall(args: argparse.Namespace) -> int:
+    """``mool daemon uninstall`` — remove only what ``install`` created (#76)."""
+    from hub import autostart
+
+    mechanism = autostart.detect_mechanism()
+    if mechanism is None:
+        print(red(f"Error: no supported autostart mechanism on {sys.platform}"),
+              file=sys.stderr)
+        return 2
+    state = autostart.inspect(mechanism)
+    if not state.exists:
+        print(yellow("MoolMesh autostart is not installed — nothing to remove"))
+        return 0
+    if not state.managed:
+        print(red(f"Error: {state.path} was not created by `mool daemon install`; "
+                  "leaving it untouched."), file=sys.stderr)
+        return 1
+
+    commands, fallback = autostart.uninstall_commands(mechanism, state.path)
+    if args.dry_run:
+        print(dim("Dry run — nothing is removed or executed."))
+        if mechanism == "schtasks":
+            print("  Would stop the running daemon (mool daemon stop)")
+        for cmd in commands:
+            print(f"  {autostart.display(cmd)}")
+        if fallback:
+            print(dim("  If that fails: "
+                      + " ; ".join(autostart.display(c) for c in fallback)))
+        print(f"  Would remove {state.path}")
+        return 0
+
+    if mechanism == "schtasks":
+        from hub.daemon import stop_daemon
+        stop_daemon()
+    ok = True
+    for cmd in commands:
+        result = autostart._run(cmd)
+        if result.returncode == 0:
+            print(dim(f"  ✓ {autostart.display(cmd)}"))
+            continue
+        if fallback:
+            for fb in fallback:
+                if autostart._run(fb).returncode != 0:
+                    ok = False
+            continue
+        ok = False
+        print(yellow(f"  {autostart.display(cmd)} failed (exit {result.returncode}): "
+                     f"{(result.stderr or result.stdout or '').strip()}"))
+    state.path.unlink(missing_ok=True)
+    if mechanism == "systemd":
+        autostart._run(["systemctl", "--user", "daemon-reload"])
+    print(green(f"  ✓ Removed {state.path}"))
+    if ok:
+        print(green("MoolMesh autostart uninstalled"))
+        return 0
+    print(yellow("MoolMesh autostart file removed, but the supervisor reported "
+                 "an error (see above)"))
+    return 1
 
 
 def _print_daemon_status() -> int:
@@ -207,6 +523,7 @@ def _print_daemon_status() -> int:
     info = daemon_status()
     if info is None:
         print(yellow("MoolMesh daemon is not running"))
+        _print_autostart_status()
         return 0
 
     uptime = info["uptime_seconds"]
@@ -224,9 +541,10 @@ def _print_daemon_status() -> int:
     code = 0
     # Query the running daemon for live stats + watcher health (#65)
     try:
-        with urlopen("http://localhost:5200/health", timeout=2) as resp:
+        port = _status_port()
+        with urlopen(f"http://localhost:{port}/health", timeout=2) as resp:
             health = json.loads(resp.read())
-        print(f"  Port:   {5200}")
+        print(f"  Port:   {port}")
         print(f"  Events: {health.get('events_count', 0):,}")
         status = health.get("status", "healthy")
         if status == "degraded":
@@ -257,7 +575,46 @@ def _print_daemon_status() -> int:
         print(dim(f"  Log:    {log_kb / 1024:.1f} MB"))
     else:
         print(dim(f"  Log:    {log_kb:.0f} KB"))
+    _print_autostart_status()
     return code
+
+
+def _status_port() -> int:
+    """The port to probe: the autostart's registered one, else 5200 (#76)."""
+    from hub import autostart
+    try:
+        state = autostart.managed_state()
+    except OSError:
+        state = None
+    return (state.port if state is not None else None) or 5200
+
+
+def _autostart_summary() -> dict | None:
+    """Autostart registration as a dict (``None`` on an unsupported OS)."""
+    from hub import autostart
+    try:
+        state = autostart.inspect()
+    except OSError:
+        return None
+    return state.as_dict() if state is not None else None
+
+
+def _print_autostart_status() -> None:
+    """One status line: is the daemon registered to start at login? (#76)"""
+    from hub import autostart
+    summary = _autostart_summary()
+    if summary is None:
+        return
+    name = autostart.MECHANISM_NAMES[summary["mechanism"]]
+    if not summary["installed"]:
+        print(dim("  Autostart: not installed (mool daemon install)"))
+    elif summary["managed"]:
+        print(f"  Autostart: {green('installed')} ({name}) → {summary['path']}")
+        if summary["python_exists"] is False:
+            print(red(f"    interpreter missing: {summary['python']} — "
+                      "rerun mool daemon install"))
+    else:
+        print(f"  Autostart: {yellow('hand-written')} ({name}) → {summary['path']}")
 
 
 def _print_watcher_status(watchers: dict) -> None:
@@ -319,16 +676,18 @@ def _print_daemon_status_json() -> int:
 
     info = daemon_status()
     if info is None:
-        print(_json.dumps({"running": False}))
+        print(_json.dumps({"running": False, "autostart": _autostart_summary()}))
         return 0
 
-    result = {"running": True, "pid": info["pid"], "uptime_seconds": info["uptime_seconds"]}
+    result = {"running": True, "pid": info["pid"], "uptime_seconds": info["uptime_seconds"],
+              "autostart": _autostart_summary()}
 
     code = 0
     try:
-        with urlopen("http://localhost:5200/health", timeout=2) as resp:
+        port = _status_port()
+        with urlopen(f"http://localhost:{port}/health", timeout=2) as resp:
             health = _json.loads(resp.read())
-        result["port"] = 5200
+        result["port"] = port
         result["events_count"] = health.get("events_count", 0)
         result["version"] = health.get("version")
         result["status"] = health.get("status", "healthy")
@@ -710,10 +1069,23 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     # Daemon status
     from hub.daemon import read_pid as _read_pid
     daemon_pid = _read_pid()
+    autostart_info = _autostart_summary()
+    autostart_managed = bool(autostart_info and autostart_info["installed"]
+                             and autostart_info["managed"])
     if daemon_pid:
         print(green(f"  ✓ Daemon: running (PID {daemon_pid})"))
+    elif autostart_managed:
+        print(yellow("  ~ Daemon: not running — autostart is installed; "
+                     "start it with: mool daemon start"))
     else:
-        print(dim("  - Daemon: not running"))
+        print(yellow("  ~ Daemon: not running — to start it at every login: "
+                     "mool daemon install"))
+
+    # Autostart (#76)
+    failed = _doctor_autostart(autostart_info)
+    checks_fail += failed
+    checks_ok += 0 if failed else 1
+
 
     # MCP servers — informational: old ones are a warning, never a failed check (#70)
     from hub.mcp_registry import run_dir
@@ -724,6 +1096,27 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print(green("  All checks passed.\n"))
     else:
         print(yellow(f"  {checks_ok} passed, {checks_fail} failed\n"))
+
+
+def _doctor_autostart(info: dict | None) -> int:
+    """Doctor's autostart line (#76). Returns 1 when it is a failed check."""
+    from hub import autostart
+    if info is None:
+        print(dim(f"  - Autostart: not supported on {sys.platform}"))
+        return 0
+    name = autostart.MECHANISM_NAMES[info["mechanism"]]
+    if not info["installed"]:
+        print(dim("  - Autostart: not installed (mool daemon install)"))
+        return 0
+    label = "installed" if info["managed"] else "hand-written"
+    if info["python_exists"] is False:
+        print(red(f"  ✗ Autostart: {label} ({name}) → {info['path']} — its "
+                  f"interpreter no longer exists: {info['python']}"))
+        print(red("    Rerun: mool daemon install"
+                  + (" --force" if not info["managed"] else "")))
+        return 1
+    print(green(f"  ✓ Autostart: {label} ({name}) → {info['path']}"))
+    return 0
 
 
 def _print_mcp_servers(directory, installed_version: str) -> None:
@@ -1337,6 +1730,24 @@ def main() -> None:
     daemon_sub.add_parser(
         "status", help="Show daemon status (exit 1 when a watcher is degraded)"
     )
+
+    d_install = daemon_sub.add_parser(
+        "install",
+        help="Start the daemon at login (launchd / systemd --user / Task Scheduler)",
+    )
+    d_install.add_argument("--host", default="localhost",
+                           help="Host the supervised daemon binds (default: localhost)")
+    d_install.add_argument("--port", type=int, default=5200,
+                           help="Port the supervised daemon binds (default: 5200)")
+    d_install.add_argument("--dry-run", action="store_true",
+                           help="Show the file and commands without writing or running anything")
+    d_install.add_argument("--force", action="store_true",
+                           help="Replace a hand-written registration (backed up first)")
+    d_uninstall = daemon_sub.add_parser(
+        "uninstall", help="Remove the autostart created by `mool daemon install`"
+    )
+    d_uninstall.add_argument("--dry-run", action="store_true",
+                             help="Show what would be removed without doing it")
 
     d_restart = daemon_sub.add_parser("restart", help="Restart daemon")
     d_restart.add_argument("--port", type=int, default=None,
