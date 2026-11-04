@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: October 2026 — v1.27.1
+Last updated: November 2026 — v1.27.2
 
 ---
 
@@ -222,6 +222,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.27.0** ([#74](https://github.com/fmicalizzi/moolmesh/issues/74)): **Antigravity CLI** provider. Reads `transcript.jsonl` per conversation plus session metadata from `conversation_summaries.db` (CLI rows only); subagents linked to their parent; file tools give absolute `file_path`; registered across daemon, backfill, catch-up, CLI/MCP filters and the dashboard. Model, tokens and cost stay empty in v1.
 
 - **v1.27.1** ([#75](https://github.com/fmicalizzi/moolmesh/issues/75), [#78](https://github.com/fmicalizzi/moolmesh/issues/78)): OpenCode no longer loses streamed text. The cursor waits for parts that are still streaming and no longer skips everything past 500 new parts per poll; `mool backfill --reparse opencode` recovers the replies, reasoning and tool details stored without text (and sessions that never arrived). OpenCode file tools now give full `file_path` values. On Windows, git/gh subprocesses of the daemon no longer flash console windows.
+
+- **v1.27.2** ([#76](https://github.com/fmicalizzi/moolmesh/issues/76)): the daemon survives a reboot. `mool daemon install` registers it with launchd, systemd `--user` or Task Scheduler (opt-in, never overwrites a hand-written file, always in the foreground); start/stop/restart then go through the supervisor. MCP portfolio tools, `get_server_info`, every dashboard page and `mool doctor` flag stale data measured from the last git and GitHub API syncs (`[daemon] stale_after_minutes`). `daemon.log` is bounded at 10 MB.
 
 ---
 

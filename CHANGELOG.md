@@ -6,6 +6,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.27.2] — 2026-11-04
+
+The daemon now comes back on its own after a reboot, and MoolMesh says when its
+data is old instead of answering with frozen numbers (#76). No new dependencies.
+One additive schema migration in `github.db` (a new column; nothing is rewritten).
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- **Run at login (recommended):** `mool daemon install` (preview with `--dry-run`).
+  Run it from the pipx / uv tool install, not from a development virtualenv.
+  - Linux: if it warns that linger is off, `loginctl enable-linger "$USER"` makes
+    the daemon start at boot, before any login.
+  - If you already wrote your own launchd plist or systemd unit with the same name,
+    `install` refuses and shows a diff; `--force` replaces it after saving a backup.
+  - Remove with `mool daemon uninstall` (it only removes what `install` created).
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Added
+- **`mool daemon install` / `uninstall`** (#76): a LaunchAgent on macOS
+  (`dev.moolmesh.daemon`), a systemd `--user` unit on Linux (`moolmesh.service`),
+  a logon task on Windows (`MoolMesh`, with `pythonw.exe`). The supervised process
+  always runs `daemon start --foreground` with the PATH of the install moment, so
+  the GitHub sync keeps finding `gh`. Idempotent; `--host`, `--port`, `--dry-run`,
+  `--force`.
+- With the autostart installed, `mool daemon start|stop|restart` go through the
+  supervisor, so a manual start never adds a second daemon. `mool daemon status`
+  and `mool doctor` show the autostart; doctor flags an interpreter that no longer
+  exists.
+- **Stale-data flag, measured from the data** (#76):
+  - `get_server_info` always carries `freshness` (`daemon_running`,
+    `last_git_sync_at`, `last_github_sync_at`, `repos_stale`, `last_ingest_at`,
+    `data_age_seconds`, `stale`). The portfolio tools (`get_portfolio_grouped`,
+    `get_portfolio_production`) add it too, with a top-level `stale: true` when the
+    daemon is down or the last git / GitHub API sync is older than
+    `[daemon] stale_after_minutes` (default 60).
+  - A banner on every dashboard page (also when a watcher is degraded), a
+    freshness line in `mool doctor`, and `/api/freshness`.
+  - `github.db` migration 5 adds `repos.last_github_sync_at`, written after each
+    successful issues/PRs poll.
+
+### Fixed
+- **`daemon.log` grew without bound** (#76): past 10 MB it is rotated to
+  `daemon.log.1`, at start and every 10 minutes. `MallocStackLogging*` variables
+  are removed from the environment the daemon's children inherit (they filled a
+  macOS log with libmalloc warnings).
+- `mool daemon status` checks the port the daemon was registered with, not
+  always 5200.
+
 ## [1.27.1] — 2026-10-15
 
 OpenCode sessions no longer lose the agent's replies (#75), and the daemon no longer
