@@ -6,6 +6,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.30.0] — 2026-11-04
+
+Board repos, remote-only repos and clients spanning several owners (#93, #94,
+#95). No new dependencies. Two additive github.db migrations (7: `repos.kind`,
+8: `repos.github_id`); nothing is rewritten.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- Every existing repo stays `kind = "code"`; nothing changes until you use the
+  new options.
+- With a GitHub token, the daemon checks each registered repo's numeric id
+  (one `GET /repos/{owner}/{repo}` per repo every 6 h, usually a free 304).
+  When a repo was transferred or renamed it updates the same row **and
+  rewrites `~/.moolmesh/config.toml`** with the new name (as `mool repo add`
+  does: comments in that file are not kept).
+- `kind = "remote"` and `kind = "board"` are unknown to older versions, which
+  read them as `code`: do not downgrade with such repos registered.
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Added
+- **Board repos** (#93): `mool repo add --board owner/repo` (or `kind = "board"`
+  in `[[repos]]`) for issues-only backlogs. No git; the GitHub issues sync
+  keeps running. The portfolio shows `board · N open · M closed` instead of
+  "0 delivered" and leaves boards out of the delivery ranking. New MCP tool
+  `get_board_issues`: issues by label, assignee and age, with opened/closed
+  counts per local day.
+- **Remote-only repos** (#94): `mool repo add --remote OWNER/REPO` follows a
+  code repo through the API alone (issues, PRs, PR stats; merged PRs count as
+  delivery). `mool repo add --owner OWNER [--include GLOB ...] [--dry-run]
+  [--limit N]` registers the repos of an organization or a personal account.
+  Shown as "no clone" in the portfolio when they had GitHub activity in the
+  window.
+- **Identity by GitHub id** (#94): transfers and renames keep their history.
+- **Owner aliases** (#95): `[workspace] client_owner_aliases = {"some-account" =
+  "client"}` maps a whole owner to a client; new repos of that owner land
+  there with no override.
+- **Shared client registry** (#95): `[workspace] client_registry = "path"`, a
+  read-only TOML several machines share so they group the same way.
+- **Excluded repos** (#95): `exclude_owners` / `exclude_repos` are never read
+  (no git, no GitHub calls, never registered, hidden from the portfolio, MCP
+  and `/api/repos`). Data stored before the exclusion stays until
+  `mool repo remove`.
+
+---
+
 ## [1.29.1] — 2026-11-04
 
 Daemon stop/start fix (#96). No new dependencies, no schema change.

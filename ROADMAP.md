@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.29.1
+Last updated: November 2026 — v1.30.0
 
 ---
 
@@ -232,6 +232,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.29.0** ([#80](https://github.com/fmicalizzi/moolmesh/issues/80)): per-PR additions, deletions, changed files and qualified closing references (`owner/repo#n`) in the GitHub cache, filled by the poll for new/updated PRs and by `mool repo backfill-pr-stats` for older ones.
 
 - **v1.29.1** ([#96](https://github.com/fmicalizzi/moolmesh/issues/96)): `daemon stop` waits for the process to exit and `start` waits out a shutdown; shutdown under a second; concurrent stop/start never orphans the daemon.
+
+- **v1.30.0** ([#93](https://github.com/fmicalizzi/moolmesh/issues/93), [#94](https://github.com/fmicalizzi/moolmesh/issues/94), [#95](https://github.com/fmicalizzi/moolmesh/issues/95)): board repos (issues-only backlogs), remote-only repos with identity by GitHub id and `repo add --owner`, owner aliases, a shared client registry and excluded repos.
 
 ---
 
