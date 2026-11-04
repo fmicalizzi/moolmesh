@@ -6,6 +6,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.32.0] — 2026-11-04
+
+Days worked in the portfolio (#114, the second cause of #101). No new
+dependencies. One additive workspace.db migration and a one-time
+re-derivation (after a backup).
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- On the first attribution cycle after the upgrade, MoolMesh backs up
+  `workspace.db` (`~/.moolmesh/backups/workspace-<date>.db`) and makes one
+  full read-only pass over `events.db` to record the local days each session
+  worked on each project. `daemon.log` shows the count
+  (`atribución: días activos recalculados — N aristas, M días`). If the backup
+  fails nothing changes and it is retried on the next cycle. Changing
+  `[user] timezone` later repeats this once.
+- Expect more days lit in the production strip: a session resumed over
+  several days now counts on each of them. `active_days` and per-day counts
+  can go up; `sessions` (distinct sessions in the window) does not.
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Changed
+- **Days worked** (#114): the portfolio production strip (dashboard
+  `/portfolio`, MCP `get_portfolio_production`) counts a session on every
+  local day it had events on a project, not only on its latest event. Each
+  day counts distinct sessions; range totals count distinct sessions, never
+  the sum of the days. Sessions whose events are no longer in `events.db` are
+  dated by their latest event, as before. The rollup touch counts
+  (`get_portfolio`, client tier, `mool workspace portfolio`) are unchanged.
+
+---
+
 ## [1.31.2] — 2026-11-04
 
 One fix, a follow-up to #108. No new dependencies, no migrations.
