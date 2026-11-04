@@ -2369,7 +2369,10 @@ def cmd_export(args: argparse.Namespace) -> None:
         store.close()
         return
 
-    events = store.get_session_events(args.session_id, include_full_text=True)
+    # Tree-shaped sessions (Pi /tree, Claude parentUuid): the active branch
+    # only, in order; abandoned branches stay in events.db (#67).
+    events = store.get_session_events(args.session_id, include_full_text=True,
+                                      active_branch=True)
     store.close()
     if not events:
         print(yellow(f"No events found for session: {args.session_id}"))

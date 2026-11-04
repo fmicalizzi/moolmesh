@@ -103,6 +103,10 @@ class UnifiedEvent:
     # Provider-native per-entry id (#67), when the format has one (Pi entry
     # ``id``, Claude line ``uuid``). Part of the dedupe fingerprint.
     entry_id: str | None = None
+    # Provider-native id of the entry's parent (#67: Pi ``parentId``, Claude
+    # ``parentUuid``). Lets a tree-shaped session be shown as its active
+    # branch (``hub.linearize``). Never part of the fingerprint.
+    parent_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -128,6 +132,8 @@ class UnifiedEvent:
             d["full_text"] = self.full_text
         if self.entry_id:
             d["entry_id"] = self.entry_id
+        if self.parent_id:
+            d["parent_id"] = self.parent_id
         return d
 
     def to_json(self) -> str:

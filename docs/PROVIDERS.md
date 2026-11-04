@@ -69,6 +69,16 @@ logic beyond field definitions.
   `events.entry_id` and is part of the dedupe fingerprint, so two distinct
   entries in the same millisecond with the same summary (parallel tool
   results) are both kept (#67). Leave it `None` when there is no such id.
+- When entries also carry their parent's native id (Pi `parentId`, Claude
+  `parentUuid`), set it as `UnifiedEvent.parent_id`: it is stored in
+  `events.parent_id` (events.db migration 9, nullable, **not** part of the
+  fingerprint). `mool export` and the MCP `get_session_events` tool then show
+  only the session's active branch (`hub.linearize.active_branch`): the leaf
+  is the last stored event with an `entry_id`, and only subtrees proven
+  abandoned (another child of a node on the leaf → root path) are left out.
+  A gap in the chain (a parent the adapter never stored) hides nothing above
+  it; events without an id are kept. Abandoned branches stay in events.db and
+  in every other view. Sessions without `parent_id` keep their stored order.
 - `to_session_meta` fills id, cwd, model (last `model_change` or the
   assistant's own), title + initial prompt (first user prompt; explicit names
   win) and any small additive `metadata` (parent session, active leaf id).

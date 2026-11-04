@@ -371,6 +371,22 @@ def _mig_8_live_rows_older_than_ingest(conn: sqlite3.Connection):
     return None
 
 
+def _mig_9_parent_id(conn: sqlite3.Connection) -> None:
+    """Additive, nullable ``events.parent_id`` (#67).
+
+    The provider-native id of the entry's parent (Pi ``parentId``, Claude
+    ``parentUuid``), filled for new rows next to ``entry_id`` by the adapters
+    that have one, so ``mool export`` and the MCP session events can show the
+    active branch of a tree-shaped session (``hub.linearize``). Not part of
+    the fingerprint. No existing row is rewritten (no backup needed): old
+    rows keep ``parent_id = NULL`` and are shown in their stored order.
+    Idempotent via the ``PRAGMA table_info`` guard.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "parent_id" not in columns:
+        conn.execute("ALTER TABLE events ADD COLUMN parent_id TEXT")
+
+
 # Versioned, additive migrations for events.db — each runs exactly once.
 _EVENT_STORE_MIGRATIONS = [
     (1, "session_lifecycle", _mig_1_session_lifecycle),
@@ -381,6 +397,7 @@ _EVENT_STORE_MIGRATIONS = [
     (6, "opencode_session_times_iso", _mig_6_opencode_session_times_iso),
     (7, "entry_id", _mig_7_entry_id),
     (8, "live_rows_older_than_ingest", _mig_8_live_rows_older_than_ingest),
+    (9, "parent_id", _mig_9_parent_id),
 ]
 
 # The events.db migration whose rewrite the workspace.db attribution pass
@@ -410,6 +427,7 @@ def file_fingerprint(path: Path) -> str:
 _EVENT_SCALAR_KEYS = (
     "provider", "project", "event_type", "timestamp", "summary",
     "session_id", "tool_name", "file_path", "model", "cwd", "entry_id",
+    "parent_id",
 )
 _SCALAR_MAX_LEN = 2000
 
@@ -581,8 +599,8 @@ def _insert_event_row(
         """INSERT OR IGNORE INTO events
            (provider, project, event_type, timestamp, summary,
             session_id, tokens_json, tool_name, file_path, model, cwd,
-            fingerprint, created_at, historical, entry_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            fingerprint, created_at, historical, entry_id, parent_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             e.get("provider", ""), e.get("project", ""), e.get("event_type", ""),
             e.get("timestamp", ""), e.get("summary", ""), e.get("session_id"),
@@ -592,6 +610,7 @@ def _insert_event_row(
             1 if historical or is_older_than(e.get("timestamp"), _live_cutoff(None, now))
             else 0,
             e.get("entry_id"),
+            e.get("parent_id"),
         ),
     )
     if cursor.rowcount <= 0:
@@ -1094,31 +1113,42 @@ class EventStore:
         return d
 
     def get_session_events(
-        self, session_id: str, include_full_text: bool = False, limit: int = 500
+        self, session_id: str, include_full_text: bool = False, limit: int = 500,
+        active_branch: bool = False,
     ) -> list[dict[str, Any]]:
+        """A session's events, oldest first.
+
+        ``active_branch=True`` (#67) shows only the branch the user is on for a
+        tree-shaped session (events with ``parent_id``; see ``hub.linearize``):
+        all the session's rows are read, the abandoned branches are left out,
+        then ``limit`` applies. Sessions without ``parent_id`` are unchanged.
+        """
+        sql_limit = -1 if active_branch else limit
         with self._lock:
             conn = self._get_conn()
             if include_full_text:
                 rows = conn.execute("""
                     SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
                            e.summary, e.session_id, e.tokens_json, e.tool_name,
-                           e.file_path, e.model, e.cwd, ec.full_text, e.created_at
+                           e.file_path, e.model, e.cwd, ec.full_text, e.created_at,
+                           e.entry_id, e.parent_id
                     FROM events e
                     LEFT JOIN event_content ec ON e.id = ec.event_id
                     WHERE e.session_id = ?
-                    ORDER BY e.timestamp ASC
+                    ORDER BY e.timestamp ASC, e.id ASC
                     LIMIT ?
-                """, (session_id, limit)).fetchall()
+                """, (session_id, sql_limit)).fetchall()
             else:
                 rows = conn.execute("""
                     SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
                            e.summary, e.session_id, e.tokens_json, e.tool_name,
-                           e.file_path, e.model, e.cwd, NULL as full_text, e.created_at
+                           e.file_path, e.model, e.cwd, NULL as full_text, e.created_at,
+                           e.entry_id, e.parent_id
                     FROM events e
                     WHERE e.session_id = ?
-                    ORDER BY e.timestamp ASC
+                    ORDER BY e.timestamp ASC, e.id ASC
                     LIMIT ?
-                """, (session_id, limit)).fetchall()
+                """, (session_id, sql_limit)).fetchall()
         results = []
         for r in rows:
             d: dict[str, Any] = {
@@ -1138,7 +1168,17 @@ class EventStore:
                     pass
             if r[12]:
                 d["full_text"] = r[12]
+            if active_branch:
+                d["entry_id"], d["parent_id"] = r[14], r[15]
             results.append(d)
+        if active_branch:
+            from hub.linearize import active_branch as _active_branch
+            results = _active_branch(results)
+            if limit >= 0:
+                results = results[:limit]
+            for d in results:
+                d.pop("entry_id", None)
+                d.pop("parent_id", None)
         return results
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -1158,8 +1198,8 @@ class EventStore:
                 """INSERT OR IGNORE INTO events
                    (provider, project, event_type, timestamp, summary,
                     session_id, tokens_json, tool_name, file_path, model, cwd,
-                    fingerprint, created_at, entry_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    fingerprint, created_at, entry_id, parent_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     event_dict.get("provider", ""),
                     event_dict.get("project", ""),
@@ -1175,6 +1215,7 @@ class EventStore:
                     fingerprint,
                     time.time(),
                     event_dict.get("entry_id"),
+                    event_dict.get("parent_id"),
                 ),
             )
             full_text = event_dict.get("full_text")
@@ -1203,8 +1244,8 @@ class EventStore:
                     """INSERT OR IGNORE INTO events
                        (provider, project, event_type, timestamp, summary,
                         session_id, tokens_json, tool_name, file_path, model, cwd,
-                        fingerprint, created_at, entry_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        fingerprint, created_at, entry_id, parent_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         e.get("provider", ""),
                         e.get("project", ""),
@@ -1220,6 +1261,7 @@ class EventStore:
                         _compute_fingerprint(e),
                         now,
                         e.get("entry_id"),
+                        e.get("parent_id"),
                     ),
                 )
                 full_text = e.get("full_text")
@@ -1723,6 +1765,7 @@ class EventStore:
                 now,
                 1 if is_old else 0,
                 e.get("entry_id"),
+                e.get("parent_id"),
             ))
 
         result_events = []
@@ -1737,8 +1780,8 @@ class EventStore:
                         """INSERT OR IGNORE INTO events
                            (provider, project, event_type, timestamp, summary,
                             session_id, tokens_json, tool_name, file_path, model, cwd,
-                            fingerprint, created_at, historical, entry_id)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            fingerprint, created_at, historical, entry_id, parent_id)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         row,
                     )
                     if cursor.rowcount > 0:
@@ -1746,6 +1789,7 @@ class EventStore:
                         ev["id"] = cursor.lastrowid
                         # Not part of the SSE payload (contract unchanged, #67).
                         ev.pop("entry_id", None)
+                        ev.pop("parent_id", None)
                         if old_flags[i] and not historical:
                             ev["historical"] = True
                         full_text = ev.pop("full_text", None)

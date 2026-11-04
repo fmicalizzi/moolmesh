@@ -9,7 +9,12 @@ appends a new branch.
 
 The parser ingests every entry exactly once (deduped by ``id``), in file order,
 so no branch is ever lost. It also exposes :func:`linearize` to walk the active
-branch (leaf → root) when a consumer needs the linear transcript.
+branch (leaf → root) over parsed entries when a consumer needs the linear
+transcript. The adapter stores ``id`` / ``parentId`` as ``events.entry_id`` /
+``events.parent_id`` (#67), and ``mool export`` and the MCP session events show
+the active branch from the stored rows with :func:`hub.linearize.active_branch`
+(same walk, same "append-only tip is the leaf" rule; abandoned branches stay in
+events.db).
 """
 
 from __future__ import annotations

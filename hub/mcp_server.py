@@ -568,34 +568,55 @@ def _get_session_events(
 ) -> list[dict[str, Any]]:
     """text_mode: 'none' (summary only), 'snippet' (500 chars), 'full' (complete text).
     order: 'asc' (oldest first) or 'desc' (newest first).
-    offset: skip N events for pagination."""
+    offset: skip N events for pagination.
+
+    A tree-shaped session (events with ``parent_id``: Pi ``/tree``, Claude
+    ``parentUuid``) returns its active branch only (#67, ``hub.linearize``);
+    pagination applies to that branch. Abandoned branches stay in the DB."""
     limit = min(limit, 500)
     offset = max(offset, 0)
     direction = "DESC" if order.lower() == "desc" else "ASC"
     conn = _connect(db_path)
-    if text_mode in ("snippet", "full"):
+    try:
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
+        tree = "parent_id" in columns and conn.execute(
+            "SELECT 1 FROM events WHERE session_id = ? AND parent_id IS NOT NULL LIMIT 1",
+            (session_id,),
+        ).fetchone() is not None
+        text_col = "ec.full_text" if text_mode in ("snippet", "full") else "NULL"
+        join = ("LEFT JOIN event_content ec ON e.id = ec.event_id"
+                if text_mode in ("snippet", "full") else "")
+        tree_cols = ", e.entry_id, e.parent_id" if tree else ""
+        if tree:
+            # Read the whole session in stored order, keep the active branch,
+            # then order and paginate in Python.
+            page_sql, params = "ORDER BY e.timestamp ASC, e.id ASC", (session_id,)
+        else:
+            page_sql = f"ORDER BY e.timestamp {direction} LIMIT ? OFFSET ?"
+            params = (session_id, limit, offset)
         rows = conn.execute(f"""
             SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
                    e.summary, e.session_id, e.tokens_json, e.tool_name,
-                   e.file_path, e.model, e.cwd, ec.full_text
+                   e.file_path, e.model, e.cwd, {text_col} as full_text{tree_cols}
             FROM events e
-            LEFT JOIN event_content ec ON e.id = ec.event_id
+            {join}
             WHERE e.session_id = ?
-            ORDER BY e.timestamp {direction} LIMIT ? OFFSET ?
-        """, (session_id, limit, offset)).fetchall()
-    else:
-        rows = conn.execute(f"""
-            SELECT e.id, e.provider, e.project, e.event_type, e.timestamp,
-                   e.summary, e.session_id, e.tokens_json, e.tool_name,
-                   e.file_path, e.model, e.cwd, NULL as full_text
-            FROM events e
-            WHERE e.session_id = ?
-            ORDER BY e.timestamp {direction} LIMIT ? OFFSET ?
-        """, (session_id, limit, offset)).fetchall()
-    conn.close()
+            {page_sql}
+        """, params).fetchall()
+    finally:
+        conn.close()
+    dicts = [dict(r) for r in rows]
+    if tree:
+        from hub.linearize import active_branch
+        dicts = active_branch(dicts)
+        if direction == "DESC":
+            dicts.reverse()
+        dicts = dicts[offset:offset + limit]
+        for d in dicts:
+            d.pop("entry_id", None)
+            d.pop("parent_id", None)
     results = []
-    for r in rows:
-        d = dict(r)
+    for d in dicts:
         if d.get("tokens_json"):
             try:
                 d["tokens"] = json.loads(d.pop("tokens_json"))
