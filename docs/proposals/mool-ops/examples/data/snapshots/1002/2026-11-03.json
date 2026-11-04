@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "org": "acme",
+  "repo": {
+    "id": 1002,
+    "label": "acme-dev/backlog",
+    "kind": "board",
+    "membership": "org"
+  },
+  "date": "2026-11-03",
+  "timezone": "America/Costa_Rica",
+  "period": {
+    "start": "2026-11-02",
+    "end": "2026-11-03",
+    "days": 2
+  },
+  "issues": {
+    "closed_this_period": 1,
+    "opened_this_period": 1,
+    "total_open": 2,
+    "total_closed": 5
+  },
+  "prs": {
+    "merged_this_period": 0,
+    "open": 0,
+    "open_bots": 0,
+    "total_additions": 0,
+    "total_deletions": 0
+  },
+  "by_developer": {},
+  "by_pr": [],
+  "devs_active": 0,
+  "devs_available": [],
+  "blockers": [],
+  "notes": [],
+  "extensions": {}
+}

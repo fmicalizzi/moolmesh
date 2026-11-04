@@ -5,7 +5,7 @@ this repository** (identity, invariants, architecture map, conventions, dev/test
 release workflow, git rules).
 
 Quick orientation:
-- **This repo IS the live product** — MoolMesh v1.8.x, PyPI, CI. Never plan against
+- **This repo IS the live product** — MoolMesh v1.27.x, PyPI, CI. Never plan against
   any older `ai_session_hub` / `live-monitor` predecessor.
 - Why: [`PHILOSOPHY.md`](PHILOSOPHY.md). Where to: [`VISION_ROADMAP.md`](VISION_ROADMAP.md)
   (español: [`VISION_ROADMAP.es.md`](VISION_ROADMAP.es.md)). What shipped / queued:

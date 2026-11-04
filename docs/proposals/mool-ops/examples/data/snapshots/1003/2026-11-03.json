@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "org": "acme",
+  "repo": {
+    "id": 1003,
+    "label": "jdoe/infra-scripts",
+    "kind": "code",
+    "membership": "affiliated"
+  },
+  "date": "2026-11-03",
+  "timezone": "America/Costa_Rica",
+  "period": {
+    "start": "2026-11-02",
+    "end": "2026-11-03",
+    "days": 2
+  },
+  "issues": {
+    "closed_this_period": 0,
+    "opened_this_period": 0,
+    "total_open": 0,
+    "total_closed": 0
+  },
+  "prs": {
+    "merged_this_period": 1,
+    "open": 0,
+    "open_bots": 0,
+    "total_additions": 45,
+    "total_deletions": 3
+  },
+  "by_developer": {
+    "jdoe": {
+      "alias": "J. Doe",
+      "issues_closed": 0,
+      "prs_merged": 1,
+      "additions": 45,
+      "deletions": 3,
+      "prs": [
+        2
+      ]
+    }
+  },
+  "by_pr": [
+    {
+      "number": 2,
+      "title": "ci: nightly backup check",
+      "author": "jdoe",
+      "additions": 45,
+      "deletions": 3,
+      "files_changed": 1,
+      "merged_at": "2026-11-02T20:00:00Z",
+      "closes": [],
+      "bot": false
+    }
+  ],
+  "devs_active": 1,
+  "devs_available": [],
+  "blockers": [],
+  "notes": [],
+  "extensions": {}
+}

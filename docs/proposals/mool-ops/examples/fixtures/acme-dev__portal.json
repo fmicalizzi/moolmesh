@@ -1,0 +1,211 @@
+{
+  "id": 1001,
+  "prs": [
+    {
+      "number": 9,
+      "title": "feat(login): remember device",
+      "author": {
+        "login": "alice"
+      },
+      "state": "MERGED",
+      "createdAt": "2026-10-30T15:00:00Z",
+      "mergedAt": "2026-10-28T18:00:00Z",
+      "closedAt": "2026-10-28T18:00:00Z",
+      "additions": 120,
+      "deletions": 30,
+      "changedFiles": 6,
+      "closingIssuesReferences": [
+        {
+          "id": "I_acme-dev_portal_4",
+          "number": 4,
+          "repository": {
+            "id": "R",
+            "name": "portal",
+            "owner": {
+              "id": "O",
+              "login": "acme-dev"
+            }
+          },
+          "url": "https://github.com/acme-dev/portal/issues/4"
+        }
+      ]
+    },
+    {
+      "number": 10,
+      "title": "fix(cart): keep coupon after refresh",
+      "author": {
+        "login": "alice"
+      },
+      "state": "MERGED",
+      "createdAt": "2026-10-30T15:00:00Z",
+      "mergedAt": "2026-11-02T17:00:00Z",
+      "closedAt": "2026-11-02T17:00:00Z",
+      "additions": 340,
+      "deletions": 80,
+      "changedFiles": 9,
+      "closingIssuesReferences": [
+        {
+          "id": "I_acme-dev_portal_5",
+          "number": 5,
+          "repository": {
+            "id": "R",
+            "name": "portal",
+            "owner": {
+              "id": "O",
+              "login": "acme-dev"
+            }
+          },
+          "url": "https://github.com/acme-dev/portal/issues/5"
+        }
+      ]
+    },
+    {
+      "number": 11,
+      "title": "feat(api): export orders as CSV",
+      "author": {
+        "login": "bob"
+      },
+      "state": "MERGED",
+      "createdAt": "2026-10-30T15:00:00Z",
+      "mergedAt": "2026-11-03T03:30:00Z",
+      "closedAt": "2026-11-03T03:30:00Z",
+      "additions": 510,
+      "deletions": 40,
+      "changedFiles": 12,
+      "closingIssuesReferences": [
+        {
+          "id": "I_acme-dev_backlog_5",
+          "number": 5,
+          "repository": {
+            "id": "R",
+            "name": "backlog",
+            "owner": {
+              "id": "O",
+              "login": "acme-dev"
+            }
+          },
+          "url": "https://github.com/acme-dev/backlog/issues/5"
+        }
+      ]
+    },
+    {
+      "number": 12,
+      "title": "chore(deps): bump the minor group",
+      "author": {
+        "login": "app/dependabot"
+      },
+      "state": "MERGED",
+      "createdAt": "2026-10-30T15:00:00Z",
+      "mergedAt": "2026-11-03T16:00:00Z",
+      "closedAt": "2026-11-03T16:00:00Z",
+      "additions": 60,
+      "deletions": 60,
+      "changedFiles": 2,
+      "closingIssuesReferences": []
+    },
+    {
+      "number": 13,
+      "title": "feat(search): typo tolerance",
+      "author": {
+        "login": "alice"
+      },
+      "state": "OPEN",
+      "createdAt": "2026-11-03T15:00:00Z",
+      "mergedAt": null,
+      "closedAt": null,
+      "additions": 200,
+      "deletions": 10,
+      "changedFiles": 5,
+      "closingIssuesReferences": []
+    }
+  ],
+  "issues": [
+    {
+      "number": 1,
+      "title": "Issue 1",
+      "state": "CLOSED",
+      "createdAt": "2026-09-01T15:00:00Z",
+      "closedAt": "2026-09-10T15:00:00Z",
+      "assignees": [
+        {
+          "login": "alice"
+        }
+      ],
+      "labels": []
+    },
+    {
+      "number": 2,
+      "title": "Issue 2",
+      "state": "CLOSED",
+      "createdAt": "2026-09-02T15:00:00Z",
+      "closedAt": "2026-09-12T15:00:00Z",
+      "assignees": [
+        {
+          "login": "bob"
+        }
+      ],
+      "labels": []
+    },
+    {
+      "number": 3,
+      "title": "Issue 3",
+      "state": "CLOSED",
+      "createdAt": "2026-09-05T15:00:00Z",
+      "closedAt": "2026-10-01T15:00:00Z",
+      "assignees": [
+        {
+          "login": "bob"
+        }
+      ],
+      "labels": []
+    },
+    {
+      "number": 4,
+      "title": "Issue 4",
+      "state": "CLOSED",
+      "createdAt": "2026-10-01T15:00:00Z",
+      "closedAt": "2026-10-28T18:00:00Z",
+      "assignees": [
+        {
+          "login": "alice"
+        }
+      ],
+      "labels": []
+    },
+    {
+      "number": 5,
+      "title": "Coupon lost after refresh",
+      "state": "CLOSED",
+      "createdAt": "2026-10-20T15:00:00Z",
+      "closedAt": "2026-11-02T17:00:00Z",
+      "assignees": [
+        {
+          "login": "alice"
+        }
+      ],
+      "labels": []
+    },
+    {
+      "number": 6,
+      "title": "Search ignores accents",
+      "state": "OPEN",
+      "createdAt": "2026-11-03T15:30:00Z",
+      "closedAt": null,
+      "assignees": [],
+      "labels": []
+    },
+    {
+      "number": 7,
+      "title": "Slow invoice page",
+      "state": "OPEN",
+      "createdAt": "2026-10-05T15:00:00Z",
+      "closedAt": null,
+      "assignees": [
+        {
+          "login": "bob"
+        }
+      ],
+      "labels": []
+    }
+  ]
+}

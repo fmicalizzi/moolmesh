@@ -8,7 +8,7 @@ repository. Read it before making changes. It is the single source of truth for
 
 ## 0. Golden rule
 
-**This repository (`moolmesh`) IS the live product.** v1.8.x, published to PyPI
+**This repository (`moolmesh`) IS the live product.** v1.27.x, published to PyPI
 (`pip install moolmesh`), remote `github.com/fmicalizzi/moolmesh`, CI in
 `publish.yml`. Any older `ai_session_hub` / `live-monitor` tree elsewhere on disk
 is a historical predecessor — never analyze, verify, or plan against it. Everything
@@ -70,7 +70,8 @@ hub/
 ```
 
 - **Provider quartet:** `model → parser → adapter → watcher`, ~300–500 LOC total.
-  The 5 current providers: Claude, Codex, Qwen, OpenCode, Cursor (`models/base.py`).
+  The 7 current providers: Claude, Codex, Qwen, OpenCode, Cursor, Pi, Antigravity
+  (`models/base.py`). `docs/PROVIDERS.md` is the template for a new one.
 - **MCP server** exposes read-only query tools (`get_active_sessions`,
   `get_session_chain`, `search_session_content`, `get_session_detail`, …). These are
   the coordination primitives — treat them as product surface, not plumbing.
@@ -120,13 +121,37 @@ hub/
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"          # dev extra = pytest
-pytest                            # full suite — keep it green (656+ tests baseline)
+pytest -q                         # full suite — keep it green (1848 passed / 8 skipped at v1.27.1)
 mool --help                       # run the CLI
-mool daemon start                 # or run the daemon / dashboard locally
 ```
 
 - Every change keeps the suite green. New behavior ships with tests.
-- CI (`publish.yml`) runs on push; do not merge red.
+- **Isolate HOME.** Tests and manual runs of the branch code use
+  `HOME="<tmp>/home"`: a run against the real `~/.moolmesh` can migrate the live
+  DBs. The suite is safe with the real HOME today, but anything you run by hand
+  is not.
+- **Privacy test:** run the suite twice before handing work over — with
+  `MOOLMESH_PRIVACY_DENYLIST=~/.moolmesh/privacy-denylist.txt` (one more test
+  runs) and without it.
+- **Verify in a worktree**, never by checking out a branch in a shared checkout
+  someone else is using: `git worktree add --detach <tmp>/wt <branch>`, run the
+  suite there, then `git worktree remove`.
+- **Real data is read-only and local.** Provider DBs (`opencode.db`, Cursor's
+  `state.vscdb`, …) are opened `mode=ro` (`hub.sqlite_ro`); validation on real
+  data reports **counts and structure only**, never content, prompts, paths or
+  project names. A machine without real agent history validates on synthetic
+  fixtures; real-data checks go to a machine that has it (see §8).
+- **Shell gotchas:**
+  - zsh does not word-split `$VAR`: `env $E cmd` does not apply `E`. Write
+    every `VAR="value" cmd` explicitly — this once overwrote the real
+    `~/.local/bin/mool`.
+  - zsh treats a word starting with `=` as a command lookup, so `echo ====` fails.
+  - macOS has no `timeout`.
+  - `uv run` inside the repo writes `uv.lock` and resyncs `.venv`.
+  - Check `readlink ~/.local/bin/mool` before and after anything that installs.
+- CI (`publish.yml`) runs on a published release (and `workflow_dispatch` as a
+  dry run): preflight runs the suite, then build, publish (PyPI trusted
+  publishing, OIDC) and a bot commit that syncs the version and test count.
 - Quality tools when available: `ruff` (lint), `radon`, `bandit`, `vulture`,
   `pytest-cov`.
 
@@ -150,13 +175,25 @@ does, that's a signal to invest in the provider-template enabler first
 
 ## 7. Release workflow
 
-1. Bump `version` in `pyproject.toml` (single source; `hub/__init__.py` reads it via
-   `importlib.metadata`).
-2. Update `CHANGELOG.md` (one entry per release) and, if strategy changed,
-   `ROADMAP.md` / `VISION_ROADMAP.md`.
-3. Push to `main`, then `gh release create vX.Y.Z`. CI publishes to PyPI and
-   auto-syncs the badge/SVG assets.
-4. **Rebase local `main` after each release** (CI commits back the asset sync).
+A release happens **only with the owner's explicit authorization**, given for
+that specific version.
+
+1. The work lands on a branch, verified (§5) by someone other than its author
+   when possible.
+2. A release commit on top: bump `version` in `pyproject.toml` (single source;
+   `hub/__init__.py` reads it via `importlib.metadata`), add the `CHANGELOG.md`
+   entry (with upgrade notes) and update `ROADMAP.md`.
+3. With the authorization: fast-forward `main` to that commit and push **only**
+   `main` (no `--tags`, no `--force`), then **one** `gh release create vX.Y.Z
+   --target <sha>`. CI publishes to PyPI and pushes the asset-sync commit.
+4. Check the run: every job green, the wheel and sdist on PyPI, the tag count up
+   by one, the bot commit on `main`. If `publish` fails: do not re-run, do not
+   delete the release or the tag — report.
+5. `git pull --ff-only` afterwards (CI commits back the asset sync), delete the
+   merged branches with `git branch -d`.
+6. Users upgrade with `pipx upgrade moolmesh --pip-args=--no-cache-dir` (pip's
+   HTTP cache can serve a stale index), then `mool daemon restart`, then restart
+   open agent sessions so their MCP servers load the new code.
 
 ---
 
@@ -165,18 +202,59 @@ does, that's a signal to invest in the provider-template enabler first
 - **Commit only when the owner asks.** When authorized to commit/push/release/close
   issues: use the owner's own git signature, and **never** add a `Co-Authored-By`
   trailer.
+- **Identity:** before every commit, `git config user.email` must be the owner's
+  personal address configured for this repo. An agent session may be logged in
+  with a different account; git identity is what counts. Never write any email
+  address into code, commits, issues or docs.
+- **Per-commit privacy loop** (each must print `0 0`):
+  ```bash
+  for c in $(git rev-list origin/main..HEAD); do echo "$c $(git show "$c" | grep '^+' | grep -ciFf ~/.moolmesh/privacy-denylist.txt) $(git log -1 --format=%B "$c" | grep -ciFf ~/.moolmesh/privacy-denylist.txt)"; done
+  git grep -ciFf ~/.moolmesh/privacy-denylist.txt HEAD | wc -l   # 0
+  ```
 - Never `amend` a commit already pushed to `main` — always a new commit.
 - If starting new work on `main`, branch first when appropriate.
 - Discuss provider/feature approach in a GitHub issue before a PR (see
   `CONTRIBUTING.md`).
 
+### Working model (orchestrator · worker · field machine)
+
+The owner runs development with two kinds of agent sessions:
+
+- **Orchestrator:** turns an issue into a self-contained **handoff** (scope,
+  rules, tests, Definition of Done, report format), then **verifies the
+  result itself** — the real diff plus its own test run in a worktree — never
+  the worker's report alone. One unit at a time.
+- **Worker:** executes one handoff on a branch, commits, does not push, and
+  reports. Releases are a separate mini handoff that carries the owner's
+  authorization (§7).
+- **Field machine:** the machine with real agent history. Development and CI
+  work on synthetic fixtures; anything that needs real data (a reparse, a live
+  provider experiment, an autostart after a reboot) is a short handoff run
+  there that reports counts only.
+
+Decisions that imply execution say **when and who**. Handoffs and reports with
+real data stay outside the repo (`~/.moolmesh/reports/`, chmod 600).
+
 ---
 
-## 9. Current priorities (snapshot)
+## 9. Current priorities (snapshot, 2026-11-04 — v1.27.1)
 
-Near-term is Observe-base hygiene — see `VISION_ROADMAP.md` §4 and issues
-[#16](https://github.com/fmicalizzi/moolmesh/issues/16) (session lifecycle),
-[#17](https://github.com/fmicalizzi/moolmesh/issues/17) (`tool_result` event type),
-[#18](https://github.com/fmicalizzi/moolmesh/issues/18) (resumed-session timestamps).
+1. **v1.27.2 — [#76](https://github.com/fmicalizzi/moolmesh/issues/76):**
+   `mool daemon install` (launchd / systemd `--user` / Task Scheduler), a
+   stale-data flag measured from the data, and `daemon.log` growth. Two real
+   outages so far went unnoticed for days.
+2. **Operations tracking — [#84](https://github.com/fmicalizzi/moolmesh/issues/84)**
+   (design kit in [`docs/proposals/mool-ops/`](docs/proposals/mool-ops/DECISIONS.md)):
+   core gaps [#81](https://github.com/fmicalizzi/moolmesh/issues/81) (local day,
+   with #79), [#80](https://github.com/fmicalizzi/moolmesh/issues/80) (PR stats),
+   [#82](https://github.com/fmicalizzi/moolmesh/issues/82) (versioned export);
+   decision [#83](https://github.com/fmicalizzi/moolmesh/issues/83); the engine
+   is a companion package.
+3. **Robustness:** [#52](https://github.com/fmicalizzi/moolmesh/issues/52),
+   [#54](https://github.com/fmicalizzi/moolmesh/issues/54),
+   [#62](https://github.com/fmicalizzi/moolmesh/issues/62),
+   [#67](https://github.com/fmicalizzi/moolmesh/issues/67).
+4. Lower: #77 (Antigravity follow-ups), #79, #46–#49.
+
 Provider expansion and synchronous-coordination direction are owner decisions
 tracked in `VISION_ROADMAP.md` §8.

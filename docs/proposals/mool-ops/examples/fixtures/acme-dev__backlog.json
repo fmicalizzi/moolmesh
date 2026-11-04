@@ -1,0 +1,69 @@
+{
+  "id": 1002,
+  "prs": [],
+  "issues": [
+    {
+      "number": 1,
+      "title": "Issue 1",
+      "state": "CLOSED",
+      "createdAt": "2026-09-01T15:00:00Z",
+      "closedAt": "2026-09-20T15:00:00Z",
+      "assignees": [],
+      "labels": []
+    },
+    {
+      "number": 2,
+      "title": "Issue 2",
+      "state": "CLOSED",
+      "createdAt": "2026-09-01T15:00:00Z",
+      "closedAt": "2026-09-20T15:00:00Z",
+      "assignees": [],
+      "labels": []
+    },
+    {
+      "number": 3,
+      "title": "Issue 3",
+      "state": "CLOSED",
+      "createdAt": "2026-09-03T15:00:00Z",
+      "closedAt": "2026-10-02T15:00:00Z",
+      "assignees": [],
+      "labels": []
+    },
+    {
+      "number": 4,
+      "title": "Issue 4",
+      "state": "CLOSED",
+      "createdAt": "2026-09-03T15:00:00Z",
+      "closedAt": "2026-10-02T15:00:00Z",
+      "assignees": [],
+      "labels": []
+    },
+    {
+      "number": 5,
+      "title": "Sales wants orders as CSV",
+      "state": "CLOSED",
+      "createdAt": "2026-10-10T15:00:00Z",
+      "closedAt": "2026-11-03T03:30:00Z",
+      "assignees": [],
+      "labels": []
+    },
+    {
+      "number": 6,
+      "title": "Define SLA for support tickets",
+      "state": "OPEN",
+      "createdAt": "2026-10-12T15:00:00Z",
+      "closedAt": null,
+      "assignees": [],
+      "labels": []
+    },
+    {
+      "number": 8,
+      "title": "Monthly report for management",
+      "state": "OPEN",
+      "createdAt": "2026-11-03T17:00:00Z",
+      "closedAt": null,
+      "assignees": [],
+      "labels": []
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "id": 1003,
+  "prs": [
+    {
+      "number": 2,
+      "title": "ci: nightly backup check",
+      "author": {
+        "login": "jdoe"
+      },
+      "state": "MERGED",
+      "createdAt": "2026-10-30T15:00:00Z",
+      "mergedAt": "2026-11-02T20:00:00Z",
+      "closedAt": "2026-11-02T20:00:00Z",
+      "additions": 45,
+      "deletions": 3,
+      "changedFiles": 1,
+      "closingIssuesReferences": []
+    }
+  ],
+  "issues": []
+}

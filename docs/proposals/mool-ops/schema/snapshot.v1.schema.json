@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/mool-ops/snapshot.v1.schema.json",
+  "title": "Ops snapshot v1",
+  "type": "object",
+  "required": ["schema_version", "org", "repo", "date", "timezone", "period", "issues", "prs", "by_developer", "by_pr"],
+  "properties": {
+    "schema_version": {"type": "string", "pattern": "^1\\."},
+    "org": {"type": "string"},
+    "repo": {
+      "type": "object",
+      "required": ["id", "label", "kind"],
+      "properties": {
+        "id": {"type": "integer"},
+        "label": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+        "kind": {"enum": ["code", "board", "docs"]},
+        "membership": {"enum": ["org", "affiliated", "confidential"]}
+      }
+    },
+    "date": {"type": "string", "format": "date"},
+    "timezone": {"type": "string"},
+    "period": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {"start": {"type": "string", "format": "date"}, "end": {"type": "string", "format": "date"}, "days": {"type": "integer", "minimum": 1}}
+    },
+    "issues": {
+      "type": "object",
+      "required": ["closed_this_period", "opened_this_period", "total_open", "total_closed"],
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "prs": {
+      "type": "object",
+      "required": ["merged_this_period", "open", "total_additions", "total_deletions"],
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "by_developer": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "alias": {"type": "string"},
+          "issues_closed": {"type": "integer"}, "prs_merged": {"type": "integer"},
+          "additions": {"type": "integer"}, "deletions": {"type": "integer"},
+          "prs": {"type": "array", "items": {"type": "integer"}}
+        }
+      }
+    },
+    "by_pr": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["number", "author", "merged_at"],
+        "properties": {
+          "number": {"type": "integer"}, "title": {"type": "string"}, "author": {"type": "string"},
+          "additions": {"type": "integer"}, "deletions": {"type": "integer"}, "files_changed": {"type": "integer"},
+          "merged_at": {"type": "string"},
+          "closes": {"type": "array", "items": {"type": "string", "pattern": "^[^/]+/[^#]+#[0-9]+$"}},
+          "bot": {"type": "boolean"}
+        }
+      }
+    },
+    "devs_active": {"type": "integer"},
+    "devs_available": {"type": "array", "items": {"type": "string"}},
+    "blockers": {"type": "array", "items": {"type": "string"}},
+    "notes": {"type": "array", "items": {"type": "string"}},
+    "extensions": {"type": "object"}
+  }
+}

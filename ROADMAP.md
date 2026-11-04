@@ -251,6 +251,10 @@ Deferred out of the epic:
 
 (#24 and #25 were folded into this epic and closed as superseded.)
 
+### Operations tracking (mool-ops, [#84](https://github.com/fmicalizzi/moolmesh/issues/84))
+
+A coordinator's view of an organization's delivery — what was delivered, by whom and when, across all its repos — proposed from a real multi-repo use case ([`docs/proposals/mool-ops/`](docs/proposals/mool-ops/DECISIONS.md)). The engine (chained snapshots, organization registry, round reports in a private data repo) is a **companion package**, because it needs CI, a GitHub App and writes that MoolMesh core does not do. Core takes the generic gaps, one unit per release: stale-data flag + autostart (#76, `v1.27.2`), local day and time windows (#81), per-PR stats (#80), board and remote-only repos and clients spanning several owners (drafts 06–08), and a versioned export as the engine's contract (#82). Per-contributor data is an open decision (#83).
+
 ### Provider pipeline (Breadth — VISION §5)
 
 Low-effort first: **Aider**, **Pi**, **Goose**; autonomous agents (Hermes, Odysseus) after schema confirmation; Copilot CLI once its format is confirmed. Enabler first: a provider template + auto-detection so a provider is only its quartet. The Workspace filesystem floor (Phase B) gives never-seen agents baseline output visibility for free — lowering the cost of every future provider.

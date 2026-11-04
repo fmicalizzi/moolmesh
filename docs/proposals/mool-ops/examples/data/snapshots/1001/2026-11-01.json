@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "org": "acme",
+  "repo": {"id": 1001, "label": "acme-dev/portal", "kind": "code", "membership": "org"},
+  "date": "2026-11-01",
+  "timezone": "America/Costa_Rica",
+  "period": {"start": "2026-10-26", "end": "2026-11-01", "days": 7},
+  "issues": {"closed_this_period": 1, "opened_this_period": 0, "total_open": 2, "total_closed": 4},
+  "prs": {"merged_this_period": 1, "open": 0, "open_bots": 0, "total_additions": 120, "total_deletions": 30},
+  "by_developer": {"alice": {"alias": "Alice", "issues_closed": 1, "prs_merged": 1, "additions": 120, "deletions": 30, "prs": [9]}},
+  "by_pr": [{"number": 9, "title": "feat(login): remember device", "author": "alice", "additions": 120, "deletions": 30, "files_changed": 6, "merged_at": "2026-10-28T18:00:00Z", "closes": ["acme-dev/portal#4"], "bot": false}],
+  "devs_active": 1,
+  "devs_available": ["bob"],
+  "blockers": [],
+  "notes": [],
+  "extensions": {"round_label": "R3", "phase": "Redesign v2 in develop"}
+}

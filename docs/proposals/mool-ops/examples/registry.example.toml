@@ -1,0 +1,57 @@
+# Registry for ONE logical organization (a client / company / tenant).
+# Everything here is fictional. Copy it into the PRIVATE data repo of each
+# organization; never commit a real registry to a public repo.
+
+[organization]
+id       = "acme"
+name     = "Acme Corp (fictional)"
+timezone = "America/Costa_Rica"   # local day used to group activity (IANA name)
+bots     = ["renovate"]            # extra bot logins; dependabot and *[bot] are always bots
+
+# A logical organization is NOT the same as a GitHub organization.
+# Its repos can live under several GitHub owners, with different relations.
+[[owners]]
+login    = "acme-dev"
+type     = "org"            # GitHub organization
+relation = "core"           # the company's own GitHub org
+
+[[owners]]
+login    = "jdoe"
+type     = "user"           # personal account
+relation = "affiliated"     # personal repos that work as part of the organization
+
+[[owners]]
+login    = "acme-coord"
+type     = "user"
+relation = "confidential"   # kept OUTSIDE the GitHub org on purpose (sensitive material)
+
+# ---------------------------------------------------------------- repos
+[[repos]]
+repo       = "acme-dev/portal"
+kind       = "code"          # code | board | docs
+membership = "org"           # org | affiliated | confidential
+team       = ["alice", "bob"]
+extensions = { round_label = "R3", phase = "Redesign v2 in develop" }
+
+[[repos]]
+repo       = "acme-dev/backlog"
+kind       = "board"         # issues-only task board
+membership = "org"
+
+[[repos]]
+repo       = "jdoe/infra-scripts"
+kind       = "code"
+membership = "affiliated"
+team       = ["jdoe"]
+
+[[repos]]
+repo       = "acme-coord/coordination"
+kind       = "docs"
+membership = "confidential"
+track      = false           # never read by the tracker; listed only so nobody adds it by mistake
+
+# ---------------------------------------------------------------- people
+[people.aliases]
+alice = "Alice"
+bob   = "Bob"
+jdoe  = "J. Doe"

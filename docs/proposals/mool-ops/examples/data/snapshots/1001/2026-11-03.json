@@ -1,0 +1,99 @@
+{
+  "schema_version": "1.0",
+  "org": "acme",
+  "repo": {
+    "id": 1001,
+    "label": "acme-dev/portal",
+    "kind": "code",
+    "membership": "org"
+  },
+  "date": "2026-11-03",
+  "timezone": "America/Costa_Rica",
+  "period": {
+    "start": "2026-11-02",
+    "end": "2026-11-03",
+    "days": 2
+  },
+  "issues": {
+    "closed_this_period": 1,
+    "opened_this_period": 1,
+    "total_open": 2,
+    "total_closed": 5
+  },
+  "prs": {
+    "merged_this_period": 3,
+    "open": 1,
+    "open_bots": 0,
+    "total_additions": 910,
+    "total_deletions": 180
+  },
+  "by_developer": {
+    "alice": {
+      "alias": "Alice",
+      "issues_closed": 1,
+      "prs_merged": 1,
+      "additions": 340,
+      "deletions": 80,
+      "prs": [
+        10
+      ]
+    },
+    "bob": {
+      "alias": "Bob",
+      "issues_closed": 0,
+      "prs_merged": 1,
+      "additions": 510,
+      "deletions": 40,
+      "prs": [
+        11
+      ]
+    }
+  },
+  "by_pr": [
+    {
+      "number": 10,
+      "title": "fix(cart): keep coupon after refresh",
+      "author": "alice",
+      "additions": 340,
+      "deletions": 80,
+      "files_changed": 9,
+      "merged_at": "2026-11-02T17:00:00Z",
+      "closes": [
+        "acme-dev/portal#5"
+      ],
+      "bot": false
+    },
+    {
+      "number": 11,
+      "title": "feat(api): export orders as CSV",
+      "author": "bob",
+      "additions": 510,
+      "deletions": 40,
+      "files_changed": 12,
+      "merged_at": "2026-11-03T03:30:00Z",
+      "closes": [
+        "acme-dev/backlog#5"
+      ],
+      "bot": false
+    },
+    {
+      "number": 12,
+      "title": "chore(deps): bump the minor group",
+      "author": "app/dependabot",
+      "additions": 60,
+      "deletions": 60,
+      "files_changed": 2,
+      "merged_at": "2026-11-03T16:00:00Z",
+      "closes": [],
+      "bot": true
+    }
+  ],
+  "devs_active": 2,
+  "devs_available": [],
+  "blockers": [],
+  "notes": [],
+  "extensions": {
+    "round_label": "R3",
+    "phase": "Redesign v2 in develop"
+  }
+}
