@@ -1089,6 +1089,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     # Data freshness (#76)
     _doctor_freshness(daemon_pid is not None)
 
+    # daemon.log size (#76)
+    _doctor_log_size()
 
     # MCP servers — informational: old ones are a warning, never a failed check (#70)
     from hub.mcp_registry import run_dir
@@ -1147,6 +1149,22 @@ def _doctor_freshness(running: bool) -> None:
         print(green(f"  ✓ Data freshness: current (threshold "
                     f"{f['stale_after_minutes']} min)"))
     print(dim(f"    {dates}"))
+
+
+def _doctor_log_size() -> None:
+    from hub.daemon import LOG_FILE, LOG_MAX_BYTES
+    try:
+        size = LOG_FILE.stat().st_size
+    except OSError:
+        return
+    mb = size / (1024 * 1024)
+    limit = LOG_MAX_BYTES / (1024 * 1024)
+    if size > LOG_MAX_BYTES:
+        print(yellow(f"  ~ daemon.log: {mb:.1f} MB (over {limit:.0f} MB — a running "
+                     "daemon rotates it to daemon.log.1 within 10 min, or at "
+                     "its next start)"))
+    else:
+        print(dim(f"  - daemon.log: {mb:.1f} MB"))
 
 
 def _print_mcp_servers(directory, installed_version: str) -> None:
