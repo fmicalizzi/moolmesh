@@ -352,17 +352,18 @@ class TestPortfolioRollup:
 
     @pytest.mark.skipif(not hasattr(time, "tzset"),
                         reason="tzset (POSIX TZ) unavailable on this platform")
-    def test_git_and_fs_same_instant_bucket_same_utc_day(self, tmp_path, monkeypatch):
+    def test_git_and_fs_same_instant_bucket_same_local_day(self, tmp_path, monkeypatch):
         """A near-midnight git commit and a filesystem touch at the SAME instant
-        must land on ONE (workspace, day) UTC row — not ±1 day apart (#23).
+        must land on ONE (workspace, day) row — not ±1 day apart (#23, #81).
 
-        git_commits.timestamp is naive-LOCAL; the old rollup did
-        substr(timestamp,1,10), dating the commit by its local calendar day, so a
-        20:00 commit in a UTC-6 zone (02:00 UTC next day) fell on the *previous*
-        day from the fs touch's UTC day. We pin a FIXED-offset POSIX TZ ("UTC+06"
-        — POSIX sign is inverted, so this is UTC-6, and needs no tzdata) via tzset
-        so _parse_ts's astimezone() reads a non-UTC zone — the test is real even
-        on a UTC CI runner, and FAILS on the raw-substr code.
+        git_commits.timestamp is naive system-LOCAL while path_touches.last_seen
+        is UTC ISO. #23 aligned both on the UTC day; #81 moved every signal to
+        the shared LOCAL day of hub.localtime, so a 20:00 commit at UTC-6 (02:00
+        UTC next day) and the fs touch at that instant both land on the local
+        day, never on the UTC one. We pin a FIXED-offset POSIX TZ ("UTC+06" —
+        POSIX sign is inverted, so this is UTC-6, and needs no tzdata) via tzset
+        with no [user] timezone, so the system zone is the local day — the test
+        is real even on a UTC CI runner.
         """
         import os as _os
         import time as _time
@@ -401,10 +402,10 @@ class TestPortfolioRollup:
                 rows = {r[0]: (r[1], r[2]) for r in s._conn.execute(
                     """SELECT day, git_touches, fs_touches FROM workspace_rollup
                        WHERE workspace_id = ?""", (wid,)).fetchall()}
-            # Both signals collapse onto the single UTC day...
-            assert rows.get(utc_day) == (1, 1)
-            # ...and nothing was mis-dated onto the local calendar day.
-            assert local_day not in rows
+            # Both signals collapse onto the single LOCAL day...
+            assert rows.get(local_day) == (1, 1)
+            # ...and nothing was dated onto the UTC calendar day.
+            assert utc_day not in rows
             assert set(s.get_portfolio()[0]["sources"]) >= {"filesystem", "git"}
             s.close()
         finally:

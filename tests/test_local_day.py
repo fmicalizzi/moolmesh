@@ -288,3 +288,269 @@ class TestDigestLocalDay:
         assert ctx["yesterday_date"] == "2026-05-04"
         assert "#11" in ctx["yesterday_summary"]
         store.close()
+
+
+# ── portfolio window ────────────────────────────────────────────────
+
+
+def _mkrepo(base: Path, name: str, remote: str) -> Path:
+    repo = base / name
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "config").write_text(
+        f'[remote "origin"]\n\turl = {remote}\n', encoding="utf-8")
+    return repo
+
+
+def _github_db(path: Path, repos, issues) -> Path:
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE repos (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE,"
+              " remote_url TEXT)")
+    c.execute("""CREATE TABLE github_issues (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, repo_id INTEGER NOT NULL,
+        number INTEGER, title TEXT, state TEXT, author TEXT,
+        closed_at TEXT, is_pull_request INTEGER DEFAULT 0, pr_merged_at TEXT)""")
+    c.execute("""CREATE TABLE git_commits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, repo_id INTEGER NOT NULL,
+        sha TEXT NOT NULL, timestamp TEXT NOT NULL)""")
+    for rid, rpath in repos:
+        c.execute("INSERT INTO repos (id, path) VALUES (?, ?)", (rid, rpath))
+    for n, i in enumerate(issues):
+        c.execute(
+            "INSERT INTO github_issues (repo_id, number, title, state, closed_at,"
+            " is_pull_request, pr_merged_at) VALUES (?,?,?,?,?,?,?)",
+            (i.get("repo_id", 1), n, "t", i["state"], i.get("closed_at"),
+             i.get("is_pull_request", 0), i.get("pr_merged_at")))
+    c.commit()
+    c.close()
+    return path
+
+
+def _classify(store, key: str, project_key: str) -> None:
+    with store._lock:
+        wid = store._conn.execute(
+            "SELECT id FROM workspaces WHERE workspace_key=?", (key,)).fetchone()[0]
+        store._conn.execute(
+            """INSERT OR REPLACE INTO workspace_classification
+               (workspace_id, category, subtype, role, project_key,
+                project_label, resolved_via, classified_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (wid, "A", "project", "project", project_key, "acme", "self",
+             "2026-01-01T00:00:00"))
+        store._conn.commit()
+
+
+# Window 2026-05-01..2026-05-07 in CR (UTC-6) = 05-01T06:00Z .. 05-08T05:59:59Z.
+WINDOW_FIXTURE = [
+    # merged PRs
+    {"state": "closed", "is_pull_request": 1, "pr_merged_at": "2026-05-01T06:00:00+00:00"},  # in (first second)
+    {"state": "closed", "is_pull_request": 1, "pr_merged_at": "2026-05-01T05:59:59+00:00"},  # out (Apr 30 CR)
+    {"state": "closed", "is_pull_request": 1, "pr_merged_at": "2026-05-08T01:00:00+00:00"},  # in (May 7 19:00 CR)
+    {"state": "closed", "is_pull_request": 1, "pr_merged_at": "2026-05-08T06:00:00+00:00"},  # out (May 8 CR)
+    {"state": "closed", "is_pull_request": 1, "pr_merged_at": None},                        # unmerged
+    # closed issues
+    {"state": "closed", "closed_at": "2026-05-03T12:00:00+00:00"},   # in
+    {"state": "closed", "closed_at": "2026-04-20T12:00:00+00:00"},   # out
+    {"state": "closed", "closed_at": None},                          # no closedAt: total only
+    {"state": "open"},
+]
+
+
+class TestPortfolioWindow:
+    def _setup(self, tmp_path):
+        from hub.cache.workspace_store import WorkspaceStore
+        from hub.correlation.workspace_resolver import resolve_dir
+        repo = _mkrepo(tmp_path, "acme-api", "git@github.com:acme/api.git")
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        with s._lock:
+            s._upsert_workspace_locked(resolve_dir(str(repo)), "2026-01-01T00:00:00")
+            s._conn.commit()
+        _classify(s, resolve_dir(str(repo)).key, "proj:acme")
+        return s, repo
+
+    def test_window_equals_manual_count(self, tmp_path):
+        from hub.cache.workspace_store import WorkspaceStore
+        s, repo = self._setup(tmp_path)
+        gh = _github_db(tmp_path / "github.db", [(1, str(repo))], WINDOW_FIXTURE)
+        out = WorkspaceStore.read_github_outcome(
+            str(s.db_path), str(gh), window=("2026-05-01", "2026-05-07"), tz=CR)
+        s.close()
+        # Manual count over WINDOW_FIXTURE: 2 merged in, 1 closed in.
+        assert out == {"proj:acme": {
+            "merged_prs": 4, "closed_issues": 3, "open_issues": 1,
+            "merged_prs_window": 2, "closed_issues_window": 1,
+        }}
+
+    def test_closed_issue_without_closed_at_never_in_window(self, tmp_path):
+        from hub.cache.workspace_store import WorkspaceStore
+        s, repo = self._setup(tmp_path)
+        gh = _github_db(tmp_path / "github.db", [(1, str(repo))],
+                        [{"state": "closed", "closed_at": None}])
+        out = WorkspaceStore.read_github_outcome(
+            str(s.db_path), str(gh), window=("2000-01-01", "2100-12-31"), tz=CR)
+        s.close()
+        assert out["proj:acme"]["closed_issues"] == 1
+        assert out["proj:acme"]["closed_issues_window"] == 0
+
+    def test_no_window_keeps_previous_shape(self, tmp_path):
+        from hub.cache.workspace_store import WorkspaceStore
+        s, repo = self._setup(tmp_path)
+        gh = _github_db(tmp_path / "github.db", [(1, str(repo))], WINDOW_FIXTURE)
+        out = WorkspaceStore.read_github_outcome(str(s.db_path), str(gh))
+        s.close()
+        assert set(out["proj:acme"]) == {"merged_prs", "closed_issues", "open_issues"}
+
+    def test_production_view_exposes_window_fields(self, tmp_path):
+        """End-to-end through _portfolio_production: the session row is dated
+        now, so the window is the last 30 local days ending today."""
+        from hub.correlation.workspace_resolver import resolve_path
+        from hub.mcp_server import _portfolio_production
+        s, repo = self._setup(tmp_path)
+        f = str(repo / "src" / "x.py")
+        s.record_attribution("sess1", "claude", f, resolve_path(f))
+        now = datetime.now(timezone.utc)
+        with s._lock:
+            s._conn.execute("UPDATE path_attributions SET activity_ts = ?",
+                            (now.isoformat(),))
+            s._conn.commit()
+        s.close()
+        gh = _github_db(tmp_path / "github.db", [(1, str(repo))], [
+            {"state": "closed", "is_pull_request": 1,
+             "pr_merged_at": (now - timedelta(days=2)).isoformat()},
+            {"state": "closed", "is_pull_request": 1,
+             "pr_merged_at": (now - timedelta(days=100)).isoformat()},
+            {"state": "closed", "closed_at": (now - timedelta(days=3)).isoformat()},
+            {"state": "closed", "closed_at": None},
+        ])
+        ev = tmp_path / "events.db"
+        sqlite3.connect(ev).close()
+        data = _portfolio_production(str(ev), str(tmp_path / "workspace.db"),
+                                     days=30, github_db=str(gh), hide=False, tz=CR)
+        row = [p for p in data["projects"] if p["project_key"] == "proj:acme"][0]
+        assert (row["merged_prs"], row["merged_prs_window"]) == (2, 1)
+        assert (row["closed_issues"], row["closed_issues_window"]) == (2, 1)
+
+    def test_production_strip_uses_configured_zone(self, tmp_path):
+        """The production strip's day is the same local day as everywhere else."""
+        from hub.correlation.workspace_resolver import resolve_path
+        from hub.mcp_server import _portfolio_production
+        s, repo = self._setup(tmp_path)
+        f = str(repo / "src" / "x.py")
+        s.record_attribution("sess1", "claude", f, resolve_path(f))
+        with s._lock:
+            s._conn.execute("UPDATE path_attributions SET activity_ts = ?",
+                            ("2026-05-05T01:00:00+00:00",))
+            s._conn.commit()
+        s.close()
+        ev = tmp_path / "events.db"
+        sqlite3.connect(ev).close()
+        data = _portfolio_production(str(ev), str(tmp_path / "workspace.db"),
+                                     days=7, today="2026-05-07", hide=False,
+                                     github_db=str(tmp_path / "none.db"), tz=CR)
+        row = [p for p in data["projects"] if p["project_key"] == "proj:acme"][0]
+        assert list(row["days"]) == ["2026-05-04"]
+
+
+# ── workspace rollup ────────────────────────────────────────────────
+
+
+class TestRollupLocalDay:
+    def _rollup(self, s):
+        with s._lock:
+            return {(r[0], r[1]): (r[2], r[3], r[4]) for r in s._conn.execute(
+                """SELECT w.workspace_key, r.day, r.session_touches, r.fs_touches,
+                          r.git_touches
+                   FROM workspace_rollup r JOIN workspaces w ON w.id = r.workspace_id"""
+            ).fetchall()}
+
+    def _zone(self, s):
+        with s._lock:
+            row = s._conn.execute(
+                "SELECT value FROM rollup_meta WHERE key = 'day_zone'").fetchone()
+        return row[0] if row else None
+
+    def _fixture(self, tmp_path):
+        from hub.cache.workspace_store import WorkspaceStore
+        from hub.correlation.workspace_resolver import resolve_dir, resolve_path
+        repo = _mkrepo(tmp_path, "acme-api", "git@github.com:acme/api.git")
+        key = resolve_dir(str(repo)).key
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        f = str(repo / "src" / "x.py")
+        s.record_attribution("sess1", "claude", f, resolve_path(f))
+        wid = s.record_touch(str(repo / "y.py"), 1_700_000_000.0, resolve_dir(str(repo)))
+        inst = "2026-05-05T01:00:00+00:00"          # CR: 2026-05-04 19:00
+        with s._lock:
+            s._conn.execute("UPDATE path_attributions SET event_ts = ?", (inst,))
+            s._conn.execute("UPDATE path_touches SET last_seen = ?", (inst,))
+            s._conn.commit()
+        gh = tmp_path / "github.db"
+        c = sqlite3.connect(gh)
+        c.execute("CREATE TABLE repos (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE,"
+                  " remote_url TEXT)")
+        c.execute("CREATE TABLE git_commits (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                  " repo_id INTEGER NOT NULL, sha TEXT NOT NULL, timestamp TEXT NOT NULL)")
+        c.execute("INSERT INTO repos (id, path) VALUES (1, ?)", (str(repo),))
+        # naive = system local; the tests pin the system zone to UTC
+        c.execute("INSERT INTO git_commits (repo_id, sha, timestamp)"
+                  " VALUES (1, 'c1', '2026-05-05T01:00:00')")
+        c.commit()
+        c.close()
+        return s, key, wid, gh
+
+    def test_all_signals_on_configured_local_day(self, tmp_path, system_tz, config_tz):
+        system_tz("UTC")
+        config_tz("America/Costa_Rica")
+        s, key, _wid, gh = self._fixture(tmp_path)
+        s.build_rollup(gh)
+        assert self._rollup(s) == {(key, "2026-05-04"): (1, 1, 1)}
+        assert self._zone(s) == "America/Costa_Rica"
+        s.close()
+
+    def test_zone_change_moves_rows_once_without_double_count(self, tmp_path, system_tz,
+                                                              config_tz):
+        """A rollup built on UTC days (pre-#81) moves to local days on the next
+        build: git and current fs rows move, older fs history is kept, nothing
+        is counted twice, and a further build is a no-op."""
+        system_tz("UTC")
+        config_tz("UTC")
+        s, key, wid, gh = self._fixture(tmp_path)
+        s.build_rollup(gh)
+        assert self._rollup(s) == {(key, "2026-05-05"): (1, 1, 1)}
+        assert self._zone(s) == "UTC"
+        # fs history only the rollup holds (a file since re-touched elsewhere).
+        with s._lock:
+            s._conn.execute(
+                """INSERT INTO workspace_rollup (workspace_id, day, fs_touches, built_at)
+                   VALUES (?, '2026-04-01', 5, '2026-04-01T00:00:00')""", (wid,))
+            s._conn.commit()
+
+        config_tz("America/Costa_Rica")
+        s.build_rollup(gh)
+        after = self._rollup(s)
+        assert after == {(key, "2026-05-04"): (1, 1, 1),
+                         (key, "2026-04-01"): (0, 5, 0)}
+        assert self._zone(s) == "America/Costa_Rica"
+        s.build_rollup(gh)
+        assert self._rollup(s) == after
+        s.close()
+
+    def test_migration_marks_existing_rollup_as_utc(self, tmp_path, system_tz, config_tz):
+        from hub.cache.workspace_store import WorkspaceStore
+        system_tz("UTC")
+        config_tz("UTC")
+        s, key, _wid, gh = self._fixture(tmp_path)
+        s.build_rollup(gh)
+        # Simulate a pre-#81 database: no marker, migration 4 not applied.
+        with s._lock:
+            s._conn.execute("DROP TABLE rollup_meta")
+            s._conn.execute("DELETE FROM schema_migrations WHERE version = 4")
+            s._conn.commit()
+        s.close()
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        assert self._zone(s) == "UTC"
+        s.close()
+
+    def test_fresh_rollup_gets_no_utc_marker(self, tmp_path):
+        from hub.cache.workspace_store import WorkspaceStore
+        s = WorkspaceStore(tmp_path / "workspace.db")
+        assert self._zone(s) is None
+        s.close()

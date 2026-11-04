@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from hub.localtime import CONFIGURED, local_day, resolve_timezone, user_timezone, zone_key
 from hub.log import get as get_logger
 from hub.models.base import SHELL_TOOLS
 from hub.correlation.workspace_resolver import (
@@ -151,7 +152,7 @@ CREATE TABLE IF NOT EXISTS attribution_cursors (
 -- all-zero. fs_touches / git_touches are never retracted.
 CREATE TABLE IF NOT EXISTS workspace_rollup (
     workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    day TEXT NOT NULL,                     -- YYYY-MM-DD (substr of the ISO ts)
+    day TEXT NOT NULL,                     -- YYYY-MM-DD, LOCAL day (#81; rollup_meta.day_zone)
     session_touches INTEGER NOT NULL DEFAULT 0,   -- path_attributions edges
     fs_touches INTEGER NOT NULL DEFAULT 0,        -- path_touches (filesystem)
     git_touches INTEGER NOT NULL DEFAULT 0,       -- github.db commits
@@ -291,11 +292,42 @@ def _mig_3_attribution_activity_ts(conn: sqlite3.Connection) -> int:
     return added
 
 
+def _mig_4_rollup_day_zone(conn: sqlite3.Connection) -> int:
+    """Record which zone ``workspace_rollup.day`` is bucketed in (#81).
+
+    Until v1.27.x every rollup day was a UTC day. From #81 the rollup buckets
+    on the shared LOCAL day (``hub.localtime``), so ``build_rollup`` must know
+    the zone the existing rows were built in to move them once (see
+    ``_rollup_zone_transition_locked``). An existing rollup is marked ``UTC``;
+    a fresh one gets no marker and ``build_rollup`` writes the current zone.
+    Additive (a new table) and idempotent (``INSERT OR IGNORE``).
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS rollup_meta (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+           )"""
+    )
+    has_rows = conn.execute("SELECT 1 FROM workspace_rollup LIMIT 1").fetchone()
+    if not has_rows:
+        return 0
+    conn.execute(
+        "INSERT OR IGNORE INTO rollup_meta (key, value) VALUES (?, 'UTC')",
+        (_ROLLUP_ZONE_KEY,),
+    )
+    return 1
+
+
+# rollup_meta key holding the zone ``workspace_rollup.day`` is bucketed in.
+_ROLLUP_ZONE_KEY = "day_zone"
+
+
 # Versioned, additive migrations — each runs exactly once (mirrors git_store).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
     (1, "attribution_via", _mig_1_attribution_via),
     (2, "attribution_event_ts", _mig_2_attribution_event_ts),
     (3, "attribution_activity_ts", _mig_3_attribution_activity_ts),
+    (4, "rollup_day_zone", _mig_4_rollup_day_zone),
 ]
 
 
@@ -960,15 +992,20 @@ class WorkspaceStore:
         in a separate DB entirely and is resolved in here (read-only) so the read
         surface stays a single-table query.
 
-        Day grouping avoids the ISO/epoch trap: ``path_touches.last_seen`` and
-        ``path_attributions.event_ts``/``first_seen`` (sessions are dated on
-        ``COALESCE(event_ts, first_seen)`` — the event, not the pass, #42) are
-        UTC ISO-8601 TEXT (``substr(col,1,10)``
-        yields the date and lexicographically orders correctly), while
-        ``path_touches.mtime`` is a REAL epoch — never mixed. We group on the ISO
-        columns, NOT ``datetime(col,'unixepoch')`` (which on an ISO string
-        returns empty). ``last_seen`` (not ``first_seen``) is used for fs so a
-        re-touched file re-dates to its latest activity, not its discovery day.
+        Day grouping (#81): every signal is bucketed on the shared LOCAL day of
+        ``hub.localtime`` (``[user] timezone``), the same day digests and the
+        production strip use — parsed in Python, never ``substr`` of mixed
+        clocks. ``path_touches.last_seen`` and ``path_attributions.event_ts``/
+        ``first_seen`` (sessions are dated on ``COALESCE(event_ts, first_seen)``
+        — the event, not the pass, #42) are UTC ISO-8601 TEXT, while
+        ``path_touches.mtime`` is a REAL epoch — never mixed. ``last_seen`` (not
+        ``first_seen``) is used for fs so a re-touched file re-dates to its
+        latest activity, not its discovery day. ``last_activity`` stays UTC ISO.
+
+        The zone the rows were built in is kept in ``rollup_meta``; when it
+        differs from the current one (the v1.28.0 upgrade from UTC days, or a
+        changed ``[user] timezone``) the shifted signals are moved once — see
+        ``_rollup_zone_transition_locked``.
 
         Keyed ``INSERT OR REPLACE`` per ``(workspace_id, day)`` — NEVER a
         wipe-and-rebuild: ``path_touches`` keeps only the latest row per path, so
@@ -1003,7 +1040,9 @@ class WorkspaceStore:
         # Resolve git repo roots BEFORE taking the lock: resolve_dir reads .git
         # on disk, which can stall on cloud-offloaded folders (#39 — the
         # rollup now also runs on the daemon's cycle while the dashboard serves).
-        git_rows = self._read_git_commits(github_db_path)
+        tz = user_timezone()
+        zone = zone_key(tz)
+        git_rows = self._read_git_commits(github_db_path, tz)
         git_idents: dict[str, WorkspaceIdentity] = {}
         for repo_path, *_ in git_rows:
             if repo_path not in git_idents:
@@ -1011,6 +1050,12 @@ class WorkspaceStore:
 
         with self._lock:
             conn = self._conn
+            prev_zone = self._rollup_zone_locked()
+            old_git_rows: list = []
+            if prev_zone is not None and prev_zone != zone:
+                # Read outside the transaction below; github.db is read-only.
+                old_git_rows = self._read_git_commits(
+                    github_db_path, resolve_timezone(prev_zone))
 
             # 1. Session signal — one edge per (session, provider, file), or
             #    per (session, provider, cwd) for cwd-fallback edges (#40):
@@ -1018,23 +1063,24 @@ class WorkspaceStore:
             #    on the pass that wrote the edge; both columns are UTC ISO, so
             #    the day is the UTC day, as for git (#23). The reconcile below
             #    zeroes days a re-dated edge left behind.
-            for wid, day, n, last in conn.execute(
-                """SELECT workspace_id,
-                          substr(COALESCE(event_ts, first_seen), 1, 10) AS day,
-                          COUNT(*) AS n, MAX(COALESCE(event_ts, first_seen)) AS last
-                   FROM path_attributions GROUP BY workspace_id, day"""
+            for wid, ts in conn.execute(
+                """SELECT workspace_id, COALESCE(event_ts, first_seen)
+                   FROM path_attributions"""
             ).fetchall():
-                _bump(wid, day, "session", n, last)
+                _bump(wid, local_day(ts, tz) or "", "session", 1, ts)
 
-            # 2. Filesystem signal — group on the ISO last_seen (not mtime epoch).
-            for wid, day, n, last in conn.execute(
-                """SELECT workspace_id, substr(last_seen, 1, 10) AS day,
-                          COUNT(*) AS n, MAX(last_seen) AS last
-                   FROM path_touches GROUP BY workspace_id, day"""
-            ).fetchall():
-                _bump(wid, day, "fs", n, last)
+            # 2. Filesystem signal — the ISO last_seen (not the mtime epoch).
+            fs_rows = conn.execute(
+                "SELECT workspace_id, last_seen FROM path_touches"
+            ).fetchall()
+            for wid, ts in fs_rows:
+                _bump(wid, local_day(ts, tz) or "", "fs", 1, ts)
 
             try:
+                if prev_zone is not None and prev_zone != zone:
+                    self._rollup_zone_transition_locked(
+                        resolve_timezone(prev_zone), fs_rows, old_git_rows,
+                        git_idents, now)
                 # 3. Git signal — each repo root maps to a workspace via the
                 #    SAME ladder (resolve_dir walks up to the repo's .git, so a
                 #    repo root and a deep session/fs path on that repo collide on
@@ -1086,6 +1132,10 @@ class WorkspaceStore:
                     """DELETE FROM workspace_rollup
                        WHERE session_touches = 0 AND fs_touches = 0 AND git_touches = 0"""
                 )
+                conn.execute(
+                    "INSERT OR REPLACE INTO rollup_meta (key, value) VALUES (?, ?)",
+                    (_ROLLUP_ZONE_KEY, zone),
+                )
                 conn.commit()
             except BaseException:
                 conn.rollback()  # never leave a half-built rollup on the shared conn
@@ -1114,9 +1164,76 @@ class WorkspaceStore:
             "git_repos_new": git_repos_new,
         }
 
+    def _rollup_zone_locked(self) -> str | None:
+        """Zone key ``workspace_rollup.day`` was last built in (``None``: unset)."""
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM rollup_meta WHERE key = ?", (_ROLLUP_ZONE_KEY,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return row[0] if row else None
+
+    def _rollup_zone_transition_locked(
+        self,
+        old_tz: Any,
+        fs_rows: list[tuple[int, str]],
+        old_git_rows: list[tuple[str, str | None, int, str | None]],
+        git_idents: dict[str, WorkspaceIdentity],
+        now: str,
+    ) -> None:
+        """Move the rollup from ``old_tz`` days to the current zone, once (#81).
+
+        The surgical reconcile the ``workspace_rollup`` schema note asks for
+        when the source-timestamp → day mapping changes (never a blind
+        rebuild — fs history before the current ``path_touches`` lives only
+        here):
+
+        * ``session_touches`` needs nothing: ``build_rollup`` already zeroes
+          every key the current pass does not produce.
+        * ``git_touches`` is reproducible from ``github.db``: zero it on every
+          key the OLD mapping produced; the pass re-adds it on the new days.
+        * ``fs_touches``: the keys the current ``path_touches`` rows produced
+          under the OLD mapping hold exactly those rows' counts (the build
+          overwrites them each pass), so zero them and let the pass re-add the
+          rows on their new day. Older fs history (files re-touched since)
+          cannot be re-bucketed — it has no time of day — and keeps its
+          original day.
+
+        Runs inside ``build_rollup``'s transaction; all-zero rows are pruned
+        there afterwards.
+        """
+        conn = self._conn
+        fs_keys = {(wid, d) for wid, ts in fs_rows
+                   if (d := local_day(ts, old_tz))}
+        conn.executemany(
+            """UPDATE workspace_rollup SET fs_touches = 0, built_at = ?
+               WHERE workspace_id = ? AND day = ?""",
+            [(now, wid, d) for wid, d in fs_keys],
+        )
+        git_keys: set[tuple[int, str]] = set()
+        for repo_path, day, _n, _last in old_git_rows:
+            if day is None:
+                continue
+            ident = git_idents.get(repo_path) or resolve_dir(repo_path)
+            row = conn.execute(
+                "SELECT id FROM workspaces WHERE workspace_key = ?", (ident.key,)
+            ).fetchone()
+            if row:
+                git_keys.add((row[0], day))
+        conn.executemany(
+            """UPDATE workspace_rollup SET git_touches = 0, built_at = ?
+               WHERE workspace_id = ? AND day = ?""",
+            [(now, wid, d) for wid, d in git_keys],
+        )
+        _log.info("rollup: días movidos de la zona %r a la actual "
+                  "(fs=%d, git=%d claves)", zone_key(old_tz), len(fs_keys),
+                  len(git_keys))
+
     @staticmethod
     def _read_git_commits(
         github_db_path: str | Path,
+        tz: Any = CONFIGURED,
     ) -> list[tuple[str, str | None, int, str | None]]:
         """Read git commit day-counts per repo from ``github.db`` (read-only).
 
@@ -1126,17 +1243,20 @@ class WorkspaceStore:
         ``[]`` if github.db is absent or has no git tables — git is optional.
 
         The commit ``day`` is bucketed in Python on the ``_parse_ts``-normalized
-        (aware UTC) timestamp, NOT via SQL ``substr(timestamp, 1, 10)``. The
-        session/filesystem signals already bucket on UTC ISO days, but
-        ``git_commits.timestamp`` is NAIVE local (git_store migration 3), so a
-        raw ``substr`` would date a commit by its *local* calendar day and skew
-        the ±1-day boundary against the other two signals (#23). ``_parse_ts``
-        can't run inside SQL, so we pull the (bounded) per-repo commits and fold
-        them here; ``last`` is likewise the normalized UTC ISO so the caller's
-        lexicographic ``max`` compares against the other signals on one clock.
+        (aware UTC) instant, NOT via SQL ``substr(timestamp, 1, 10)``:
+        ``git_commits.timestamp`` is NAIVE *system*-local (git_store migration
+        3), so a raw ``substr`` would date a commit in the machine's zone, not
+        in the shared local day of ``hub.localtime`` (``tz``, #81) the session
+        and filesystem signals use (#23 first aligned them on UTC days).
+        ``_parse_ts`` can't run inside SQL, so we pull the (bounded) per-repo
+        commits and fold them here; ``last`` is the normalized UTC ISO so the
+        caller's lexicographic ``max`` compares against the other signals on
+        one clock.
         """
         if not os.path.exists(str(github_db_path)):
             return []
+        if tz is CONFIGURED:
+            tz = user_timezone()
         out: list[tuple[str, str | None, int, str | None]] = []
         try:
             src = sqlite3.connect(f"file:{github_db_path}?mode=ro", uri=True, timeout=5)
@@ -1157,7 +1277,7 @@ class WorkspaceStore:
                     dt = _parse_ts(ts)
                     if dt is None:  # unparseable → drop, never mis-bucket
                         continue
-                    day = dt.date().isoformat()
+                    day = local_day(dt, tz)
                     iso = dt.isoformat()
                     n, last = buckets.get(day, (0, ""))
                     buckets[day] = (n + 1, iso if iso > last else last)
@@ -1175,6 +1295,8 @@ class WorkspaceStore:
     def read_github_outcome(
         workspace_db_path: str | Path,
         github_db_path: str | Path,
+        window: tuple[str, str] | None = None,
+        tz: Any = CONFIGURED,
     ) -> dict[str, dict[str, int]]:
         """Merged-PR / closed-issue / open-issue counts per CANONICAL project.
 
@@ -1184,6 +1306,14 @@ class WorkspaceStore:
         → ``workspaces.workspace_key`` → ``workspace_classification.project_key``.
         Returns ``{project_key: {"merged_prs": n, "closed_issues": n,
         "open_issues": n}}``.
+
+        With ``window=(first_day, last_day)`` (inclusive LOCAL days in ``tz``,
+        issue #81) each project also carries ``merged_prs_window`` and
+        ``closed_issues_window``: the PRs whose ``pr_merged_at`` and the issues
+        whose ``closed_at`` fall on a local day of the window (``hub.localtime``
+        — the same day definition as digests and the rollup). A closed issue
+        with no ``closed_at`` counts in the all-time total but never in a
+        window: its closing day is unknown.
 
         The two DBs are held separate (invariant §2.4) and the join goes ONE
         direction — the portfolio reads ``github.db``, never the reverse. Only
@@ -1228,11 +1358,32 @@ class WorkspaceStore:
                                    THEN 1 ELSE 0 END)
                    FROM github_issues GROUP BY repo_id"""
             ).fetchall()
+            window_rows = []
+            if window is not None:
+                window_rows = src.execute(
+                    """SELECT repo_id, is_pull_request, pr_merged_at, closed_at
+                       FROM github_issues
+                       WHERE (is_pull_request = 1 AND pr_merged_at IS NOT NULL)
+                          OR (is_pull_request = 0 AND state = 'closed'
+                              AND closed_at IS NOT NULL)"""
+                ).fetchall()
         except sqlite3.OperationalError:
             src.close()
             return {}
         src.close()
         outcome_by_repo = {rid: (m or 0, c or 0, o or 0) for rid, m, c, o in agg}
+        # repo_id -> [merged in window, closed in window] (#81)
+        window_by_repo: dict[int, list[int]] = {}
+        if window is not None:
+            if tz is CONFIGURED:
+                tz = user_timezone()
+            first_day, last_day = window
+            for rid, is_pr, merged_at, closed_at in window_rows:
+                day = local_day(merged_at if is_pr else closed_at, tz)
+                if day is None or not (first_day <= day <= last_day):
+                    continue
+                cell_w = window_by_repo.setdefault(rid, [0, 0])
+                cell_w[0 if is_pr else 1] += 1
 
         try:
             wconn = sqlite3.connect(str(workspace_db_path), timeout=5)
@@ -1271,6 +1422,12 @@ class WorkspaceStore:
                 cell["merged_prs"] += counts[0]
                 cell["closed_issues"] += counts[1]
                 cell["open_issues"] += counts[2]
+                if window is not None:
+                    wcounts = window_by_repo.get(repo_id, (0, 0))
+                    cell["merged_prs_window"] = (
+                        cell.get("merged_prs_window", 0) + wcounts[0])
+                    cell["closed_issues_window"] = (
+                        cell.get("closed_issues_window", 0) + wcounts[1])
         finally:
             wconn.close()
         return out
@@ -1279,6 +1436,7 @@ class WorkspaceStore:
     def read_history_coverage(
         workspace_db_path: str | Path,
         github_db_path: str | Path,
+        tz: Any = CONFIGURED,
     ) -> dict[str, dict[str, Any]]:
         """Per-project git-history coverage: was the full history ingested (#59)?
 
@@ -1288,10 +1446,13 @@ class WorkspaceStore:
         same canonical project as the outcome (``resolve_dir`` → classification
         ``project_key``). Returns ``{project_key: {"complete": bool, "since":
         "YYYY-MM-DD"|None}}``; ``since`` is the earliest commit across the
-        project's repos. All-or-nothing; ``{}`` when either DB/table is absent.
+        project's repos, as a LOCAL day (``hub.localtime``, #81).
+        All-or-nothing; ``{}`` when either DB/table is absent.
         """
         if not os.path.exists(str(github_db_path)):
             return {}
+        if tz is CONFIGURED:
+            tz = user_timezone()
         try:
             src = sqlite3.connect(f"file:{github_db_path}?mode=ro", uri=True, timeout=5)
         except sqlite3.OperationalError:
@@ -1344,8 +1505,7 @@ class WorkspaceStore:
                     cell["complete"] = False
                 ts = mins.get(repo_id)
                 if ts:
-                    dt = _parse_ts(ts)
-                    day = dt.date().isoformat() if dt is not None else str(ts)[:10]
+                    day = local_day(ts, tz) or str(ts)[:10]
                     if cell["since"] is None or day < cell["since"]:
                         cell["since"] = day
         finally:

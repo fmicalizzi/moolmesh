@@ -21,6 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+# Default ``tz`` of the portfolio: the ``[user] timezone`` zone (#81).
+from hub.localtime import CONFIGURED as _CONFIGURED_TZ
+
 _log = logging.getLogger("moolmesh.mcp_server")
 
 # ── Database paths ──────────────────────────────────────────────────
@@ -1092,16 +1095,6 @@ _VIDEO_EXTS = frozenset({
 _DELIVERABLE_EXTS = _IMAGE_EXTS | _VIDEO_EXTS
 
 
-def _local_day(epoch: float) -> str:
-    """Bucket a session-activity epoch to its LOCAL calendar day (YYYY-MM-DD).
-
-    Local, not UTC — matching the #23 rollup timezone fix so the production
-    strip agrees with the rest of the portfolio on which day work landed.
-    """
-    import datetime
-    return datetime.datetime.fromtimestamp(epoch).strftime("%Y-%m-%d")
-
-
 def _portfolio_production(
     events_db: str,
     workspace_db: str,
@@ -1110,6 +1103,7 @@ def _portfolio_production(
     hide: bool | None = None,
     github_db: str | None = None,
     own_emails: list[str] | None = None,
+    tz: Any = _CONFIGURED_TZ,
 ) -> dict[str, Any]:
     """Per-project production over time — the honest-metric chart (#24 Stage 2).
 
@@ -1142,17 +1136,20 @@ def _portfolio_production(
     join; see ``WorkspaceStore.read_github_outcome``). Contributor-agnostic (all
     authors summed, none surfaced). These are a merged-PR/closed-issue **FACT**,
     a distinct signal from ``delivery_candidate`` (#22) — never conflated. NOTE:
-    outcome counts are **all-time totals**, not windowed like the effort columns
-    (the UI labels this); they attach only to projects already visible in the
-    window (no phantom rows). Missing ``github.db`` → all three are 0.
+    ``merged_prs`` / ``closed_issues`` / ``open_issues`` are **all-time totals**
+    (the UI labels this); ``merged_prs_window`` / ``closed_issues_window``
+    (#81) count only what merged / closed on a local day of the window. They
+    attach only to projects already visible in the window (no phantom rows).
+    Missing ``github.db`` → all are 0.
 
-    Window: the last ``days`` local days ending at ``today`` (defaults to the
-    local current day; injectable for tests). Read-only over events.db +
+    Window: the last ``days`` LOCAL days ending at ``today`` (defaults to the
+    current local day; injectable for tests). "Local day" is the one shared
+    definition of ``hub.localtime`` (#81): the ``[user] timezone`` zone unless
+    a ``tz`` is given (``None`` = the system zone, as in ``hub.localtime``). Read-only over events.db +
     workspace.db (+ github.db for outcome); empty structure when events/workspace
     DB or its tables are absent. Labels masked when ``hide_project_names`` is set
     (outcome counts are integers — nothing to mask).
     """
-    import datetime
     days = min(max(int(days), 1), 90)
     if hide is None:
         hide = _hide_project_names()
@@ -1234,11 +1231,13 @@ def _portfolio_production(
         if econn is not None:
             econn.close()
 
-    # Window bounds (inclusive) in local days.
+    # Window bounds (inclusive) in local days (#81 — hub.localtime).
+    from hub import localtime
+    if tz is _CONFIGURED_TZ:
+        tz = localtime.user_timezone()
     if today is None:
-        today = datetime.date.today().strftime("%Y-%m-%d")
-    start = (datetime.date.fromisoformat(today)
-             - datetime.timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        today = localtime.today(tz)
+    start = localtime.window_start(today, days)
 
     # 4. Fold each edge into its canonical project on the edge's OWN local day
     #    (#56) — a long session that touched project A weeks ago and B today
@@ -1254,7 +1253,7 @@ def _portfolio_production(
             dt = activity.get((sid, provider))
         if dt is None:
             continue
-        day = _local_day(dt.timestamp())
+        day = localtime.local_day(dt, tz)
         if day < start or day > today:
             continue
         providers_seen.add(provider)
@@ -1296,7 +1295,8 @@ def _portfolio_production(
         # in and events.db is read once, not twice (hot-path invariant).
         store = WorkspaceStore(Path(workspace_db))
         try:
-            outcome = store.read_github_outcome(workspace_db, github_db)
+            outcome = store.read_github_outcome(
+                workspace_db, github_db, window=(start, today), tz=tz)
             try:
                 states = store.derive_project_states(
                     events_db, github_db, session_ingest=activity,
@@ -1307,7 +1307,8 @@ def _portfolio_production(
             # #59: per-project history coverage — where the git history is
             # partial, the UI labels outcome totals "desde <fecha>".
             try:
-                coverage = store.read_history_coverage(workspace_db, github_db)
+                coverage = store.read_history_coverage(
+                    workspace_db, github_db, tz=tz)
             except Exception:
                 _log.exception("read_history_coverage failed; coverage omitted")
                 coverage = {}
@@ -1329,6 +1330,8 @@ def _portfolio_production(
             "merged_prs": oc.get("merged_prs", 0),
             "closed_issues": oc.get("closed_issues", 0),
             "open_issues": oc.get("open_issues", 0),
+            "merged_prs_window": oc.get("merged_prs_window", 0),
+            "closed_issues_window": oc.get("closed_issues_window", 0),
             "last_day": g["last_day"],
             "days": g["days"],
         }
@@ -1830,8 +1833,12 @@ if _mcp is not None:
         proyecto trae además la capa de OUTCOME (#27): `merged_prs`,
         `closed_issues`, `open_issues` desde `github.db` (entrega autoritativa,
         contributor-agnostic — todos los autores sumados, ninguno expuesto),
-        plegada sobre el mismo proyecto canónico. Son TOTALES all-time (no de la
-        ventana) y un HECHO distinto de `delivery_candidate` (#22, heurístico
+        plegada sobre el mismo proyecto canónico. Esos tres son TOTALES all-time;
+        `merged_prs_window` y `closed_issues_window` (#81) cuentan sólo lo
+        mergeado / cerrado en un día local de la ventana (zona `[user] timezone`,
+        la misma definición de "día local" que digests y rollup; una issue
+        cerrada sin fecha de cierre no cuenta en la ventana). Son un HECHO
+        distinto de `delivery_candidate` (#22, heurístico
         gitless) — nunca se confunden. Cada proyecto trae además `state` (#28) —
         el estado derivado que fusiona esa actividad con el outcome en una sola
         lectura honesta: `{state: activo | enfriandose | entregado | estancado |
