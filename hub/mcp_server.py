@@ -916,6 +916,24 @@ def _annotate_github_measured_projects(
             p["no_clone"] = False
 
 
+def _get_snapshot(github_db: str, repo: str, since: str, until: str, *,
+                  allow_incomplete: bool = False, tz: Any = None,
+                  config: Any = None) -> dict[str, Any]:
+    """``{"snapshot": <v1 payload>}`` or ``{error, reason, ...}`` (#82).
+
+    ``tz=None`` = the ``[user] timezone``; ``config=None`` = load it.
+    """
+    from hub import localtime
+    from hub.snapshot import SnapshotError, build_snapshot
+    try:
+        snap = build_snapshot(
+            github_db, repo, since, until, allow_incomplete=allow_incomplete,
+            tz=localtime.CONFIGURED if tz is None else tz, config=config)
+    except SnapshotError as exc:
+        return exc.as_dict()
+    return {"snapshot": snap}
+
+
 def _get_board_issues(
     github_db: str,
     repo: str,
@@ -2275,6 +2293,35 @@ if _mcp is not None:
             min_age_days=min_age_days, max_age_days=max_age_days,
             days=days, limit=limit)
 
+
+    @_mcp.tool()
+    @_stale_aware
+    @_freshness_aware
+    def get_snapshot(
+        repo: str,
+        since: str,
+        until: str,
+        allow_incomplete: bool = False,
+    ) -> dict[str, Any]:
+        """Snapshot versionado de un repo para un rango de días locales (#82).
+
+        El mismo payload que `mool snapshot export` (esquema v1,
+        `docs/schema/snapshot.v1.md`) bajo `snapshot`: issues abiertas /
+        cerradas en el período, totales al corte, PRs mergeadas con sus stats
+        (+/-, archivos, `closes` como `owner/repo#n`) y `snapshot.freshness`
+        (`complete`: si el último sync de GitHub del repo cubre el período).
+        Un rango que el sync no cubre (p. ej. `until` = hoy) devuelve
+        `{error, reason: "incomplete"}` salvo `allow_incomplete=true`, que lo
+        marca `complete: false`. El `freshness` de arriba es el global (#76).
+
+        Args:
+            repo: "owner/repo" (sin distinguir mayúsculas).
+            since: Primer día local, YYYY-MM-DD (inclusive).
+            until: Último día local, YYYY-MM-DD (inclusive).
+            allow_incomplete: Exportar igual un período no cubierto por el sync.
+        """
+        return _get_snapshot(GITHUB_DB, repo, since, until,
+                             allow_incomplete=allow_incomplete)
 
 if __name__ == "__main__":
     if _mcp is None:

@@ -2001,6 +2001,31 @@ def main() -> None:
                           help="Max PRs to fetch in this run, across repos "
                                "(default: 200; rerun to continue)")
 
+    # snapshot (versioned export, #82)
+    snap_parser = subparsers.add_parser(
+        "snapshot", help="Versioned, deterministic snapshot export (JSON)")
+    snap_sub = snap_parser.add_subparsers(dest="snapshot_command")
+    snap_export = snap_sub.add_parser(
+        "export", help="Export one repo's snapshot for a range of local days",
+        description="Issues opened/closed, totals at the cut, merged PRs with "
+                    "their stats and a freshness field for local days "
+                    "SINCE..UNTIL ([user] timezone), as schema v1 "
+                    "(docs/schema/snapshot.v1.md). Same range + same data = "
+                    "byte-identical output. A range the last GitHub sync does "
+                    "not cover exits 3 unless --allow-incomplete.")
+    snap_export.add_argument("--repo", required=True, metavar="OWNER/REPO")
+    snap_export.add_argument("--since", required=True, metavar="YYYY-MM-DD",
+                             help="First local day (inclusive)")
+    snap_export.add_argument("--until", required=True, metavar="YYYY-MM-DD",
+                             help="Last local day (inclusive)")
+    snap_export.add_argument("--format", choices=["json"], default="json")
+    snap_export.add_argument("--output", "-o", metavar="FILE",
+                             help="Write to FILE atomically instead of stdout")
+    snap_export.add_argument("--allow-incomplete", dest="allow_incomplete",
+                             action="store_true",
+                             help="Export a range the last sync does not cover "
+                                  "(marked freshness.complete = false)")
+
     # query (agent-friendly JSON output)
     query_parser = subparsers.add_parser("query", help="Query data as JSON (agent-friendly)")
     query_sub = query_parser.add_subparsers(dest="query_command")
@@ -2189,6 +2214,10 @@ def main() -> None:
             cmd_repo(args)
         case "query":
             cmd_query(args)
+        case "snapshot":
+            if getattr(args, "snapshot_command", None) == "export":
+                sys.exit(cmd_snapshot_export(args))
+            snap_parser.print_help()
         case "workspace":
             cmd_workspace(args)
         case "sessions":
@@ -2210,6 +2239,28 @@ def main() -> None:
             cmd_install(args)
         case _:
             parser.print_help()
+
+
+def cmd_snapshot_export(args: argparse.Namespace) -> int:
+    """``mool snapshot export`` (#82): stdout or an atomic --output file."""
+    from hub.snapshot import SnapshotError, build_snapshot, dumps, write_atomic
+
+    github_db = Path.home() / ".moolmesh" / "github.db"
+    try:
+        snap = build_snapshot(github_db, args.repo, args.since, args.until,
+                              allow_incomplete=args.allow_incomplete)
+    except SnapshotError as exc:
+        print(f"mool snapshot export: {exc}", file=sys.stderr)
+        return exc.exit_code
+    text = dumps(snap)
+    if args.output:
+        write_atomic(args.output, text)
+    else:
+        sys.stdout.write(text)
+    if not snap["freshness"]["complete"]:
+        print("aviso: el período no está cubierto por el último sync "
+              "(freshness.complete = false)", file=sys.stderr)
+    return 0
 
 
 def cmd_export(args: argparse.Namespace) -> None:

@@ -275,7 +275,7 @@ class TestToolLayer:
         assert dict_tools - {"get_server_info"} == wrapped
         assert wrapped == {"get_project_activity", "get_session_detail",
                            "get_portfolio_grouped", "get_portfolio_production",
-                           "get_board_issues"}
+                           "get_board_issues", "get_snapshot"}
 
     def test_wrapping_keeps_name_signature_and_docstring_for_fastmcp(self, loaded):
         fn = loaded.tools["get_portfolio_production"]
@@ -288,6 +288,8 @@ class TestToolLayer:
         ("get_session_detail", "_get_session_detail", ("s1",), {"session_id": "s1"}),
         ("get_portfolio_grouped", "_get_portfolio_grouped", (), {"projects": []}),
         ("get_portfolio_production", "_get_portfolio_production", (), {"projects": []}),
+        ("get_snapshot", "_get_snapshot", ("acme/x", "2026-11-01", "2026-11-01"),
+         {"snapshot": {}}),
     ])
     def test_flag_appears_only_when_the_server_is_stale(
             self, loaded, monkeypatch, tool, target, args, payload):
