@@ -19,6 +19,20 @@ LOG_FILE = CONFIG_DIR / "daemon.log"
 DEFAULT_START_TIMEOUT = 10.0
 _POLL_INTERVAL = 0.2
 
+# daemon.log stays bounded (#76): past LOG_MAX_BYTES it is renamed to
+# daemon.log.1 (replacing the previous one) at start and every
+# LOG_CHECK_INTERVAL seconds while the daemon runs.
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_CHECK_INTERVAL = 600.0
+
+# Environment variables removed before the daemon spawns anything (#76): a
+# macOS daemon.log reached 55 MB of "Python(<pid>) MallocStackLogging: can't
+# turn off malloc stack logging because it was not enabled." — libmalloc
+# prints that in every process started with an inherited MallocStackLogging*
+# variable. Dropping them here keeps every child (git, gh, Python) quiet.
+_SCRUB_ENV_PREFIXES = ("MallocStackLogging",)
+_scrubbed_env: list[str] = []
+
 
 class DaemonStartError(RuntimeError):
     """The background daemon did not become healthy in the start window."""
@@ -184,6 +198,89 @@ def log_tail(max_lines: int = 10) -> str:
     return "\n".join(lines[-max_lines:])
 
 
+def scrub_child_env(environ=None) -> list[str]:
+    """Remove ``MallocStackLogging*`` from ``environ`` (default ``os.environ``).
+
+    Returns the removed names. Children inherit ``os.environ``, so scrubbing
+    the daemon's own environment covers every subprocess it starts.
+    """
+    environ = os.environ if environ is None else environ
+    removed = [k for k in list(environ) if k.startswith(_SCRUB_ENV_PREFIXES)]
+    for key in removed:
+        environ.pop(key, None)
+    return removed
+
+
+def rotate_log_if_needed(log_file: Path | None = None,
+                         max_bytes: int | None = None) -> bool:
+    """Rename ``daemon.log`` to ``daemon.log.1`` when it exceeds ``max_bytes``.
+
+    One generation is kept (the previous ``.1`` is replaced). Size-based
+    rotation by rename rather than ``RotatingFileHandler``: the file is not
+    written by a logging handler but by raw stdout/stderr — the daemon's and
+    its children's, or launchd's ``StandardOutPath`` — so the writers'
+    descriptors are re-pointed by ``reopen_stdio`` instead. Never raises.
+    """
+    log_file = LOG_FILE if log_file is None else log_file
+    max_bytes = LOG_MAX_BYTES if max_bytes is None else max_bytes
+    try:
+        if log_file.stat().st_size <= max_bytes:
+            return False
+        os.replace(log_file, log_file.with_name(log_file.name + ".1"))
+    except OSError:
+        # Missing file, or (Windows) still held open by a running daemon.
+        return False
+    return True
+
+
+def reopen_stdio(log_file: Path | None = None, fds: tuple[int, ...] = (1, 2)) -> bool:
+    """Point fd 1/2 at a fresh ``log_file`` if they still write the rotated one.
+
+    Covers launchd (which opened ``StandardOutPath`` before the daemon ran)
+    and the background daemon after an in-process rotation. Only descriptors
+    that point at ``<log>.1`` are touched; a terminal or the systemd journal
+    is left alone. Returns True when something was re-pointed.
+    """
+    if _IS_WINDOWS:
+        return False
+    log_file = LOG_FILE if log_file is None else log_file
+    try:
+        rotated = log_file.with_name(log_file.name + ".1").stat()
+    except OSError:
+        return False
+    targets = []
+    for fd in fds:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            continue
+        if (st.st_ino, st.st_dev) == (rotated.st_ino, rotated.st_dev):
+            targets.append(fd)
+    if not targets:
+        return False
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
+    try:
+        new_fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    except OSError:
+        return False
+    try:
+        for fd in targets:
+            os.dup2(new_fd, fd)
+    finally:
+        os.close(new_fd)
+    return True
+
+
+def _log_rotation_loop(stop: "threading.Event") -> None:
+    while not stop.wait(LOG_CHECK_INTERVAL):
+        if rotate_log_if_needed():
+            reopen_stdio()
+
+
 def _read_pid_report(read_fd: int, *, timeout: float = 5.0) -> int | None:
     """Read the child's PID line from the launch pipe; None on EOF/timeout."""
     import select
@@ -226,6 +323,10 @@ def daemonize(
     silent port auto-increment (explicit --port, supervised or foreground
     runs, #55).
     """
+    global _scrubbed_env
+    _scrubbed_env = scrub_child_env()
+    rotate_log_if_needed()
+
     if foreground or _is_supervised():
         return _run_foreground(host, port, project_filter, providers, fixed_port=fixed_port)
 
@@ -340,6 +441,8 @@ def _run_foreground(
     the CLI can exit 1 when the dashboard could not start (#55).
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # launchd opened daemon.log for us before the start-time rotation.
+    reopen_stdio()
     if sys.stdout is None or sys.stderr is None:
         # pythonw.exe (Task Scheduler, #76/#78) has no stdio: log to the file.
         log_fh = open(LOG_FILE, "a", encoding="utf-8", buffering=1)
@@ -361,9 +464,16 @@ def _run_server(
     fixed_port: bool = False,
 ) -> None:
     """Start the dashboard server with signal handling."""
+    import threading
     from hub.dashboard.server import DashboardServer
-    from hub.log import setup
+    from hub.log import get, setup
     setup(level="INFO")
+    if _scrubbed_env:
+        get("daemon").info(
+            "removed from the child-process environment: %s", ", ".join(_scrubbed_env))
+    rotation_stop = threading.Event()
+    threading.Thread(target=_log_rotation_loop, args=(rotation_stop,),
+                     name="LogRotation", daemon=True).start()
 
     server = DashboardServer(
         host=host,
@@ -384,6 +494,7 @@ def _run_server(
     try:
         server.start()
     finally:
+        rotation_stop.set()
         PID_FILE.unlink(missing_ok=True)
 
 
