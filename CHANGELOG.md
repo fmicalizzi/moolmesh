@@ -6,6 +6,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.34.0] — 2026-11-04
+
+No new dependencies. One additive events.db migration (no rows rewritten).
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- events.db migration 10 adds a nullable `events.dir_extra`. Nothing existing
+  is rewritten, so no backup is taken.
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Added
+- **Days worked in the rollup views** (#123): `get_portfolio`, the client
+  tier and `mool workspace portfolio` report distinct sessions and distinct
+  days worked in the window (from #114) next to the existing touch counts,
+  which keep their meaning.
+- **Qwen active branch** (#122): Qwen stores entry and parent ids, so
+  `mool export` and the MCP session events show the active branch.
+
+### Fixed
+- **Per-directory extras** (#122): Codex and Pi mark the extra `tool_use`
+  events they emit per additional directory, and call counts exclude them.
+  Pi rows stored before the upgrade stay counted.
+
+---
+
 ## [1.33.0] — 2026-11-04
 
 Robustness and cleanup batch. No new dependencies. One additive events.db
