@@ -374,6 +374,19 @@ def _get_tool_stats(
     return _rows_to_dicts(rows)
 
 
+# Parsed event time as a Julian day, for ORDER BY (#52). ISO text (with 'Z' or
+# an offset) goes through ``julianday``; an all-digit timestamp is an epoch —
+# seconds, or milliseconds above 1e11 (the ``hub.localtime`` threshold, #53) —
+# because a bare ``julianday(<number>)`` would read it as a Julian day number
+# and float it to the top. Unparseable → NULL → last under DESC.
+_EVENT_JULIANDAY = """(CASE
+    WHEN timestamp <> '' AND timestamp NOT GLOB '*[^0-9.]*'
+    THEN julianday(CAST(timestamp AS REAL)
+                   / (CASE WHEN CAST(timestamp AS REAL) > 1e11 THEN 1000.0 ELSE 1.0 END),
+                   'unixepoch')
+    ELSE julianday(timestamp) END)"""
+
+
 def _search_events(
     db_path: str,
     query: str,
@@ -412,7 +425,7 @@ def _search_events(
         SELECT id, provider, project, event_type, timestamp, summary,
                session_id, tool_name, file_path, model
         FROM events WHERE {where}
-        ORDER BY julianday(timestamp) DESC, {hist}id DESC
+        ORDER BY {_EVENT_JULIANDAY} DESC, {hist}id DESC
         LIMIT ? OFFSET ?
     """, (*params, limit, offset)).fetchall()
     conn.close()

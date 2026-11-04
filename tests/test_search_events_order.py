@@ -84,3 +84,18 @@ def test_db_without_historical_column(tmp_path):
     _ins(conn, "2025-11-04T10:00:00Z", "needle old", with_historical=False)
     conn.commit()
     assert [r["summary"] for r in _search_events(path, "needle")] == ["needle new", "needle old"]
+
+
+def test_epoch_timestamps_are_parsed(tmp_path):
+    conn, path = _db(tmp_path)
+    # 1730000000000 ms = 2024-10-27; as a raw julianday it would sort first.
+    _ins(conn, "1730000000000", "needle epoch-ms")
+    _ins(conn, "1740000000", "needle epoch-s")          # 2025-02-19
+    _ins(conn, "2026-11-04T10:00:00Z", "needle iso")
+    conn.execute(  # a real INTEGER value, not text
+        "INSERT INTO events (provider, project, event_type, timestamp, summary,"
+        " created_at) VALUES ('claude','demo','user',?,?,0)",
+        (1600000000000, "needle int-ms"))                # 2020-09-13
+    conn.commit()
+    got = [r["summary"] for r in _search_events(path, "needle")]
+    assert got == ["needle iso", "needle epoch-s", "needle epoch-ms", "needle int-ms"]
