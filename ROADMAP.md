@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.29.0
+Last updated: November 2026 — v1.29.1
 
 ---
 
@@ -230,6 +230,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.28.1** ([#52](https://github.com/fmicalizzi/moolmesh/issues/52), [#54](https://github.com/fmicalizzi/moolmesh/issues/54), [#62](https://github.com/fmicalizzi/moolmesh/issues/62), [#67](https://github.com/fmicalizzi/moolmesh/issues/67)): observe robustness. Streaming incremental reads, a per-event full-text cap, realpath Codex discovery, placeholder-aware live watcher, pruned backups; zero-footprint reads of closed WAL provider DBs; history is history on any ingest path; `events.entry_id` keeps parallel identical events apart.
 
 - **v1.29.0** ([#80](https://github.com/fmicalizzi/moolmesh/issues/80)): per-PR additions, deletions, changed files and qualified closing references (`owner/repo#n`) in the GitHub cache, filled by the poll for new/updated PRs and by `mool repo backfill-pr-stats` for older ones.
+
+- **v1.29.1** ([#96](https://github.com/fmicalizzi/moolmesh/issues/96)): `daemon stop` waits for the process to exit and `start` waits out a shutdown; shutdown under a second; concurrent stop/start never orphans the daemon.
 
 ---
 

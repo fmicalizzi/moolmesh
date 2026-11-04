@@ -6,6 +6,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.29.1] — 2026-11-04
+
+Daemon stop/start fix (#96). No new dependencies, no schema change.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- The first `restart`/`stop` after the upgrade still shuts down a daemon
+  running the old code (~26 s); the command now waits for it instead of
+  returning at once. Later stops take under a second.
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Fixed
+- **`stop` then `start` left the daemon down** (#96): `mool daemon stop` now
+  returns only once the process has exited, on every path (LaunchAgent,
+  systemd, Task Scheduler, unsupervised); after 30 s it reports "still
+  shutting down (PID N)" and exits 1. A `start` that finds a daemon shutting
+  down waits for it and then starts, instead of answering "already running".
+- **Slow shutdown** (#96): the harvester and watcher loops wake on the stop
+  event instead of sleeping out their 15-120 s interval, so shutdown drops
+  from ~26 s to under a second.
+- **Concurrent `stop` + `start`** (#96): the pidfile is removed only while it
+  still names the stopped PID, and written atomically, so the new daemon is
+  never left untracked.
+
+---
+
 ## [1.29.0] — 2026-11-04
 
 Per-PR stats (#80). No new dependencies. One additive schema migration
