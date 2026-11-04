@@ -2359,7 +2359,6 @@ def cmd_snapshot_export(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> None:
-    from pathlib import Path
     from hub.cache.event_store import EventStore
 
     store = EventStore()
@@ -2371,8 +2370,10 @@ def cmd_export(args: argparse.Namespace) -> None:
 
     # Tree-shaped sessions (Pi /tree, Claude parentUuid): the active branch
     # only, in order; abandoned branches stay in events.db (#67).
+    # Every event (#132): ``limit=-1`` lifts the 500-row default of the read
+    # surface, which paginates; an export has no pages, so it is never cut.
     events = store.get_session_events(args.session_id, include_full_text=True,
-                                      active_branch=True)
+                                      limit=-1, active_branch=True)
     store.close()
     if not events:
         print(yellow(f"No events found for session: {args.session_id}"))
@@ -2380,7 +2381,8 @@ def cmd_export(args: argparse.Namespace) -> None:
 
     if args.format == "json":
         import json as _json
-        print(_json.dumps({"session": detail, "events": events}, default=str, indent=2))
+        _write_export(_json.dumps({"session": detail, "events": events},
+                                  default=str, indent=2), getattr(args, "output", None))
         return
 
     lines: list[str] = []
@@ -2447,13 +2449,18 @@ def cmd_export(args: argparse.Namespace) -> None:
 
         lines.append("")
 
-    output = "\n".join(lines)
+    _write_export("\n".join(lines), getattr(args, "output", None))
 
-    if args.output:
-        Path(args.output).write_text(output, encoding="utf-8")
-        print(green(f"Exported to {args.output}"))
+
+def _write_export(text: str, output: str | None) -> None:
+    """Write an export to ``--output`` (any format, #132) or print it."""
+    from pathlib import Path
+
+    if output:
+        Path(output).write_text(text, encoding="utf-8")
+        print(green(f"Exported to {output}"))
     else:
-        print(output)
+        print(text)
 
 
 def cmd_sessions(args: argparse.Namespace) -> None:
