@@ -161,6 +161,14 @@ when the daemon is down or the last git / GitHub API sync is older than
 dashboard shows a banner on every page in that case, and `mool doctor` prints a
 freshness line. `daemon.log` is rotated to `daemon.log.1` past 10 MB.
 
+**Local day.** Digests, the workspace rollup and `get_portfolio_production`
+share one definition of "which day": the zone in `[user] timezone` (an IANA
+name such as `"America/Costa_Rica"`; unset = the system zone; an unknown name
+falls back to the system zone with a warning in the log). A PR merged at 01:00
+UTC is in the previous day's digest at UTC-6. `get_portfolio_production(days)`
+returns `merged_prs_window` and `closed_issues_window` (merged / closed on a
+local day of the window) next to the all-time `merged_prs` and `closed_issues`.
+
 ---
 
 ## Updating

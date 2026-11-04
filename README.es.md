@@ -160,6 +160,15 @@ daemon no corre o el último sync de git / API de GitHub es más viejo que
 caso el dashboard muestra un banner en todas las páginas y `mool doctor` imprime
 una línea de frescura. `daemon.log` rota a `daemon.log.1` al pasar los 10 MB.
 
+**Día local.** Los digests, el rollup de workspaces y `get_portfolio_production`
+comparten una sola definición de "qué día": la zona de `[user] timezone` (nombre
+IANA como `"America/Costa_Rica"`; sin definir = la zona del sistema; un nombre
+desconocido cae a la zona del sistema con un aviso en el log). Un PR mergeado a
+las 01:00 UTC aparece en el digest del día anterior a UTC-6.
+`get_portfolio_production(days)` devuelve `merged_prs_window` y
+`closed_issues_window` (mergeado / cerrado en un día local de la ventana) junto a
+los totales históricos `merged_prs` y `closed_issues`.
+
 ---
 
 ## Instalación en producción
