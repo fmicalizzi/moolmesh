@@ -31,11 +31,32 @@ using ``configparser`` (deliberate deviation from the issue's suggestion).
 from __future__ import annotations
 
 import hashlib
+import logging
 import ntpath
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from hub.cloudfiles import is_cloud_placeholder
+
+log = logging.getLogger(__name__)
+
+
+def _read_git_text(path: Path) -> str | None:
+    """Read a small ``.git`` metadata file, never recalling a cloud placeholder.
+
+    A cloud-only stand-in (iCloud / OneDrive / Dropbox online-only) would make
+    the OS download it on open (#52). It is skipped from metadata alone and the
+    directory resolves as if the data were absent; a DEBUG line records it.
+    """
+    if is_cloud_placeholder(path):
+        log.debug("workspace resolver: skipping cloud placeholder %s", path)
+        return None
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -127,9 +148,8 @@ def _remote_from_config(config_path: Path) -> str | None:
 
     Prefers ``origin``; otherwise the first remote in file order (deterministic).
     """
-    try:
-        text = config_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    text = _read_git_text(config_path)
+    if text is None:
         return None
     remotes = _parse_git_config_remotes(text)
     if not remotes:
@@ -146,6 +166,10 @@ def _locate_git_config(marker: Path) -> Path | None:
     ``.git`` as a file containing ``gitdir: <path>``; the shared config lives at
     the common dir, which we follow via the ``commondir`` pointer.
     """
+    if is_cloud_placeholder(marker):
+        # A dataless ``.git`` dir (or stub file): looking inside would recall it.
+        log.debug("workspace resolver: skipping cloud placeholder %s", marker)
+        return None
     try:
         if marker.is_dir():
             cfg = marker / "config"
@@ -154,9 +178,8 @@ def _locate_git_config(marker: Path) -> Path | None:
         return None
 
     # ``.git`` is a file → follow the gitdir pointer.
-    try:
-        text = marker.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    text = _read_git_text(marker)
+    if text is None:
         return None
     m = re.search(r"gitdir:\s*(.+)", text)
     if not m:
@@ -174,7 +197,10 @@ def _locate_git_config(marker: Path) -> Path | None:
     commondir_file = gitdir / "commondir"
     try:
         if commondir_file.exists():
-            rel = commondir_file.read_text(encoding="utf-8", errors="replace").strip()
+            raw = _read_git_text(commondir_file)
+            if raw is None:
+                return None
+            rel = raw.strip()
             common = Path(rel) if os.path.isabs(rel) else gitdir / rel
             common = Path(os.path.normpath(str(common)))
             cfg = common / "config"

@@ -383,7 +383,13 @@ def _search_events(
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """Busca eventos por texto en el summary."""
+    """Busca eventos por texto en el summary.
+
+    Orden: hora parseada del evento, más reciente primero (#52). ``id`` sigue
+    el orden de ingesta, así que tras un backfill lo histórico quedaba arriba;
+    ``julianday`` normaliza 'Z' y offsets. Sin hora parseable → al final, con
+    lo en vivo antes que lo histórico y luego ``id DESC``.
+    """
     limit = min(limit, 200)
     offset = max(offset, 0)
     where = "summary LIKE ?"
@@ -399,11 +405,15 @@ def _search_events(
         params.append(event_type)
 
     conn = _connect(db_path)
+    # Guarded — an events.db not yet migrated has no ``historical`` column.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
+    hist = "historical ASC, " if "historical" in cols else ""
     rows = conn.execute(f"""
         SELECT id, provider, project, event_type, timestamp, summary,
                session_id, tool_name, file_path, model
         FROM events WHERE {where}
-        ORDER BY id DESC LIMIT ? OFFSET ?
+        ORDER BY julianday(timestamp) DESC, {hist}id DESC
+        LIMIT ? OFFSET ?
     """, (*params, limit, offset)).fetchall()
     conn.close()
     return _rows_to_dicts(rows)
