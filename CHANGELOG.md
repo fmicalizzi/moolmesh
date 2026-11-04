@@ -6,6 +6,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.29.0] — 2026-11-04
+
+Per-PR stats (#80). No new dependencies. One additive schema migration
+(github.db migration 6: two new tables; nothing is rewritten).
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- With a GitHub token, the daemon stores additions, deletions, changed files
+  and closed issues for every PR created or updated after the upgrade.
+- PRs cached before the upgrade get stats with
+  `mool repo backfill-pr-stats --all-registered` (200 PRs per run by default,
+  `--limit N` to change it; rerun to continue).
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Added
+- **Per-PR stats** (#80): `github_pr_stats` (+/-, changed files) and
+  `github_pr_closing_refs` (closed issues qualified as `owner/repo#n`, so a PR
+  closing an issue in another repo with the same number stays distinct). The
+  issues poll fills them for new or updated PRs only: one batched GraphQL call
+  per 25 PRs, at most 50 PRs per poll, none on a 304. A failed call leaves the
+  PR without stats and the sync carries on.
+- `mool repo backfill-pr-stats [path | --all-registered] [--limit N]`:
+  resumable backfill for already-cached PRs.
+- `/api/github/prs` adds `additions`, `deletions`, `changed_files` (null until
+  fetched) and `closes`.
+
+---
+
 ## [1.28.1] — 2026-11-04
 
 Observation robustness (#52, #54, #62, #67). No new dependencies. One additive
