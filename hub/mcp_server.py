@@ -1438,6 +1438,15 @@ def _portfolio_production(
     per-provider session count (the contribution strip), the total session
     count, active-day count, and a deliverable (image/video) count.
 
+    Days worked (#114): a session counts on EVERY local day it had events on
+    a project (``edge_active_days``), not only on its edge's latest event — a
+    session resumed over three days lights three days. Per-day cells count
+    distinct sessions; ``sessions`` counts distinct sessions in the window
+    (never the sum of the days) and ``active_days`` the distinct days. The
+    table is used only when its recorded zone is the zone being read; an edge
+    with no day rows (its events are gone, or the first derivation has not run
+    yet) is dated by its ``activity_ts`` as before.
+
     A session that touched N distinct projects counts once in EACH — the strip
     is a per-project statement ("this project saw a session that day"), so a
     cross-project session is genuine activity in every project it touched;
@@ -1487,7 +1496,7 @@ def _portfolio_production(
         try:
             crows = wconn.execute("""
                 SELECT a.session_id, a.provider, c.project_key, c.project_label,
-                       a.activity_ts, a.event_ts
+                       a.activity_ts, a.event_ts, a.workspace_id, a.via
                 FROM path_attributions a
                 JOIN workspace_classification c
                   ON c.workspace_id = a.workspace_id
@@ -1496,15 +1505,47 @@ def _portfolio_production(
         except sqlite3.OperationalError:
             return empty
 
+        from hub import localtime
+        if tz is _CONFIGURED_TZ:
+            tz = localtime.user_timezone()
+        # Days worked per edge (#114), keyed like the edge minus its file:
+        # (session, provider, workspace, via) -> [day, ...]. Read only when the
+        # table is bucketed in the zone being read; else every edge falls back.
+        edge_days: dict[tuple[str, str, int, str], list[str]] = {}
+        try:
+            zrow = wconn.execute(
+                "SELECT value FROM rollup_meta WHERE key = 'active_days_zone'"
+            ).fetchone()
+            if zrow is not None and zrow[0] == localtime.zone_key(tz):
+                for sid, prov, wid, via, day in wconn.execute(
+                    "SELECT session_id, provider, workspace_id, via, day"
+                    " FROM edge_active_days"
+                ):
+                    edge_days.setdefault((sid, prov or "", wid, via), []).append(day)
+        except sqlite3.OperationalError:
+            edge_days = {}  # pre-#114 workspace.db: activity_ts only
+
         from hub.cache.workspace_store import _parse_ts
-        edge_rows: list[tuple[str, str, str, Any]] = []
+        # (session, provider, project, datetime | None, [days] | None)
+        edge_rows: list[tuple[str, str, str, Any, list[str] | None]] = []
         labels: dict[str, str] = {}
+        days_done: set[tuple[str, str, int, str]] = set()
         for r in crows:
             pk = r["project_key"]
-            edge_rows.append((
-                r["session_id"], r["provider"] or "", pk,
-                _parse_ts(r["activity_ts"]) or _parse_ts(r["event_ts"]),
-            ))
+            sid, prov = r["session_id"], r["provider"] or ""
+            dkey = (sid, prov, r["workspace_id"], r["via"])
+            worked = edge_days.get(dkey)
+            if worked is not None:
+                # Many file edges share one key: fold its days once.
+                if dkey not in days_done:
+                    days_done.add(dkey)
+                    edge_rows.append((sid, prov, pk, None, worked))
+            else:
+                edge_rows.append((
+                    sid, prov, pk,
+                    _parse_ts(r["activity_ts"]) or _parse_ts(r["event_ts"]),
+                    None,
+                ))
             if pk not in labels and r["project_label"]:
                 labels[pk] = r["project_label"]
 
@@ -1539,7 +1580,8 @@ def _portfolio_production(
         #    a healthy database. The same map feeds the state layer, so when it
         #    is needed it is paid once (hot-path invariant).
         activity: dict[tuple[str, str], Any] = {}
-        if econn is not None and any(dt is None for *_, dt in edge_rows):
+        if econn is not None and any(dt is None and worked is None
+                                     for *_, dt, worked in edge_rows):
             from hub.cache.workspace_store import read_session_activity
             try:
                 activity = read_session_activity(econn)
@@ -1551,9 +1593,6 @@ def _portfolio_production(
             econn.close()
 
     # Window bounds (inclusive) in local days (#81 — hub.localtime).
-    from hub import localtime
-    if tz is _CONFIGURED_TZ:
-        tz = localtime.user_timezone()
     if today is None:
         today = localtime.today(tz)
     start = localtime.window_start(today, days)
@@ -1567,30 +1606,32 @@ def _portfolio_production(
     proj: dict[str, dict[str, Any]] = {}
     providers_seen: set[str] = set()
     seen_cells: set[tuple[str, str, str, str]] = set()  # (pk, day, provider, sid)
-    for sid, provider, pk, dt in edge_rows:
-        if dt is None:
-            dt = activity.get((sid, provider))
-        if dt is None:
-            continue
-        day = localtime.local_day(dt, tz)
-        if day < start or day > today:
-            continue
-        providers_seen.add(provider)
-        g = proj.setdefault(pk, {
-            "project_key": pk,
-            "project_label": labels.get(pk, ""),
-            "_sessions": set(), "_days": set(), "days": {},
-            "last_day": "",
-        })
-        if (pk, day, provider, sid) in seen_cells:
-            continue
-        seen_cells.add((pk, day, provider, sid))
-        g["_sessions"].add((sid, provider))
-        g["_days"].add(day)
-        g["days"].setdefault(day, {})
-        g["days"][day][provider] = g["days"][day].get(provider, 0) + 1
-        if day > g["last_day"]:
-            g["last_day"] = day
+    for sid, provider, pk, dt, worked in edge_rows:
+        if worked is None:
+            if dt is None:
+                dt = activity.get((sid, provider))
+            if dt is None:
+                continue
+            worked = [localtime.local_day(dt, tz)]
+        for day in worked:
+            if not day or day < start or day > today:
+                continue
+            providers_seen.add(provider)
+            g = proj.setdefault(pk, {
+                "project_key": pk,
+                "project_label": labels.get(pk, ""),
+                "_sessions": set(), "_days": set(), "days": {},
+                "last_day": "",
+            })
+            if (pk, day, provider, sid) in seen_cells:
+                continue
+            seen_cells.add((pk, day, provider, sid))
+            g["_sessions"].add((sid, provider))
+            g["_days"].add(day)
+            g["days"].setdefault(day, {})
+            g["days"][day][provider] = g["days"][day].get(provider, 0) + 1
+            if day > g["last_day"]:
+                g["last_day"] = day
 
     # 5. Outcome layer (#27) — merged-PR/closed-issue/open-issue per canonical
     #    project from github.db (read-only). Best-effort: a missing/unreadable
@@ -2189,8 +2230,11 @@ if _mcp is not None:
         catch-up / re-parseo, #53), agregada sobre el
         proyecto CANÓNICO (`workspace_classification.project_key` de la Etapa 1),
         así el harness/scratchpad se pliega en su proyecto real. Por proyecto
-        devuelve la serie diaria por provider (la tira de contribución),
-        `sessions`, `active_days` y `deliverables` (conteo de imagen/video desde
+        devuelve la serie diaria por provider (la tira de contribución: una
+        sesión cuenta en CADA día local en que trabajó el proyecto, #114; cada
+        día cuenta sesiones distintas), `sessions` (sesiones distintas en la
+        ventana, nunca la suma de los días), `active_days` (días distintos) y
+        `deliverables` (conteo de imagen/video desde
         el watcher de filesystem — 0 hasta que se marca un root, con
         `deliverables_measurable` para no mostrar un cero silencioso). Cada
         proyecto trae además la capa de OUTCOME (#27): `merged_prs`,

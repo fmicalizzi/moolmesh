@@ -80,6 +80,35 @@ CREATE TABLE IF NOT EXISTS path_attributions (
 CREATE INDEX IF NOT EXISTS idx_attr_workspace ON path_attributions(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_attr_session ON path_attributions(session_id, provider);
 
+-- Local days each edge worked (issue #114). ``activity_ts`` is ONE clock per
+-- edge (its latest event), so a session that worked a project on several days
+-- would count only on its last one. One row per (session, provider, workspace,
+-- edge kind, LOCAL day) with at least one event of that edge — keyed by the
+-- workspace, not the file, so a session editing 50 files of one repo on one day
+-- is one row. ``via`` mirrors ``path_attributions.via`` so the rows of a
+-- session's cwd-fallback edges leave with them (#40). Days are local days in
+-- the zone recorded under ``rollup_meta.active_days_zone``; a changed
+-- ``[user] timezone`` re-derives the table (after a backup). Readers count a
+-- row only while an edge with the same (session, provider, workspace, via)
+-- still exists, so a re-resolved or purged edge drops its days without a
+-- rewrite. ``INSERT OR IGNORE`` makes every pass idempotent.
+CREATE TABLE IF NOT EXISTS edge_active_days (
+    session_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    via TEXT NOT NULL,                     -- 'file' | 'cwd' (as path_attributions)
+    day TEXT NOT NULL,                     -- YYYY-MM-DD, LOCAL day (#81, #114)
+    PRIMARY KEY (session_id, provider, workspace_id, via, day)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_active_days_workspace ON edge_active_days(workspace_id, day);
+
+-- Small key/value markers (rollup zone #81, re-derivations #101/#114). Also
+-- created by migrations 4–6; here so a pass never meets a DB without it.
+CREATE TABLE IF NOT EXISTS rollup_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 -- Filesystem path-touches (issue #21 — Workspace axis, Phase B).
 -- A file under a marked root changed on disk, attributed to its owning
 -- workspace via the same resolver. Has NO session — kept separate from
@@ -353,6 +382,51 @@ def _mig_5_activity_rederive(conn: sqlite3.Connection) -> int:
     return 1
 
 
+# rollup_meta keys for the per-day edge activity (#114): the zone
+# ``edge_active_days.day`` is bucketed in, and the pending (re-)derivation.
+_ACTIVE_DAYS_ZONE_KEY = "active_days_zone"
+_ACTIVE_DAYS_REDERIVE_KEY = "active_days_rederive"
+
+
+def _mig_6_edge_active_days(conn: sqlite3.Connection) -> int:
+    """Create ``edge_active_days`` (#114) and schedule its first derivation.
+
+    Additive: a new table (also in ``_SCHEMA``, so ``IF NOT EXISTS`` makes this
+    a no-op on a fresh DB). Existing edges have no days yet, so a DB with edges
+    gets the ``active_days_rederive`` marker: ``attribute_incremental`` then
+    runs one full read-only pass over events.db that fills the table, after a
+    backup of workspace.db (see ``_rederive_full``). Nothing existing is
+    rewritten here. Idempotent (``INSERT OR IGNORE``).
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS rollup_meta (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS edge_active_days (
+               session_id TEXT NOT NULL,
+               provider TEXT NOT NULL,
+               workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+               via TEXT NOT NULL,
+               day TEXT NOT NULL,
+               PRIMARY KEY (session_id, provider, workspace_id, via, day)
+           ) WITHOUT ROWID"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_active_days_workspace"
+        " ON edge_active_days(workspace_id, day)"
+    )
+    if not conn.execute("SELECT 1 FROM path_attributions LIMIT 1").fetchone():
+        return 0
+    conn.execute(
+        "INSERT OR IGNORE INTO rollup_meta (key, value) VALUES (?, 'pending')",
+        (_ACTIVE_DAYS_REDERIVE_KEY,),
+    )
+    return 1
+
+
 # Versioned, additive migrations — each runs exactly once (mirrors git_store).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
     (1, "attribution_via", _mig_1_attribution_via),
@@ -360,6 +434,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
     (3, "attribution_activity_ts", _mig_3_attribution_activity_ts),
     (4, "rollup_day_zone", _mig_4_rollup_day_zone),
     (5, "activity_rederive", _mig_5_activity_rederive),
+    (6, "edge_active_days", _mig_6_edge_active_days),
 ]
 
 
@@ -930,6 +1005,32 @@ class WorkspaceStore:
             (session_id, provider, file_path, workspace_id, resolved_via, now, via,
              event_ts, activity_ts),
         )
+
+    def _record_active_days_locked(
+        self, session_id: str, provider: str, workspace_id: int, via: str,
+        days: set[str] | None,
+    ) -> None:
+        """Add the local days an edge worked (#114). Idempotent."""
+        if days:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO edge_active_days"
+                " (session_id, provider, workspace_id, via, day)"
+                " VALUES (?, ?, ?, ?, ?)",
+                [(session_id, provider, workspace_id, via, d) for d in days],
+            )
+
+    def _active_days_zone(self) -> tuple[Any, str]:
+        """Zone ``edge_active_days`` is bucketed in: the recorded one, else the
+        configured ``[user] timezone`` (#114). Returns ``(tzinfo, zone key)``."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM rollup_meta WHERE key = ?",
+                (_ACTIVE_DAYS_ZONE_KEY,),
+            ).fetchone()
+        if row is not None:
+            return resolve_timezone(row[0]), row[0]
+        tz = user_timezone()
+        return tz, zone_key(tz)
 
     # --- Public write API ---
 
@@ -2404,6 +2505,7 @@ class WorkspaceStore:
     def _attribute_event_range(
         self, events_db_path: str | Path, lo: int, hi: int,
         replace_activity: bool = False,
+        day_tz: Any = CONFIGURED,
     ) -> dict[str, int]:
         """Attribute events with ``lo < id <= hi``.
 
@@ -2441,6 +2543,13 @@ class WorkspaceStore:
         replaces each seen edge's ``activity_ts`` with the clock folded from
         ALL its events instead of keeping the later of the two.
 
+        Every pass also records the LOCAL day of each event's #53 clock in
+        ``edge_active_days`` (#114, ``INSERT OR IGNORE``): one row per
+        (session, provider, workspace, via, day). ``day_tz`` is the zone the
+        table is bucketed in (default: the recorded one, else the configured
+        zone — ``_active_days_zone``); one ``local_day`` per event, no extra
+        events.db read.
+
         ``events.db`` is opened ``mode=ro``; this never writes to it.
         """
         uri = f"file:{events_db_path}?mode=ro"
@@ -2449,14 +2558,26 @@ class WorkspaceStore:
         full_pass = lo == 0
         if replace_activity and not full_pass:
             raise ValueError("replace_activity needs a full pass (lo == 0)")
+        if day_tz is CONFIGURED:
+            day_tz, day_zone = self._active_days_zone()
+        else:
+            day_zone = zone_key(day_tz)
         # Per-edge clocks (#42/#56), folded in Python: timestamp formats are
         # mixed, so a SQL MIN()/MAX() over the raw strings would be wrong.
-        # (session, provider, file_path) -> [cwd, event_ts, activity_ts]
+        # (session, provider, file_path) -> [cwd, event_ts, activity_ts, {day}]
         file_edges: dict[tuple[str, str, str], list] = {}
         # key -> does ANY event of this edge come from a NON-shell tool?
         edge_evidence: dict[tuple[str, str, str], bool] = {}
-        # (session, provider, raw cwd) -> [event_ts, activity_ts]
+        # (session, provider, raw cwd) -> [event_ts, activity_ts, {day}]
         cwd_rows: dict[tuple[str, str, str], list] = {}
+        # Local day of one event's #53 clock (#114): one tz conversion per
+        # event (~1 µs), no extra read and no per-event cache (clocks are
+        # nearly all distinct, a cache would only grow).
+        def _local(dt: datetime | None) -> str | None:
+            if dt is None:
+                return None
+            local = dt.astimezone(day_tz) if day_tz is not None else dt.astimezone()
+            return local.date().isoformat()
         try:
             has_hist = "historical" in {
                 r[1] for r in src.execute("PRAGMA table_info(events)")
@@ -2478,13 +2599,16 @@ class WorkspaceStore:
                 ets = _event_ts(ts, created_at)
                 ats_dt = _edge_activity_dt(ts, created_at, historical)
                 ats = ats_dt.isoformat(timespec="microseconds") if ats_dt else None
+                day = _local(ats_dt)
                 edge_evidence[key] = True
                 cell = file_edges.get(key)
                 if cell is None:
-                    file_edges[key] = [cwd, ets, ats]
+                    cell = file_edges[key] = [cwd, ets, ats, set()]
                 else:
                     cell[1] = _min_ts(cell[1], ets)
                     cell[2] = _max_ts(cell[2], ats)
+                if day:
+                    cell[3].add(day)
             skipped = src.execute(
                 f"""SELECT COUNT(*) FROM (
                         SELECT DISTINCT session_id, provider, file_path FROM events
@@ -2504,12 +2628,15 @@ class WorkspaceStore:
                 ets = _event_ts(ts, created_at)
                 ats_dt = _edge_activity_dt(ts, created_at, historical)
                 ats = ats_dt.isoformat(timespec="microseconds") if ats_dt else None
+                day = _local(ats_dt)
                 cell = cwd_rows.get(key)
                 if cell is None:
-                    cwd_rows[key] = [ets, ats]
+                    cell = cwd_rows[key] = [ets, ats, set()]
                 else:
                     cell[0] = _min_ts(cell[0], ets)
                     cell[1] = _max_ts(cell[1], ats)
+                if day:
+                    cell[2].add(day)
         finally:
             src.close()
 
@@ -2527,16 +2654,25 @@ class WorkspaceStore:
         # first row's cwd per edge changes nothing.
         dir_cache: dict[str, WorkspaceIdentity] = {}
         resolved: list[tuple[str, str, str, WorkspaceIdentity, str | None,
-                             str | None]] = []
-        for (session_id, provider, file_path), (cwd, ets, ats) in file_edges.items():
+                             str | None, set[str]]] = []
+        for (session_id, provider, file_path), (cwd, ets, ats, edays) in file_edges.items():
             container = _containing_dir(file_path, cwd)
             ident = dir_cache.get(container)
             if ident is None:
                 ident = resolve_dir(container)
                 dir_cache[container] = ident
-            resolved.append((session_id, provider, file_path, ident, ets, ats))
+            resolved.append((session_id, provider, file_path, ident, ets, ats,
+                             edays))
 
         now = _now()
+        if file_edges or cwd_rows:
+            with self._lock:
+                # First write records the zone the days are bucketed in (#114).
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO rollup_meta (key, value) VALUES (?, ?)",
+                    (_ACTIVE_DAYS_ZONE_KEY, day_zone),
+                )
+                self._conn.commit()
         attributed = 0
         for i in range(0, len(resolved), self._ATTRIBUTION_CHUNK):
             chunk = resolved[i:i + self._ATTRIBUTION_CHUNK]
@@ -2548,13 +2684,20 @@ class WorkspaceStore:
                                WHERE session_id = ? AND provider = ? AND via = 'cwd'""",
                             (session_id, provider),
                         )
-                    for session_id, provider, file_path, ident, ets, ats in chunk:
+                        self._conn.execute(
+                            """DELETE FROM edge_active_days
+                               WHERE session_id = ? AND provider = ? AND via = 'cwd'""",
+                            (session_id, provider),
+                        )
+                    for session_id, provider, file_path, ident, ets, ats, edays in chunk:
                         wid = self._upsert_workspace_locked(ident, now)
                         self._record_attribution_locked(
                             session_id, provider, file_path, wid, ident.kind, now,
                             event_ts=ets, activity_ts=ats,
                             replace_activity=replace_activity,
                         )
+                        self._record_active_days_locked(
+                            session_id, provider, wid, "file", edays)
                     self._conn.commit()
                 except BaseException:
                     # Never leave a half-written chunk open on the shared
@@ -2624,7 +2767,8 @@ class WorkspaceStore:
         home = os.path.normpath(os.path.expanduser("~"))
         # (session, provider) -> {normalized cwd: [event_ts, activity_ts]}
         wanted: dict[tuple[str, str], dict[str, list]] = {}
-        for (session_id, provider, cwd), (ets, ats) in cwd_rows.items():
+        for (session_id, provider, cwd), (ets, ats, *edays) in cwd_rows.items():
+            edays = edays[0] if edays else set()
             key = (session_id, provider)
             if key in file_sessions or not self._cwd_qualifies(cwd, home):
                 continue
@@ -2633,8 +2777,9 @@ class WorkspaceStore:
             if norm in cwds:
                 cwds[norm][0] = _min_ts(cwds[norm][0], ets)
                 cwds[norm][1] = _max_ts(cwds[norm][1], ats)
+                cwds[norm][2] |= edays
             else:
-                cwds[norm] = [ets, ats]
+                cwds[norm] = [ets, ats, set(edays)]
         if not wanted:
             return 0
 
@@ -2648,14 +2793,15 @@ class WorkspaceStore:
                 ).fetchone():
                     del wanted[key]
 
-        edges: list[tuple[str, str, str, WorkspaceIdentity, str | None, str | None]] = []
+        edges: list[tuple[str, str, str, WorkspaceIdentity, str | None, str | None,
+                          set[str]]] = []
         for (session_id, provider), cwds in wanted.items():
-            for cwd, (ets, ats) in cwds.items():
+            for cwd, (ets, ats, edays) in cwds.items():
                 ident = dir_cache.get(cwd)
                 if ident is None:
                     ident = resolve_dir(cwd)  # the directory itself, not its parent
                     dir_cache[cwd] = ident
-                edges.append((session_id, provider, cwd, ident, ets, ats))
+                edges.append((session_id, provider, cwd, ident, ets, ats, edays))
 
         edge_sql = (self._CWD_EDGE_SQL_REPLACE if replace_activity
                     else self._CWD_EDGE_SQL)
@@ -2664,7 +2810,7 @@ class WorkspaceStore:
             chunk = edges[i:i + self._ATTRIBUTION_CHUNK]
             with self._lock:
                 try:
-                    for session_id, provider, cwd, ident, ets, ats in chunk:
+                    for session_id, provider, cwd, ident, ets, ats, edays in chunk:
                         # Re-check in-transaction before minting a workspace
                         # row, so a session that just gained a file edge
                         # leaves no orphan workspace behind.
@@ -2682,6 +2828,9 @@ class WorkspaceStore:
                              ats, session_id, provider),
                         )
                         written += cur.rowcount
+                        if cur.rowcount:
+                            self._record_active_days_locked(
+                                session_id, provider, wid, "cwd", edays)
                     self._conn.commit()
                 except BaseException:
                     self._conn.rollback()
@@ -2724,8 +2873,11 @@ class WorkspaceStore:
             return empty
 
         hi = self._read_max_event_id(events_db_path)  # FIRST — bounds the pass
-        if self._activity_rederive_ready(events_db_path):
-            rederived = self._rederive_activity(events_db_path, hi)
+        # Both one-time re-derivations (#101 edge clocks, #114 days worked)
+        # are the same full pass: whichever is due runs it, with one backup.
+        replace = self._activity_rederive_ready(events_db_path)
+        if replace or self._active_days_rederive_due():
+            rederived = self._rederive_full(events_db_path, hi, replace)
             if rederived is not None:
                 return rederived
         reset = False
@@ -2751,6 +2903,111 @@ class WorkspaceStore:
             "reset": reset,
         }
 
+    def _active_days_rederive_due(self) -> bool:
+        """True when ``edge_active_days`` must be (re-)derived (#114): its first
+        derivation is pending, or ``[user] timezone`` changed since its days
+        were bucketed."""
+        with self._lock:
+            rows = dict(self._conn.execute(
+                "SELECT key, value FROM rollup_meta WHERE key IN (?, ?)",
+                (_ACTIVE_DAYS_REDERIVE_KEY, _ACTIVE_DAYS_ZONE_KEY),
+            ).fetchall())
+        if rows.get(_ACTIVE_DAYS_REDERIVE_KEY) == "pending":
+            return True
+        stored = rows.get(_ACTIVE_DAYS_ZONE_KEY)
+        return stored is not None and stored != zone_key(user_timezone())
+
+    def _rederive_full(
+        self, events_db_path: str | Path, hi: int, replace_activity: bool,
+    ) -> dict[str, Any] | None:
+        """Run the pending one-time re-derivations: one full read-only pass
+        over ``(0, hi]``, then ``cursor = hi`` and the markers cleared.
+
+        * #114: ``edge_active_days`` is rebuilt in the CURRENT zone (its first
+          derivation, or a changed ``[user] timezone``).
+        * #101 (``replace_activity``): each seen edge's ``activity_ts`` is
+          REPLACED by the clock folded from all its events.
+
+        The days are always rebuilt — a #101 re-derivation moves clocks, and
+        the days are bucketed on the same clocks. Backup of workspace.db first;
+        if it fails nothing is touched and ``None`` is returned: the caller
+        runs its normal pass (days keep the recorded zone) and this is retried
+        next cycle. Otherwise the old days are cleared and the #114 marker set
+        to ``pending`` in ONE transaction, so a pass that fails midway is re-run
+        from scratch next cycle (resumable; every insert is idempotent). Until
+        it completes, readers fall back to ``activity_ts`` for edges with no day
+        rows. An edge none of whose events is still in events.db keeps its
+        clock and gets no days (readers then date it by ``activity_ts``).
+        """
+        tz = user_timezone()
+        zone = zone_key(tz)
+        with self._lock:
+            try:
+                backup = backup_workspace_db(self._conn, self.db_path)
+            except (OSError, sqlite3.Error):
+                _log.warning("atribución: no pude respaldar workspace.db; no "
+                             "recalculo relojes ni días activos de las aristas "
+                             "en esta pasada (#101, #114)", exc_info=True)
+                return None
+            before = (dict(self._conn.execute(
+                "SELECT id, activity_ts FROM path_attributions").fetchall())
+                if replace_activity else {})
+            try:
+                self._conn.execute("DELETE FROM edge_active_days")
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO rollup_meta (key, value)"
+                    " VALUES (?, 'pending')", (_ACTIVE_DAYS_REDERIVE_KEY,))
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO rollup_meta (key, value)"
+                    " VALUES (?, ?)", (_ACTIVE_DAYS_ZONE_KEY, zone))
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        _log.info("atribución: respaldo de workspace.db en %s antes de "
+                  "recalcular %s de las aristas (zona %r)", backup,
+                  "relojes y días activos (#101, #114)" if replace_activity
+                  else "los días activos (#114)", zone)
+        result = self._attribute_event_range(events_db_path, 0, hi,
+                                             replace_activity=replace_activity,
+                                             day_tz=tz)
+        self.set_attribution_cursor(hi)  # only reached if every commit succeeded
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM rollup_meta WHERE key = ?", (_ACTIVE_DAYS_REDERIVE_KEY,))
+            if replace_activity:
+                self._conn.execute(
+                    "DELETE FROM rollup_meta WHERE key = ?", (_ACTIVITY_REDERIVE_KEY,))
+            self._conn.commit()
+            after = (self._conn.execute(
+                "SELECT id, activity_ts FROM path_attributions").fetchall()
+                if replace_activity else [])
+            edges, day_rows = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(n), 0) FROM ("
+                " SELECT COUNT(*) AS n FROM edge_active_days"
+                " GROUP BY session_id, provider, workspace_id, via)").fetchone()
+        out: dict[str, Any] = {
+            "attributed": result["attributed"],
+            "cwd_attributed": result["cwd_attributed"],
+            "directories": result["directories"],
+            "skipped_non_absolute": result["skipped_non_absolute"],
+            "shell_edges_removed": result["shell_edges_removed"],
+            "cursor_from": 0,
+            "cursor_to": hi,
+            "reset": False,
+            "active_days_edges": edges,
+            "active_days": day_rows,
+        }
+        if replace_activity:
+            redated = sum(1 for eid, ats in after
+                          if eid in before and before[eid] != ats)
+            _log.info("atribución: %d aristas cambiaron de día de actividad "
+                      "(#101)", redated)
+            out["rederived"] = redated
+        _log.info("atribución: días activos recalculados — %d aristas, %d días "
+                  "(zona %r) (#114)", edges, day_rows, zone)
+        return out
+
     def _activity_rederive_ready(self, events_db_path: str | Path) -> bool:
         """True when the #101 re-derivation is pending AND events.db already
         recorded the migration it follows (read-only; any read error → wait)."""
@@ -2775,53 +3032,6 @@ class WorkspaceStore:
         except sqlite3.Error:
             return False  # no schema_migrations yet: events.db not migrated
         return done is not None
-
-    def _rederive_activity(
-        self, events_db_path: str | Path, hi: int
-    ) -> dict[str, Any] | None:
-        """Run the pending #101 re-derivation: one full pass over ``(0, hi]``
-        that REPLACES each edge's ``activity_ts``, then ``cursor = hi`` and the
-        marker cleared. Takes a backup of workspace.db first; if the backup
-        fails nothing is rewritten, the marker stays and ``None`` is returned
-        so the caller runs its normal incremental pass (retried next cycle).
-        An edge none of whose events is still in events.db keeps its clock.
-        """
-        with self._lock:
-            try:
-                backup = backup_workspace_db(self._conn, self.db_path)
-            except (OSError, sqlite3.Error):
-                _log.warning("atribución: no pude respaldar workspace.db; no "
-                             "recalculo los relojes de las aristas en esta "
-                             "pasada (#101)", exc_info=True)
-                return None
-            before = dict(self._conn.execute(
-                "SELECT id, activity_ts FROM path_attributions").fetchall())
-        _log.info("atribución: respaldo de workspace.db en %s antes de "
-                  "recalcular los relojes de las aristas (#101)", backup)
-        result = self._attribute_event_range(events_db_path, 0, hi,
-                                             replace_activity=True)
-        self.set_attribution_cursor(hi)  # only reached if every commit succeeded
-        with self._lock:
-            after = self._conn.execute(
-                "SELECT id, activity_ts FROM path_attributions").fetchall()
-            self._conn.execute(
-                "DELETE FROM rollup_meta WHERE key = ?", (_ACTIVITY_REDERIVE_KEY,))
-            self._conn.commit()
-        redated = sum(1 for eid, ats in after
-                      if eid in before and before[eid] != ats)
-        _log.info("atribución: %d aristas cambiaron de día de actividad (#101)",
-                  redated)
-        return {
-            "attributed": result["attributed"],
-            "cwd_attributed": result["cwd_attributed"],
-            "directories": result["directories"],
-            "skipped_non_absolute": result["skipped_non_absolute"],
-            "shell_edges_removed": result["shell_edges_removed"],
-            "cursor_from": 0,
-            "cursor_to": hi,
-            "reset": False,
-            "rederived": redated,
-        }
 
     # --- Read surface ---
 

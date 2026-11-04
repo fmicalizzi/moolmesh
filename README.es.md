@@ -169,6 +169,16 @@ las 01:00 UTC aparece en el digest del día anterior a UTC-6.
 `closed_issues_window` (mergeado / cerrado en un día local de la ventana) junto a
 los totales históricos `merged_prs` y `closed_issues`.
 
+**Días trabajados.** La tira de producción cuenta una sesión en cada día local en
+que tuvo eventos en un proyecto, no sólo en el último: una sesión retomada
+durante tres días enciende tres días. Cada día cuenta sesiones distintas;
+`sessions` cuenta sesiones distintas en la ventana (nunca la suma de los días) y
+`active_days` los días distintos. Los días viven en `workspace.db`
+(`edge_active_days`). La primera pasada del daemon después de actualizar los
+llena desde `events.db`, tras un respaldo de `workspace.db`; cambiar
+`[user] timezone` los recalcula igual. Una sesión cuyos eventos ya no están en
+`events.db` se fecha por su último evento, como antes.
+
 ---
 
 ## Instalación en producción

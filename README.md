@@ -189,6 +189,16 @@ UTC is in the previous day's digest at UTC-6. `get_portfolio_production(days)`
 returns `merged_prs_window` and `closed_issues_window` (merged / closed on a
 local day of the window) next to the all-time `merged_prs` and `closed_issues`.
 
+**Days worked.** The production strip counts a session on every local day it
+had events on a project, not only on its last one: a session resumed over three
+days lights three days. Each day counts distinct sessions; `sessions` counts
+distinct sessions in the window (never the sum of the days) and `active_days`
+the distinct days. The days live in `workspace.db` (`edge_active_days`). The
+first daemon pass after the upgrade fills them from `events.db`, after a backup
+of `workspace.db`; changing `[user] timezone` re-derives them the same way. A
+session whose events are no longer in `events.db` is dated by its last event,
+as before.
+
 ---
 
 ## Updating

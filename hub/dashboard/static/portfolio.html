@@ -652,8 +652,8 @@ function renderProduction(data, daysN){
   const header = `<div class="prod-hrow">
     <span></span>
     <span>proyecto</span>
-    <span class="h-num" title="Sesiones en la ventana (esfuerzo, no duración)">ses</span>
-    <span class="h-num" title="Días activos en la ventana">d</span>
+    <span class="h-num" title="Sesiones distintas en la ventana (esfuerzo, no duración); una sesión de varios días cuenta una vez">ses</span>
+    <span class="h-num" title="Días activos en la ventana: cada día local en que el proyecto vio alguna sesión">d</span>
     <span title="Entrega GitHub — PR mergeados / issues cerrados / abiertos. All-time donde el historial está completo; donde no, 'desde &lt;fecha del primer commit ingerido&gt;' (repo sync --all completa)">entrega</span>
     <span title="Sesiones por día en la ventana; color = proveedor dominante, intensidad = volumen">producción · ${daysN}d</span>
   </div>`;
