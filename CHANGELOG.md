@@ -6,6 +6,58 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.28.0] — 2026-11-04
+
+One definition of the **local day** for digests, the workspace rollup and the
+portfolio, plus the delivered PRs and closed issues of a time window (#81).
+OpenCode timestamps no longer depend on the machine's current UTC offset (#79).
+No new dependencies. Two schema migrations, each preceded by a backup.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- **Backups taken automatically** in `~/.moolmesh/backups/`:
+  - events.db migration 6 rewrites OpenCode session times stored as ms-epoch
+    into ISO; `events-<date>.db` is copied first (only if there is something to
+    rewrite).
+  - The first rollup pass moves workspace days from UTC to the local day;
+    `workspace-<date>.db` is copied first. Older filesystem history that only
+    lives in the rollup keeps its original day.
+- **OpenCode users:** event timestamps are now UTC, which changes every stored
+  OpenCode fingerprint once. Run `mool backfill --reparse opencode` (a simulation
+  that writes nothing), then `mool backfill --reparse opencode --yes` (events.db
+  is backed up first). Until then OpenCode session times may mix offsets.
+- Optional: set `[user] timezone = "America/New_York"` (any IANA name) in
+  `~/.moolmesh/config.toml`; empty means the system zone. Digests already cached
+  for a day keep their old numbers.
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Added
+- **`[user] timezone`** and one shared local-day definition (#81): daily and weekly
+  digests, `/api/digest`, the workspace rollup and the portfolio production strip
+  bucket on the same day, using the offset valid at each instant (DST-aware). A
+  PR merged at 01:00 UTC lands on the previous day at UTC-6. Without tz data
+  (some Windows installs) it falls back to the system zone.
+- **Windowed outcome** (#81): `get_portfolio_production(days)` adds
+  `merged_prs_window` and `closed_issues_window` next to the all-time totals. A
+  closed issue with no closing date counts in the total, never in a window.
+
+### Changed
+- The workspace rollup buckets on the local day instead of the UTC day
+  (workspace.db migration 4 records the zone; the move happens once, after a
+  backup, and again only if `[user] timezone` changes).
+
+### Fixed
+- **OpenCode fingerprints changed with DST or a zone change** (#79): event
+  timestamps are fixed-width UTC, so a reparse across a DST boundary is a no-op.
+- **OpenCode session times stored as ms-epoch** (#79): `first_event_at` /
+  `last_event_at` are ISO, so sorting and windowing sessions works for OpenCode;
+  existing values are rewritten by events.db migration 6 after a backup.
+
 ## [1.27.2] — 2026-11-04
 
 The daemon now comes back on its own after a reboot, and MoolMesh says when its

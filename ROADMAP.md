@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.27.2
+Last updated: November 2026 — v1.28.0
 
 ---
 
@@ -224,6 +224,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.27.1** ([#75](https://github.com/fmicalizzi/moolmesh/issues/75), [#78](https://github.com/fmicalizzi/moolmesh/issues/78)): OpenCode no longer loses streamed text. The cursor waits for parts that are still streaming and no longer skips everything past 500 new parts per poll; `mool backfill --reparse opencode` recovers the replies, reasoning and tool details stored without text (and sessions that never arrived). OpenCode file tools now give full `file_path` values. On Windows, git/gh subprocesses of the daemon no longer flash console windows.
 
 - **v1.27.2** ([#76](https://github.com/fmicalizzi/moolmesh/issues/76)): the daemon survives a reboot. `mool daemon install` registers it with launchd, systemd `--user` or Task Scheduler (opt-in, never overwrites a hand-written file, always in the foreground); start/stop/restart then go through the supervisor. MCP portfolio tools, `get_server_info`, every dashboard page and `mool doctor` flag stale data measured from the last git and GitHub API syncs (`[daemon] stale_after_minutes`). `daemon.log` is bounded at 10 MB.
+
+- **v1.28.0** ([#81](https://github.com/fmicalizzi/moolmesh/issues/81), [#79](https://github.com/fmicalizzi/moolmesh/issues/79)): one definition of the local day (`[user] timezone`, DST-aware) shared by digests, the workspace rollup and the portfolio; `get_portfolio_production` adds `merged_prs_window` / `closed_issues_window`. OpenCode timestamps are UTC (stable fingerprints) and its session times ISO.
 
 ---
 
