@@ -554,3 +554,73 @@ class TestRollupLocalDay:
         s = WorkspaceStore(tmp_path / "workspace.db")
         assert self._zone(s) is None
         s.close()
+
+    # ── review fix: never rewrite the rollup without a backup ──
+
+    def _backups(self, tmp_path):
+        d = tmp_path / "backups"
+        return sorted(d.glob("workspace-*.db")) if d.exists() else []
+
+    def test_transition_takes_backup_with_previous_values(self, tmp_path, system_tz,
+                                                          config_tz):
+        system_tz("UTC")
+        config_tz("UTC")
+        s, key, _wid, gh = self._fixture(tmp_path)
+        s.build_rollup(gh)
+        before = self._rollup(s)
+        assert self._backups(tmp_path) == []
+
+        config_tz("America/Costa_Rica")
+        s.build_rollup(gh)
+        backups = self._backups(tmp_path)
+        assert len(backups) == 1
+        c = sqlite3.connect(backups[0])
+        try:
+            copied = {(r[0], r[1]): (r[2], r[3], r[4]) for r in c.execute(
+                """SELECT w.workspace_key, r.day, r.session_touches, r.fs_touches,
+                          r.git_touches
+                   FROM workspace_rollup r JOIN workspaces w ON w.id = r.workspace_id""")}
+            zone = c.execute(
+                "SELECT value FROM rollup_meta WHERE key = 'day_zone'").fetchone()[0]
+        finally:
+            c.close()
+        assert copied == before and zone == "UTC"
+        assert self._rollup(s) == {(key, "2026-05-04"): (1, 1, 1)}
+        s.build_rollup(gh)                      # moved: no second backup
+        assert len(self._backups(tmp_path)) == 1
+        s.close()
+
+    def test_backup_failure_leaves_rollup_and_zone_unchanged(self, tmp_path, system_tz,
+                                                             config_tz, monkeypatch):
+        import hub.cache.workspace_store as ws
+        system_tz("UTC")
+        config_tz("UTC")
+        s, key, _wid, gh = self._fixture(tmp_path)
+        s.build_rollup(gh)
+        before = self._rollup(s)
+
+        real_backup = ws.backup_workspace_db
+
+        def _fail(*a, **kw):
+            raise OSError("disk full")
+        monkeypatch.setattr(ws, "backup_workspace_db", _fail)
+        config_tz("America/Costa_Rica")
+        s.build_rollup(gh)
+        assert self._rollup(s) == before
+        assert self._zone(s) == "UTC"
+
+        monkeypatch.setattr(ws, "backup_workspace_db", real_backup)
+        s.build_rollup(gh)                      # retried on the next pass
+        assert self._rollup(s) == {(key, "2026-05-04"): (1, 1, 1)}
+        assert self._zone(s) == "America/Costa_Rica"
+        assert len(self._backups(tmp_path)) == 1
+        s.close()
+
+    def test_no_backup_without_transition(self, tmp_path, system_tz, config_tz):
+        system_tz("UTC")
+        config_tz("America/Costa_Rica")
+        s, _key, _wid, gh = self._fixture(tmp_path)
+        s.build_rollup(gh)                      # fresh: no previous zone
+        s.build_rollup(gh)                      # same zone
+        assert self._backups(tmp_path) == []
+        s.close()

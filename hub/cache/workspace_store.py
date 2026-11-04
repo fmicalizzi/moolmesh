@@ -356,6 +356,31 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def backup_workspace_db(conn: sqlite3.Connection, db_path: Path,
+                        backup_dir: Path | None = None) -> Path:
+    """Consistent copy of workspace.db via sqlite3's online backup API.
+
+    Same pattern as ``hub.backfill.backup_events_db``: taken before any pass
+    that rewrites existing rows (the rollup zone transition, #81). Copies from
+    the store's own connection, so it sees exactly what the pass will rewrite.
+    """
+    import time as _time
+    backup_dir = backup_dir or Path(db_path).parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _time.strftime("%Y%m%d-%H%M%S")
+    dest = backup_dir / f"workspace-{stamp}.db"
+    n = 1
+    while dest.exists():
+        dest = backup_dir / f"workspace-{stamp}-{n}.db"
+        n += 1
+    dst = sqlite3.connect(str(dest))
+    try:
+        conn.backup(dst)
+    finally:
+        dst.close()
+    return dest
+
+
 def _parse_ts(s: str | None) -> datetime | None:
     """Parse a timestamp from ANY of the three real clocks into aware UTC.
 
@@ -1005,7 +1030,9 @@ class WorkspaceStore:
         The zone the rows were built in is kept in ``rollup_meta``; when it
         differs from the current one (the v1.28.0 upgrade from UTC days, or a
         changed ``[user] timezone``) the shifted signals are moved once — see
-        ``_rollup_zone_transition_locked``.
+        ``_rollup_zone_transition_locked`` — after a backup of workspace.db
+        (``~/.moolmesh/backups/workspace-<date>.db``). If the backup fails the
+        pass builds on the old zone and the move is retried next pass.
 
         Keyed ``INSERT OR REPLACE`` per ``(workspace_id, day)`` — NEVER a
         wipe-and-rebuild: ``path_touches`` keeps only the latest row per path, so
@@ -1051,11 +1078,42 @@ class WorkspaceStore:
         with self._lock:
             conn = self._conn
             prev_zone = self._rollup_zone_locked()
+            transition = prev_zone is not None and prev_zone != zone
+            if transition and conn.execute(
+                    "SELECT 1 FROM workspace_rollup LIMIT 1").fetchone():
+                # The transition rewrites existing rows: never without a
+                # consistent copy first. No copy → build on the OLD zone this
+                # pass (rows and marker unchanged) and retry next pass.
+                try:
+                    backup = backup_workspace_db(conn, self.db_path)
+                    _log.info("rollup: respaldo de workspace.db en %s antes de "
+                              "mover los días de la zona %r a %r",
+                              backup, prev_zone, zone)
+                except (OSError, sqlite3.Error):
+                    _log.warning("rollup: no pude respaldar workspace.db; no muevo "
+                                 "los días de la zona %r a %r en esta pasada",
+                                 prev_zone, zone, exc_info=True)
+                    tz = resolve_timezone(prev_zone)
+                    zone = prev_zone
+                    transition = False
+                    git_rows = self._read_git_commits(github_db_path, tz)
             old_git_rows: list = []
-            if prev_zone is not None and prev_zone != zone:
+            if transition:
                 # Read outside the transaction below; github.db is read-only.
                 old_git_rows = self._read_git_commits(
                     github_db_path, resolve_timezone(prev_zone))
+
+            # One local_day per distinct timestamp string (large DBs repeat
+            # first_seen / last_seen values across rows).
+            day_cache: dict[str, str] = {}
+
+            def _day(ts: str | None) -> str:
+                if not ts:
+                    return ""
+                d = day_cache.get(ts)
+                if d is None:
+                    d = day_cache[ts] = local_day(ts, tz) or ""
+                return d
 
             # 1. Session signal — one edge per (session, provider, file), or
             #    per (session, provider, cwd) for cwd-fallback edges (#40):
@@ -1067,17 +1125,17 @@ class WorkspaceStore:
                 """SELECT workspace_id, COALESCE(event_ts, first_seen)
                    FROM path_attributions"""
             ).fetchall():
-                _bump(wid, local_day(ts, tz) or "", "session", 1, ts)
+                _bump(wid, _day(ts), "session", 1, ts)
 
             # 2. Filesystem signal — the ISO last_seen (not the mtime epoch).
             fs_rows = conn.execute(
                 "SELECT workspace_id, last_seen FROM path_touches"
             ).fetchall()
             for wid, ts in fs_rows:
-                _bump(wid, local_day(ts, tz) or "", "fs", 1, ts)
+                _bump(wid, _day(ts), "fs", 1, ts)
 
             try:
-                if prev_zone is not None and prev_zone != zone:
+                if transition:
                     self._rollup_zone_transition_locked(
                         resolve_timezone(prev_zone), fs_rows, old_git_rows,
                         git_idents, now)
@@ -1088,7 +1146,7 @@ class WorkspaceStore:
                 #    the lock. github.db is opened read-only; absent or
                 #    unreadable → git simply contributes nothing.
                 for repo_path, day, n, last in git_rows:
-                    ident = git_idents[repo_path]
+                    ident = git_idents.get(repo_path) or resolve_dir(repo_path)
                     existed = conn.execute(
                         "SELECT 1 FROM workspaces WHERE workspace_key = ?", (ident.key,)
                     ).fetchone()
