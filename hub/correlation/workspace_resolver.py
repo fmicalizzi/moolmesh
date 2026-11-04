@@ -31,6 +31,7 @@ using ``configparser`` (deliberate deviation from the issue's suggestion).
 from __future__ import annotations
 
 import hashlib
+import ntpath
 import os
 import re
 from dataclasses import dataclass
@@ -216,10 +217,39 @@ def _containing_dir(file_path: str, cwd: str | None = None) -> str:
     Pure string math — never touches disk, so it works for vanished paths.
     """
     p = file_path
-    if not os.path.isabs(p) and cwd:
-        p = os.path.join(cwd, p)
-    p = os.path.normpath(p)
-    return os.path.dirname(p)
+    if not is_portable_abs(p) and cwd:
+        p = path_module(cwd).join(cwd, p)
+    mod = path_module(p)
+    return mod.dirname(mod.normpath(p))
+
+
+# Drive-letter (``C:\\`` / ``C:/``) or UNC (``\\\\host``) — a Windows absolute
+# path, recognised by its own spelling rather than the host OS (#47), so a
+# Windows rollout attributes the same on every machine.
+_WIN_ABS_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def is_windows_abs(p: str) -> bool:
+    """True for a drive-letter or UNC absolute path."""
+    return bool(p) and bool(_WIN_ABS_RE.match(p))
+
+
+def is_portable_abs(p: str) -> bool:
+    """Absolute in either spelling: POSIX ``/...`` or Windows ``C:\\...``/UNC."""
+    return bool(p) and (p.startswith("/") or is_windows_abs(p))
+
+
+def path_module(p: str):
+    """``ntpath`` for Windows-spelled paths, the host's ``os.path`` otherwise."""
+    return ntpath if is_windows_abs(p) else os.path
+
+
+# SQL twin of :func:`is_portable_abs` for the attribution pass (#47). ``GLOB``
+# has no escape character, so ``[\\/]`` is a literal backslash-or-slash class.
+SQL_PORTABLE_ABS = (
+    "({col} LIKE '/%' OR {col} GLOB '[A-Za-z]:[\\/]*'"
+    " OR {col} GLOB '\\\\*')"
+)
 
 
 def resolve_dir(container: str) -> WorkspaceIdentity:
@@ -228,7 +258,11 @@ def resolve_dir(container: str) -> WorkspaceIdentity:
     Split from :func:`resolve_path` so a batch pass can memoize per directory
     (many files share a directory; many directories share a git root).
     """
-    found = _find_git_marker(Path(container))
+    # A foreign-spelled path (``C:\\...`` on POSIX) is never walked on disk:
+    # ``Path`` would read it as RELATIVE and probe the process's own cwd for a
+    # ``.git``. It resolves by its string (``path_hash``) instead (#47).
+    found = (_find_git_marker(Path(container))
+             if os.path.isabs(container) else None)
     if found is not None:
         owner_dir, marker = found
         config = _locate_git_config(marker)

@@ -29,7 +29,10 @@ from hub.localtime import CONFIGURED, local_day, resolve_timezone, user_timezone
 from hub.log import get as get_logger
 from hub.models.base import SHELL_TOOLS
 from hub.correlation.workspace_resolver import (
+    SQL_PORTABLE_ABS,
     WorkspaceIdentity,
+    is_portable_abs,
+    path_module,
     resolve_dir,
     _containing_dir,
 )
@@ -2430,12 +2433,15 @@ class WorkspaceStore:
     _ATTRIBUTION_CHUNK = 500
 
     # Only absolute paths qualify: non-absolute ``events.file_path`` values are
-    # overwhelmingly Bash command strings, not paths (issue #20).
+    # overwhelmingly Bash command strings, not paths (issue #20). "Absolute" is
+    # portable (#47): POSIX ``/...`` plus Windows drive-letter/UNC spellings,
+    # which the Codex adapter already normalizes with ``ntpath``.
+    _ABS_FILE_PATH = SQL_PORTABLE_ABS.format(col="file_path")
     _ATTR_WHERE = (
-        "file_path LIKE '/%' AND session_id IS NOT NULL AND session_id != ''"
+        f"{_ABS_FILE_PATH} AND session_id IS NOT NULL AND session_id != ''"
     )
     _SKIPPED_WHERE = (
-        "file_path IS NOT NULL AND file_path != '' AND file_path NOT LIKE '/%'"
+        f"file_path IS NOT NULL AND file_path != '' AND NOT {_ABS_FILE_PATH}"
         " AND session_id IS NOT NULL AND session_id != ''"
     )
 
@@ -2493,14 +2499,15 @@ class WorkspaceStore:
     def _cwd_qualifies(cwd: str | None, home: str) -> bool:
         """An absolute cwd that is neither the filesystem root nor ``~``.
 
-        Uses the host's native ``os.path.isabs`` — the same notion
-        ``resolve_dir`` works with. Everything else (noise parents, harness
-        dirs) is left to the read-layer classification (#36).
+        "Absolute" is portable (#47): a Windows drive-letter/UNC cwd qualifies
+        on any host and is normalized with ``ntpath``. Everything else (noise
+        parents, harness dirs) is left to the read-layer classification (#36).
         """
-        if not cwd or not os.path.isabs(cwd):
+        if not cwd or not is_portable_abs(cwd):
             return False
-        norm = os.path.normpath(cwd)
-        return norm != home and os.path.dirname(norm) != norm
+        mod = path_module(cwd)
+        norm = mod.normpath(cwd)
+        return norm != home and mod.dirname(norm) != norm
 
     def _attribute_event_range(
         self, events_db_path: str | Path, lo: int, hi: int,
@@ -2772,7 +2779,7 @@ class WorkspaceStore:
             key = (session_id, provider)
             if key in file_sessions or not self._cwd_qualifies(cwd, home):
                 continue
-            norm = os.path.normpath(cwd)
+            norm = path_module(cwd).normpath(cwd)
             cwds = wanted.setdefault(key, {})
             if norm in cwds:
                 cwds[norm][0] = _min_ts(cwds[norm][0], ets)

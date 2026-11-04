@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from hub.models.codex import CodexEntry, CodexFunctionCall, CodexFunctionOutput
+from hub.correlation.workspace_resolver import is_portable_abs
 from hub.parsers.base import BaseParser, iter_complete_lines
 
 
@@ -140,7 +141,10 @@ class CodexParser(BaseParser):
                 })
         else:
             entry.session_id = ctx.get("session_id", "")
-            entry.cwd = ctx.get("cwd", "")
+            # Per-turn cwd (#47.1): the latest ``turn_context.cwd`` wins over
+            # the session's starting cwd, so relative patch paths and the cwd
+            # fallback follow a session that changed directory between turns.
+            entry.cwd = ctx.get("turn_cwd") or ctx.get("cwd", "")
             entry.cli_version = ctx.get("cli_version", "")
             entry.model_provider = ctx.get("model_provider", "")
             entry.source = ctx.get("source", "")
@@ -291,7 +295,19 @@ class CodexParser(BaseParser):
                 return self._parse_response_item(timestamp, payload, raw)
 
             case "turn_context":
-                # Skip turn_context — configuration metadata
+                # Configuration metadata — no entry of its own, but its ``cwd``
+                # is the per-turn base for the entries that follow (#47.1).
+                # Only an absolute cwd (POSIX or Windows spelling) is kept.
+                cwd = payload.get("cwd")
+                if ctx is not None and isinstance(cwd, str) and is_portable_abs(cwd):
+                    ctx["turn_cwd"] = cwd[:4096]
+                return None
+
+            case "world_state" | "token_usage_record":
+                # Recognized (#47.3) and ignored on purpose: neither carries a
+                # path or a cwd today, and per-call tokens already come from
+                # ``event_msg``/``token_count`` — parsing these would double
+                # count. Revisit if they start carrying paths or cwd.
                 return None
 
             case _:
