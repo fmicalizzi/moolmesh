@@ -14,6 +14,9 @@ _IS_WINDOWS = sys.platform.startswith("win")
 
 CONFIG_DIR = Path.home() / ".moolmesh"
 PID_FILE = CONFIG_DIR / "moolmesh.pid"
+# Names the PID a stop was requested for (#111): a live PID that does not
+# answer /health is shutting down when this names it, starting otherwise.
+STOPPING_FILE = CONFIG_DIR / "moolmesh.stopping"
 LOG_FILE = CONFIG_DIR / "daemon.log"
 
 # How long the parent waits for a just-launched daemon to answer /health (#55b).
@@ -98,6 +101,60 @@ def _clear_pidfile(pid: int) -> None:
         return
     if current == pid:
         PID_FILE.unlink(missing_ok=True)
+    clear_stop_requested(pid)
+
+
+def mark_stop_requested(pid: int) -> None:
+    """Record that ``pid`` was asked to stop (#111). Never raises.
+
+    Written by every stop path we drive (``stop_daemon``, the supervised
+    stop/restart) and by the daemon's own SIGTERM handler, which also covers
+    a stop sent by launchd/systemd directly. The marker only ever refines a
+    wait: a live PID it does not name is waited for as a start, which ends
+    the same way once the process exits.
+    """
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = STOPPING_FILE.with_name(f"{STOPPING_FILE.name}.{os.getpid()}.tmp")
+        tmp.write_text(str(pid), encoding="utf-8")
+        os.replace(tmp, STOPPING_FILE)
+    except OSError:
+        # Without the marker a later start waits this stop out as a start:
+        # longer, but it still ends once the process exits.
+        from hub.log import get
+        get("daemon").warning("could not write %s", STOPPING_FILE, exc_info=True)
+
+
+def clear_stop_requested(pid: int) -> None:
+    """Remove the stop marker if it names ``pid``; other content is kept."""
+    try:
+        current = int(STOPPING_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    if current == pid:
+        STOPPING_FILE.unlink(missing_ok=True)
+
+
+def stop_requested(pid: int) -> bool:
+    """Was a stop requested for the live process ``pid``? (#111)
+
+    A marker that names another PID, a dead PID, or holds garbage is stale
+    (a daemon killed hard, a crash): it is removed and never blocks a start.
+    """
+    try:
+        text = STOPPING_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        marked = int(text.strip())
+    except ValueError:
+        STOPPING_FILE.unlink(missing_ok=True)
+        return False
+    if marked == pid and _pid_alive(pid):
+        return True
+    if not _pid_alive(marked):
+        clear_stop_requested(marked)
+    return False
 
 
 def write_pid(pid: int) -> None:
@@ -106,6 +163,8 @@ def write_pid(pid: int) -> None:
     tmp = PID_FILE.with_name(f"{PID_FILE.name}.{os.getpid()}.tmp")
     tmp.write_text(str(pid), encoding="utf-8")
     os.replace(tmp, PID_FILE)
+    # A reused PID must not inherit a marker left by a daemon killed hard.
+    clear_stop_requested(pid)
 
 
 def _is_supervised() -> bool:
@@ -222,6 +281,44 @@ def wait_out_shutdown(pid: int, host: str, port: int,
             return "running"
         time.sleep(_POLL_INTERVAL)
     if not _pid_alive(pid):
+        _clear_pidfile(pid)
+        return "exited"
+    return "stuck"
+
+
+def wait_out_start(pid: int, host: str, port: int, *,
+                   timeout: float | None = None,
+                   slow_timeout: float | None = None,
+                   on_slow: Callable[[], None] | None = None) -> str:
+    """Wait for a live PID that is starting, not stopping (#111).
+
+    Uses ``wait_until_serving``: past ``timeout`` (default
+    ``DEFAULT_START_TIMEOUT``) a process still alive is a slow start (a
+    migration) and is waited for up to ``slow_timeout``. Returns
+    ``"running"`` once it answers ``/health``, ``"exited"`` if it dies,
+    ``"stopping"`` if a stop is requested meanwhile, ``"stuck"`` otherwise.
+    """
+    if timeout is None:
+        timeout = DEFAULT_START_TIMEOUT
+    stopping = False
+
+    def alive() -> bool:
+        nonlocal stopping
+        if not _pid_alive(pid):
+            return False
+        if stop_requested(pid):
+            stopping = True
+            return False
+        return True
+
+    outcome = wait_until_serving(lambda: daemon_serves(pid, host, port), alive,
+                                 timeout=timeout, slow_timeout=slow_timeout,
+                                 on_slow=on_slow)
+    if outcome == "ready":
+        return "running"
+    if outcome == "exited":
+        if stopping:
+            return "stopping"
         _clear_pidfile(pid)
         return "exited"
     return "stuck"
@@ -635,6 +732,8 @@ def _run_server(
     )
 
     def _handle_term(signum, frame):
+        # Covers a stop sent by launchd/systemd directly (#111).
+        mark_stop_requested(os.getpid())
         raise KeyboardInterrupt
 
     try:
@@ -664,6 +763,7 @@ def stop_daemon() -> bool:
     if pid is None:
         return False
 
+    mark_stop_requested(pid)
     if _IS_WINDOWS:
         subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
     else:

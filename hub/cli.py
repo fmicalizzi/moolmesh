@@ -154,7 +154,8 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     /health within the start window (#55, #55b). ``stop`` waits until the
     PID is gone and exits 1 if it is still shutting down after the timeout;
     ``start`` waits out a daemon that is shutting down instead of reporting
-    it as running (#96). ``status`` never blocks.
+    it as running (#96), and waits for one that is still starting (#111).
+    ``status`` never blocks.
     """
     from hub.daemon import (
         stop_daemon, daemon_status, read_pid, _pid_is_supervised,
@@ -229,23 +230,52 @@ def _print_still_shutting_down(pid: int, timeout: float) -> None:
 
 
 def _check_existing_for_start(host: str, port: int) -> int | None:
-    """What ``start`` does about a daemon PID that is already alive (#96).
+    """What ``start`` does about a daemon PID that is already alive (#96, #111).
 
-    None: nothing is running (or the old daemon finished shutting down while
-    we waited) — go on and start. 0: a daemon answers ``/health`` — "already
-    running". 1: the PID stayed alive without serving for ``STOP_TIMEOUT``.
-    A live PID whose ``/health`` is down is a daemon shutting down (or still
-    starting): we wait for it instead of answering "already running" for a
-    process that is about to exit and leave nothing behind.
+    None: nothing is running (or the old daemon exited while we waited) — go
+    on and start. 0: a daemon answers ``/health`` — "already running". 1: the
+    PID stayed alive without serving past the wait.
+
+    A live PID whose ``/health`` is down is either shutting down — a stop was
+    requested for it (``stop_requested``) — or still starting, e.g. running a
+    migration backup. A start is waited for with ``wait_until_serving`` and
+    answers "already running" once it serves; a shutdown is waited out up to
+    ``STOP_TIMEOUT`` so we never answer "already running" for a process that
+    is about to exit and leave nothing behind (#96).
     """
-    from hub.daemon import read_pid, daemon_serves, wait_out_shutdown, STOP_TIMEOUT
+    from hub.daemon import (
+        read_pid, daemon_serves, wait_out_shutdown, wait_out_start,
+        stop_requested, STOP_TIMEOUT, SLOW_START_NOTICE, START_SLOW_TIMEOUT,
+    )
     pid = read_pid()
     if not pid:
         return None
     if daemon_serves(pid, host, port):
         print(yellow(f"MoolMesh daemon already running (PID {pid})"))
         return 0
-    print(dim(f"  Daemon PID {pid} is alive but not answering on port {port}; "
+    if not stop_requested(pid):
+        print(dim(f"  Daemon PID {pid} is starting (not answering on port {port} "
+                  f"yet); waiting for it"))
+
+        def on_slow() -> None:
+            print(dim(f"  PID {pid} {SLOW_START_NOTICE} "
+                      f"(waiting up to {START_SLOW_TIMEOUT:g}s)"))
+
+        outcome = wait_out_start(pid, host, port, on_slow=on_slow)
+        if outcome == "running":
+            print(yellow(f"MoolMesh daemon already running (PID {pid})"))
+            return 0
+        if outcome == "exited":
+            return None
+        if outcome == "stuck":
+            print(red(f"Error: MoolMesh daemon (PID {pid}) is alive but did not "
+                      f"answer on port {port} within {START_SLOW_TIMEOUT:g}s"),
+                  file=sys.stderr)
+            print(dim(f"  Check again with: mool daemon status — or end it: kill {pid}"),
+                  file=sys.stderr)
+            return 1
+        # "stopping": a stop arrived while we waited — wait it out below.
+    print(dim(f"  Daemon PID {pid} is shutting down; "
               f"waiting for it to finish (up to {STOP_TIMEOUT:g}s)"))
     outcome = wait_out_shutdown(pid, host, port)
     if outcome == "exited":
@@ -289,7 +319,7 @@ def _delegate_to_supervisor(args: argparse.Namespace) -> int:
     from hub.daemon import (
         read_pid, stop_daemon, wait_for_pid_exit, wait_until_serving,
         _fetch_health, _probe_host, DaemonStopTimeout, STOP_TIMEOUT,
-        SLOW_START_NOTICE, START_SLOW_TIMEOUT,
+        SLOW_START_NOTICE, START_SLOW_TIMEOUT, mark_stop_requested,
     )
 
     state = autostart.managed_state()
@@ -305,6 +335,9 @@ def _delegate_to_supervisor(args: argparse.Namespace) -> int:
     # The PID the supervisor is about to stop: stop/restart wait for it to be
     # gone, since `launchctl kill` returns before the process exits (#96).
     old_pid = read_pid() if action in ("stop", "restart") else None
+    if old_pid:
+        # A start meanwhile must see a shutdown, not a slow start (#111).
+        mark_stop_requested(old_pid)
     ignored = [f for f in ("host", "port", "project", "providers")
                if getattr(args, f, None) not in (None, "localhost")]
     if action != "stop" and ignored:

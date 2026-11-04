@@ -185,6 +185,7 @@ class TestStartDuringShutdown:
 
     def test_unsupervised_start_gives_up_on_a_stuck_pid(self, home, monkeypatch, capsys):
         _fake(monkeypatch, alive_polls=None)
+        daemon.mark_stop_requested(OLD_PID)   # a shutdown, not a start (#111)
         monkeypatch.setattr(cli, "_launch_daemon",
                             lambda args, restarted: pytest.fail("must not start"))
         assert _run("start") == 1
