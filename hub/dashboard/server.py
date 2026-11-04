@@ -13,6 +13,35 @@ from typing import Any
 
 from hub.cache.event_store import EventStore
 
+# Stale-data banner injected before </body> on every dashboard page (#76).
+# Polls /api/freshness; shown only when the data is stale. UI text in Spanish.
+FRESHNESS_BANNER = rb"""<div id="mm-freshness-banner" role="alert" style="display:none;position:fixed;left:0;right:0;bottom:0;z-index:9999;padding:8px 16px;background:#7a1f1f;color:#fff;font:13px/1.4 system-ui,sans-serif;text-align:center"></div>
+<script>
+(function(){
+  var REASONS = {
+    git_sync_old: "el \u00faltimo sync de git es viejo",
+    github_sync_old: "el \u00faltimo sync con la API de GitHub es viejo",
+    watcher_degraded: "un watcher est\u00e1 ca\u00eddo o trabado",
+    daemon_not_running: "el daemon no corre"
+  };
+  function age(s){ if(s==null) return "?"; if(s>=86400) return Math.floor(s/86400)+"d";
+    if(s>=3600) return Math.floor(s/3600)+"h"; if(s>=60) return Math.floor(s/60)+"m"; return s+"s"; }
+  function check(){
+    fetch("/api/freshness").then(function(r){ return r.json(); }).then(function(f){
+      var el = document.getElementById("mm-freshness-banner");
+      if(!el) return;
+      if(!f.stale){ el.style.display = "none"; return; }
+      var why = (f.stale_reasons || []).map(function(r){ return REASONS[r] || r; }).join("; ");
+      var extra = f.repos_stale ? " \u00b7 repos sin sync reciente: " + f.repos_stale : "";
+      el.textContent = "\u26a0 Datos no actuales: " + why + " (dato m\u00e1s reciente: hace " + age(f.data_age_seconds) + ")" + extra;
+      el.style.display = "block";
+    }).catch(function(){});
+  }
+  check(); setInterval(check, 60000);
+})();
+</script>
+"""
+
 
 class DashboardStartError(RuntimeError):
     """The dashboard did not start; callers should exit non-zero (#55)."""
@@ -519,6 +548,27 @@ class DashboardServer:
                 degraded = True
         return snapshots, degraded
 
+    def freshness(self) -> dict:
+        """Data freshness for the dashboard banner (#76).
+
+        This process IS the daemon, so ``daemon_running`` is true; the banner
+        is for the other case — alive, but the sync is old or a watcher is
+        dead or stalled (as /health reports it).
+        """
+        from hub.cache.event_store import DEFAULT_DB_PATH as events_default
+        from hub.cache.git_store import GitStore
+        from hub.freshness import compute_freshness
+        events_db = getattr(self.event_store, "db_path", None) or events_default
+        git_store = getattr(self, "git_store", None)
+        github_db = getattr(git_store, "db_path", None) or GitStore.DEFAULT_DB_PATH
+        result = compute_freshness(events_db, github_db, running=True)
+        _watchers, degraded = self.watchers_health()
+        if degraded:
+            result["stale"] = True
+            result["stale_reasons"] = [*result["stale_reasons"], "watcher_degraded"]
+        result["watchers_degraded"] = degraded
+        return result
+
     def _shutdown(self, server) -> None:
         """Stop every background thread, then close the stores they write to."""
         self._supervisor_stop.set()
@@ -746,6 +796,8 @@ class DashboardServer:
                         self._serve_timeline_pending()
                     case _ if self.path.startswith("/api/timeline/commit-days"):
                         self._serve_timeline_commit_days()
+                    case "/api/freshness":
+                        self._serve_json(server_ref.freshness())
                     case "/health":
                         from hub import __version__
                         uptime = int(time.monotonic() - server_ref._start_time)
@@ -773,6 +825,9 @@ class DashboardServer:
                 if content_type == "text/html" and b"{{VERSION}}" in data:
                     from hub import __version__
                     data = data.replace(b"{{VERSION}}", __version__.encode())
+                if content_type == "text/html" and b"</body>" in data:
+                    # Stale-data banner on every page (#76).
+                    data = data.replace(b"</body>", FRESHNESS_BANNER + b"</body>", 1)
                 self.send_response(200)
                 self.send_header("Content-Type", f"{content_type}; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))

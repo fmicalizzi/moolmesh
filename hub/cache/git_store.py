@@ -156,12 +156,29 @@ def _mig_4_repo_history_complete(conn: sqlite3.Connection) -> int:
     return 1
 
 
+def _mig_5_repo_github_sync(conn: sqlite3.Connection) -> int:
+    """Migration 5: when the GitHub API (issues/PRs) last synced a repo (#76).
+
+    ``last_fetch_at`` only covers ``git fetch``; the API sync — what feeds the
+    portfolio outcome — had no durable record (``api_cache`` is unused and the
+    harvester keeps its ETags in memory), so a frozen GitHub cache could not
+    be detected. Additive and idempotent (checks the column).
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(repos)")}
+    if "last_github_sync_at" in cols:
+        return 0
+    conn.execute("ALTER TABLE repos ADD COLUMN last_github_sync_at TEXT")
+    conn.commit()
+    return 1
+
+
 # Register migrations
 _MIGRATIONS = [
     (1, "normalize_timestamps", _mig_1_normalize_timestamps),
     (2, "extract_branches", _mig_2_extract_branches),
     (3, "utc_to_local", _mig_3_utc_to_local),
     (4, "repo_history_complete", _mig_4_repo_history_complete),
+    (5, "repo_github_sync", _mig_5_repo_github_sync),
 ]
 
 
@@ -204,7 +221,10 @@ CREATE TABLE IF NOT EXISTS repos (
     -- 1 = se ingirió el historial git completo (``repo add/sync --all``);
     -- 0 = parcial (la UI rotula "desde <fecha>", #59). Migración 4 la agrega
     -- a DBs previas.
-    history_complete INTEGER NOT NULL DEFAULT 0
+    history_complete INTEGER NOT NULL DEFAULT 0,
+    -- Último sync exitoso de la API de GitHub (issues/PRs, 200 o 304), UTC
+    -- ISO. NULL = nunca (sin token o github deshabilitado). Migración 5 (#76).
+    last_github_sync_at TEXT
 );
 
 -- Refs snapshot (para detectar nuevos commits)
@@ -451,6 +471,16 @@ class GitStore:
         with self._lock:
             self._get_conn().execute(
                 "UPDATE repos SET last_fetch_at = ? WHERE id = ?",
+                (now, repo_id)
+            )
+            self._get_conn().commit()
+
+    def mark_github_sync(self, repo_id: int) -> None:
+        """Record a successful GitHub API sync of the repo's issues/PRs (#76)."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._get_conn().execute(
+                "UPDATE repos SET last_github_sync_at = ? WHERE id = ?",
                 (now, repo_id)
             )
             self._get_conn().commit()

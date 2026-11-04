@@ -25,6 +25,9 @@ class GitHubHarvester:
     ISSUE_PR_INTERVAL: float = 15.0
     MILESTONE_INTERVAL: float = 60.0
     PROJECT_INTERVAL: float = 60.0
+    # Throttle for the durable "last GitHub sync" write (#76): the freshness
+    # threshold is in minutes, so one write per repo per minute is plenty.
+    SYNC_RECORD_INTERVAL: float = 60.0
 
     def __init__(self, git_store: GitStore, github_client: GitHubClient,
                  sse_buffer: collections.deque | None = None):
@@ -35,6 +38,7 @@ class GitHubHarvester:
         self._threads: list[threading.Thread] = []
         # ETags por repo para conditional requests
         self._etags: dict[str, str] = {}  # "owner/repo/issues" -> etag
+        self._sync_recorded: dict[int, float] = {}  # repo_id -> monotonic
         # Backoff de log por repo+poll: fallos consecutivos y tipo del último error
         self._error_counts: dict[str, int] = {}
         self._error_types: dict[str, str] = {}
@@ -141,6 +145,10 @@ class GitHubHarvester:
 
         if new_etag:
             self._etags[etag_key] = new_etag
+        if status in (200, 304):
+            # 304 = GitHub confirmed the cache is current: also a successful
+            # sync. Recorded for the stale-data flag (#76).
+            self._record_sync(repo_id)
         if status == 304 or data is None:
             return  # Sin cambios
 
@@ -185,6 +193,15 @@ class GitHubHarvester:
                 "repo": f"{owner}/{repo}",
                 "count": len(issues),
             })
+
+    def _record_sync(self, repo_id: int) -> None:
+        """Persist the sync time, at most once per ``SYNC_RECORD_INTERVAL``."""
+        now = time.monotonic()
+        last = self._sync_recorded.get(repo_id)
+        if last is not None and now - last < self.SYNC_RECORD_INTERVAL:
+            return
+        self._store.mark_github_sync(repo_id)
+        self._sync_recorded[repo_id] = now
 
     def _poll_milestones(self, repo_id: int, owner: str, repo: str) -> None:
         """Fetch milestones via REST."""

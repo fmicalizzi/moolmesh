@@ -44,6 +44,8 @@ def _normalize_path(path: str) -> str:
 
 
 CONFIG_PATH = CONFIG_DIR / "config.toml"
+# Default for `[daemon] stale_after_minutes` (issue #76).
+DEFAULT_STALE_AFTER_MINUTES = 60
 
 
 @dataclass
@@ -133,6 +135,10 @@ class HubConfig:
     # Contenedores temporales: los hijos DIRECTOS van a una sección "Temporal"
     # visible y plegada, conservando su estado e historia.
     temporary_containers: list[str] = field(default_factory=list)
+    # --- [daemon] (issue #76) ---
+    # Minutes after which the last git / GitHub API sync counts as stale: MCP
+    # tools, the dashboard and `mool doctor` then flag the data as not current.
+    stale_after_minutes: int = DEFAULT_STALE_AFTER_MINUTES
 
 
 def _serialize_toml(config: HubConfig) -> str:
@@ -201,6 +207,13 @@ def _serialize_toml(config: HubConfig) -> str:
         lines.append(f'temporary_containers = [{temps}]')
     lines.append("")
 
+    # Sección [daemon] (issue #76) — sólo si difiere del default, como las
+    # listas opcionales; escalares antes de cualquier array-de-tablas.
+    if config.stale_after_minutes != DEFAULT_STALE_AFTER_MINUTES:
+        lines.append("[daemon]")
+        lines.append(f"stale_after_minutes = {int(config.stale_after_minutes)}")
+        lines.append("")
+
     # Sección [[repos]] - array de tablas
     for repo in config.repos:
         lines.append("[[repos]]")
@@ -223,6 +236,17 @@ def _serialize_toml(config: HubConfig) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _parse_stale_after(value) -> int:
+    """``[daemon] stale_after_minutes``: a positive integer, else the default."""
+    if isinstance(value, bool):
+        return DEFAULT_STALE_AFTER_MINUTES
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_STALE_AFTER_MINUTES
+    return minutes if minutes > 0 else DEFAULT_STALE_AFTER_MINUTES
 
 
 def load_config() -> HubConfig:
@@ -309,6 +333,11 @@ def load_config() -> HubConfig:
         config.temporary_containers = [
             str(p) for p in ws.get("temporary_containers", []) if str(p).strip()
         ]
+
+    # Parse [daemon] section (issue #76) — umbral de datos viejos.
+    if "daemon" in data:
+        config.stale_after_minutes = _parse_stale_after(
+            data["daemon"].get("stale_after_minutes"))
 
     # Parse [[workspace_roots]] array (issue #21, opt-in)
     if "workspace_roots" in data:

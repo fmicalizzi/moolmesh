@@ -1086,6 +1086,9 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     checks_fail += failed
     checks_ok += 0 if failed else 1
 
+    # Data freshness (#76)
+    _doctor_freshness(daemon_pid is not None)
+
 
     # MCP servers — informational: old ones are a warning, never a failed check (#70)
     from hub.mcp_registry import run_dir
@@ -1117,6 +1120,33 @@ def _doctor_autostart(info: dict | None) -> int:
         return 1
     print(green(f"  ✓ Autostart: {label} ({name}) → {info['path']}"))
     return 0
+
+
+def _doctor_freshness(running: bool) -> None:
+    """One freshness line: the three dates and the verdict (#76)."""
+    from hub.cache.event_store import DEFAULT_DB_PATH as events_db
+    from hub.cache.git_store import GitStore
+    from hub.freshness import compute_freshness, format_age
+    try:
+        f = compute_freshness(events_db, GitStore.DEFAULT_DB_PATH, running=running)
+    except Exception:  # noqa: BLE001 — diagnostics must keep going
+        _log_cli("doctor: could not compute data freshness", exc_info=True)
+        print(yellow("  ~ Data freshness: could not be computed"))
+        return
+    dates = (f"git sync {f['last_git_sync_at'] or 'never'}, "
+             f"GitHub API sync {f['last_github_sync_at'] or 'never'}, "
+             f"last ingest {f['last_ingest_at'] or 'never'}")
+    if f["stale"]:
+        why = ", ".join(f["stale_reasons"])
+        extra = f"; {f['repos_stale']} repo(s) behind" if f["repos_stale"] else ""
+        age = f["data_age_seconds"]
+        newest = (f"newest data {format_age(age)} old" if age is not None
+                  else "no synced data yet")
+        print(yellow(f"  ~ Data freshness: STALE ({why}{extra}) — {newest}"))
+    else:
+        print(green(f"  ✓ Data freshness: current (threshold "
+                    f"{f['stale_after_minutes']} min)"))
+    print(dim(f"    {dates}"))
 
 
 def _print_mcp_servers(directory, installed_version: str) -> None:
@@ -3088,6 +3118,7 @@ def _sync_github_issues(
             d["pr_review_decision"] = ""
         issues.append(d)
     store.upsert_issues(repo_id, issues)
+    store.mark_github_sync(repo_id)
     return len(issues), 200
 
 
