@@ -7,6 +7,7 @@ from hub.cache.git_store import GitStore
 from hub.digests.stats import compute_daily_stats, compute_weekly_stats
 from hub.digests.template import render_daily, render_weekly, render_technical_summary
 from hub.digests.llm import generate_daily_narrative, generate_weekly_narrative
+from hub.localtime import local_day, shift_day, system_naive_range, user_timezone
 
 
 class DigestEngine:
@@ -171,27 +172,30 @@ class DigestEngine:
 
     def _build_continuity_context(self, repo_id: int, date: str, repo_name: str) -> dict:
         """Construye contexto del día anterior + issues stale para continuidad."""
-        from datetime import timedelta
-
         context = {}
 
-        # 1. Resumen del día anterior
-        prev_date = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-        prev_since = f"{prev_date}T00:00:00"
-        prev_until = f"{prev_date}T23:59:59"
+        # 1. Resumen del día anterior — día LOCAL (#81), misma definición
+        #    que compute_daily_stats.
+        tz = user_timezone()
+        prev_date = shift_day(date, -1)
+        prev_since, prev_until = system_naive_range(prev_date, prev_date, tz)
 
         prev_commits = self._store.count_commits(repo_id, prev_since, prev_until)
 
         # Issues abiertos/cerrados ayer
         all_issues = self._store.get_issues(repo_id)
+
+        def _on_prev(ts) -> bool:
+            return bool(ts) and local_day(ts, tz) == prev_date
+
         prev_issues_opened = [i["number"] for i in all_issues
-                              if i.get("created_at", "").startswith(prev_date)
+                              if _on_prev(i.get("created_at"))
                               and not i.get("is_pull_request")]
         prev_issues_closed = [i["number"] for i in all_issues
-                              if (i.get("closed_at") or "").startswith(prev_date)
+                              if _on_prev(i.get("closed_at"))
                               and not i.get("is_pull_request")]
         prev_prs_merged = [i["number"] for i in all_issues
-                           if (i.get("pr_merged_at") or "").startswith(prev_date)
+                           if _on_prev(i.get("pr_merged_at"))
                            and i.get("is_pull_request")]
 
         if prev_commits or prev_issues_opened or prev_issues_closed or prev_prs_merged:
@@ -212,7 +216,7 @@ class DigestEngine:
         stale = []
         for issue in all_issues:
             if issue["state"] == "open" and not issue.get("is_pull_request"):
-                created = issue.get("created_at", "")[:10]
+                created = local_day(issue.get("created_at"), tz)
                 if created:
                     try:
                         days_open = (datetime.strptime(date, "%Y-%m-%d") -

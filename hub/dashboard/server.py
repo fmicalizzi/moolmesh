@@ -1084,7 +1084,11 @@ class DashboardServer:
                 from datetime import datetime, timedelta
                 params = parse_qs(urlparse(self.path).query)
                 repo_id = self._parse_int(params, "repo_id")
-                _yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                # Día local de [user] timezone (#81), no el del reloj del proceso.
+                from hub import localtime
+                _tz = localtime.user_timezone()
+                _today = localtime.today(_tz)
+                _yesterday = localtime.shift_day(_today, -1)
                 date = params.get("date", [_yesterday])[0]
                 period = params.get("period", ["daily"])[0]
                 force = params.get("force", ["0"])[0] == "1"
@@ -1094,7 +1098,7 @@ class DashboardServer:
                     return
 
                 # Determinar si la fecha es de la semana actual
-                today = datetime.now().date()
+                today = datetime.strptime(_today, "%Y-%m-%d").date()
                 current_week_start = today - timedelta(days=today.weekday())  # lunes de esta semana
                 try:
                     req_date = datetime.strptime(date, "%Y-%m-%d").date()
@@ -1134,13 +1138,12 @@ class DashboardServer:
                 else:
                     # Fallback: L1 stats only
                     if period == "daily":
-                        since = f"{date}T00:00:00"
-                        until = f"{date}T23:59:59"
+                        since, until = localtime.system_naive_range(date, date, _tz)
                     else:  # weekly
                         d = datetime.strptime(date, "%Y-%m-%d")
-                        start = d - timedelta(days=d.weekday())
-                        since = start.strftime("%Y-%m-%dT00:00:00")
-                        until = (start + timedelta(days=6)).strftime("%Y-%m-%dT23:59:59")
+                        start = (d - timedelta(days=d.weekday())).strftime("%Y-%m-%d")
+                        since, until = localtime.system_naive_range(
+                            start, localtime.shift_day(start, 6), _tz)
 
                     commits = server_ref.git_store.count_commits(repo_id, since, until)
                     authors = server_ref.git_store.get_author_stats(repo_id, since, until)

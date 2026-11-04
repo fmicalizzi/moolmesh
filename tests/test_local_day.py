@@ -182,3 +182,109 @@ class TestLocalDay:
         assert localtime.zone_key(None) == ""
         assert localtime.zone_key(timezone.utc) == "UTC"
         assert localtime.zone_key(NY) == "America/New_York"
+
+
+# ── digests ─────────────────────────────────────────────────────────
+
+
+def _repo_config():
+    from hub.config import RepoConfig
+    return RepoConfig(path="/home/u/work/acme-api", remote_url="github.com/acme/api",
+                      owner="acme", repo="api", added_at="2026-01-01T00:00:00")
+
+
+def _issue(number, *, created, pr=False, merged=None, closed=None, state=None):
+    return {"number": number, "title": f"t{number}",
+            "state": state or ("closed" if (merged or closed) else "open"),
+            "author": "ownerhandle", "created_at": created, "updated_at": created,
+            "closed_at": closed, "is_pull_request": 1 if pr else 0,
+            "pr_merged_at": merged}
+
+
+class TestDigestLocalDay:
+    def _store(self, tmp_path):
+        from hub.cache.git_store import GitStore
+        store = GitStore(tmp_path / "github.db")
+        return store, store.register_repo(_repo_config())
+
+    def test_pr_merged_0100_utc_lands_on_previous_local_day(self, tmp_path, system_tz,
+                                                            config_tz):
+        """Acceptance (#81): at UTC-6, a PR merged at 01:00 UTC is in the
+        previous day's digest — via the configured zone, on a UTC machine."""
+        from hub.digests.stats import compute_daily_stats
+        system_tz("UTC")
+        config_tz("America/Costa_Rica")
+        store, rid = self._store(tmp_path)
+        store.upsert_issues(rid, [
+            _issue(7, created="2026-05-01T15:00:00Z", pr=True,
+                   merged="2026-05-05T01:00:00Z"),
+        ])
+        store.store_commits(rid, [
+            {"sha": "c1", "author_name": "A", "author_email": "",
+             "timestamp": "2026-05-05T01:00:00+00:00", "message": "late"},
+        ])
+        prev = compute_daily_stats(store, rid, "2026-05-04")
+        same = compute_daily_stats(store, rid, "2026-05-05")
+        assert [p["number"] for p in prev["prs_merged"]] == [7]
+        assert prev["commits"] == 1
+        assert same["prs_merged"] == [] and same["commits"] == 0
+        # Without the zone (system = UTC) it is the UTC day, as before.
+        config_tz(None)
+        assert [p["number"] for p in
+                compute_daily_stats(store, rid, "2026-05-05")["prs_merged"]] == [7]
+        store.close()
+
+    def test_dst_days_new_york(self, tmp_path, system_tz):
+        """Spring-forward and fall-back days hold exactly their own instants."""
+        from hub.digests.stats import compute_daily_stats
+        system_tz("UTC")
+        store, rid = self._store(tmp_path)
+        store.upsert_issues(rid, [
+            _issue(1, created="2026-03-08T04:30:00Z"),   # Mar 7 23:30 EST
+            _issue(2, created="2026-03-09T03:30:00Z"),   # Mar 8 23:30 EDT
+            _issue(3, created="2026-11-01T04:30:00Z"),   # Nov 1 00:30 EDT
+            _issue(4, created="2026-11-02T04:30:00Z"),   # Nov 1 23:30 EST
+            _issue(5, created="2026-11-02T05:30:00Z"),   # Nov 2 00:30 EST
+        ])
+
+        def opened(day):
+            return sorted(i["number"] for i in
+                          compute_daily_stats(store, rid, day, tz=NY)["issues_opened"])
+
+        assert opened("2026-03-07") == [1]
+        assert opened("2026-03-08") == [2]
+        assert opened("2026-11-01") == [3, 4]
+        assert opened("2026-11-02") == [5]
+        store.close()
+
+    def test_weekly_uses_local_days(self, tmp_path, system_tz):
+        from hub.digests.stats import compute_weekly_stats
+        system_tz("UTC")
+        store, rid = self._store(tmp_path)
+        store.upsert_issues(rid, [
+            # Sunday 2026-05-10 22:00 CR = Monday 04:00Z: belongs to the week
+            # of Mon 2026-05-04 locally.
+            _issue(9, created="2026-05-01T00:00:00Z", pr=True,
+                   merged="2026-05-11T04:00:00Z"),
+        ])
+        wk = compute_weekly_stats(store, rid, "2026-05-04", tz=CR)
+        nxt = compute_weekly_stats(store, rid, "2026-05-11", tz=CR)
+        assert [p["number"] for p in wk["prs_merged"]] == [9]
+        assert "pr_merged_at" not in wk["prs_merged"][0]
+        assert nxt["prs_merged"] == []
+        store.close()
+
+    def test_continuity_context_uses_previous_local_day(self, tmp_path, system_tz,
+                                                        config_tz):
+        from hub.digests.engine import DigestEngine
+        system_tz("UTC")
+        config_tz("America/Costa_Rica")
+        store, rid = self._store(tmp_path)
+        store.upsert_issues(rid, [
+            _issue(11, created="2026-05-01T00:00:00Z", pr=True,
+                   merged="2026-05-05T01:00:00Z"),   # CR: 2026-05-04
+        ])
+        ctx = DigestEngine(store)._build_continuity_context(rid, "2026-05-05", "acme/api")
+        assert ctx["yesterday_date"] == "2026-05-04"
+        assert "#11" in ctx["yesterday_summary"]
+        store.close()

@@ -1,15 +1,71 @@
-"""L1 Stats — Agregación SQL para digests."""
+"""L1 Stats — Agregación SQL para digests.
+
+Días LOCALES (issue #81): el día de cada commit, PR e issue es el de la zona
+``[user] timezone`` (``hub.localtime``), la misma definición que usan el rollup
+de workspaces y el portafolio.
+"""
 from __future__ import annotations
 from typing import Any
 from hub.cache.git_store import GitStore
+from hub.localtime import CONFIGURED, local_day, shift_day, system_naive_range, user_timezone
+
+
+def _issue_activity(all_issues: list[dict], first_day: str, last_day: str,
+                    tz) -> dict[str, list[dict]]:
+    """PRs/issues opened, merged and closed within local days first..last."""
+    prs_merged: list[dict] = []
+    prs_opened: list[dict] = []
+    issues_closed: list[dict] = []
+    issues_opened: list[dict] = []
+
+    def _in(ts) -> bool:
+        day = local_day(ts, tz) if ts else None
+        return day is not None and first_day <= day <= last_day
+
+    for issue in all_issues:
+        created = issue.get("created_at") or ""
+        closed = issue.get("closed_at") or ""
+        merged = issue.get("pr_merged_at") or ""
+        if issue.get("is_pull_request", 0):
+            if _in(merged):
+                prs_merged.append({
+                    "number": issue["number"],
+                    "title": issue["title"],
+                    "author": issue.get("author", ""),
+                    "pr_merged_at": merged,
+                })
+            if _in(created):
+                prs_opened.append({
+                    "number": issue["number"],
+                    "title": issue["title"],
+                    "author": issue.get("author", ""),
+                })
+        else:
+            if _in(closed):
+                issues_closed.append({
+                    "number": issue["number"],
+                    "title": issue["title"],
+                })
+            if _in(created):
+                issues_opened.append({
+                    "number": issue["number"],
+                    "title": issue["title"],
+                })
+    return {
+        "prs_merged": prs_merged,
+        "prs_opened": prs_opened,
+        "issues_closed": issues_closed,
+        "issues_opened": issues_opened,
+    }
 
 
 def compute_daily_stats(git_store: GitStore, repo_id: int,
-                        date: str) -> dict[str, Any]:
-    """Computa estadísticas del día para un repo.
+                        date: str, tz=CONFIGURED) -> dict[str, Any]:
+    """Computa estadísticas del día LOCAL para un repo.
 
     Args:
-        date: formato "YYYY-MM-DD"
+        date: formato "YYYY-MM-DD" (día local en ``tz``)
+        tz: zona del día; default la de ``[user] timezone`` (#81)
 
     Returns dict con:
         commits: int
@@ -22,8 +78,9 @@ def compute_daily_stats(git_store: GitStore, repo_id: int,
         issues_closed: list[dict] — [{number, title}]
         issues_opened: list[dict]
     """
-    since = f"{date}T00:00:00"
-    until = f"{date}T23:59:59"
+    if tz is CONFIGURED:
+        tz = user_timezone()
+    since, until = system_naive_range(date, date, tz)
 
     # Git stats (ya existentes en git_store)
     commits = git_store.count_commits(repo_id, since, until)
@@ -33,45 +90,8 @@ def compute_daily_stats(git_store: GitStore, repo_id: int,
     loc_added = sum(a.get("insertions", 0) for a in authors)
     loc_removed = sum(a.get("deletions", 0) for a in authors)
 
-    # GitHub stats — filtrar por fecha
-    all_issues = git_store.get_issues(repo_id)
-
-    prs_merged = []
-    prs_opened = []
-    issues_closed = []
-    issues_opened = []
-
-    for issue in all_issues:
-        created = issue.get("created_at", "")
-        closed = issue.get("closed_at", "")
-        merged = issue.get("pr_merged_at", "")
-        is_pr = issue.get("is_pull_request", 0)
-
-        if is_pr:
-            if merged and merged.startswith(date):
-                prs_merged.append({
-                    "number": issue["number"],
-                    "title": issue["title"],
-                    "author": issue.get("author", ""),
-                    "pr_merged_at": merged,
-                })
-            if created.startswith(date):
-                prs_opened.append({
-                    "number": issue["number"],
-                    "title": issue["title"],
-                    "author": issue.get("author", ""),
-                })
-        else:
-            if closed and closed.startswith(date):
-                issues_closed.append({
-                    "number": issue["number"],
-                    "title": issue["title"],
-                })
-            if created.startswith(date):
-                issues_opened.append({
-                    "number": issue["number"],
-                    "title": issue["title"],
-                })
+    # GitHub stats — filtrar por día local
+    activity = _issue_activity(git_store.get_issues(repo_id), date, date, tz)
 
     return {
         "commits": commits,
@@ -80,28 +100,24 @@ def compute_daily_stats(git_store: GitStore, repo_id: int,
         "hot_files": hot_files,
         "loc_added": loc_added,
         "loc_removed": loc_removed,
-        "prs_merged": prs_merged,
-        "prs_opened": prs_opened,
-        "issues_closed": issues_closed,
-        "issues_opened": issues_opened,
+        **activity,
     }
 
 
 def compute_weekly_stats(git_store: GitStore, repo_id: int,
-                         week_start: str) -> dict[str, Any]:
-    """Computa estadísticas de la semana (lunes a domingo).
+                         week_start: str, tz=CONFIGURED) -> dict[str, Any]:
+    """Computa estadísticas de la semana (lunes a domingo, días locales).
 
     Args:
         week_start: "YYYY-MM-DD" del lunes de la semana
+        tz: zona del día; default la de ``[user] timezone`` (#81)
 
     Misma estructura que daily pero con rango extendido.
     """
-    from datetime import datetime, timedelta
-
-    start = datetime.strptime(week_start, "%Y-%m-%d")
-    end = start + timedelta(days=6)
-    since = start.strftime("%Y-%m-%dT00:00:00")
-    until = end.strftime("%Y-%m-%dT23:59:59")
+    if tz is CONFIGURED:
+        tz = user_timezone()
+    week_end = shift_day(week_start, 6)
+    since, until = system_naive_range(week_start, week_end, tz)
 
     commits = git_store.count_commits(repo_id, since, until)
     authors = git_store.get_author_stats(repo_id, since, until)
@@ -111,46 +127,10 @@ def compute_weekly_stats(git_store: GitStore, repo_id: int,
     loc_removed = sum(a.get("deletions", 0) for a in authors)
 
     # GitHub stats — filtrar por rango de semana
-    all_issues = git_store.get_issues(repo_id)
-
-    prs_merged = []
-    prs_opened = []
-    issues_closed = []
-    issues_opened = []
-
-    since_date = week_start
-    until_date = end.strftime("%Y-%m-%d")
-
-    for issue in all_issues:
-        created = issue.get("created_at", "")[:10]  # "YYYY-MM-DD"
-        closed = (issue.get("closed_at") or "")[:10]
-        merged = (issue.get("pr_merged_at") or "")[:10]
-        is_pr = issue.get("is_pull_request", 0)
-
-        if is_pr:
-            if merged and since_date <= merged <= until_date:
-                prs_merged.append({
-                    "number": issue["number"],
-                    "title": issue["title"],
-                    "author": issue.get("author", ""),
-                })
-            if since_date <= created <= until_date:
-                prs_opened.append({
-                    "number": issue["number"],
-                    "title": issue["title"],
-                    "author": issue.get("author", ""),
-                })
-        else:
-            if closed and since_date <= closed <= until_date:
-                issues_closed.append({
-                    "number": issue["number"],
-                    "title": issue["title"],
-                })
-            if since_date <= created <= until_date:
-                issues_opened.append({
-                    "number": issue["number"],
-                    "title": issue["title"],
-                })
+    activity = _issue_activity(git_store.get_issues(repo_id), week_start, week_end, tz)
+    # El weekly nunca expuso pr_merged_at (forma estable del digest cacheado).
+    for pr in activity["prs_merged"]:
+        pr.pop("pr_merged_at", None)
 
     return {
         "commits": commits,
@@ -159,8 +139,5 @@ def compute_weekly_stats(git_store: GitStore, repo_id: int,
         "hot_files": hot_files,
         "loc_added": loc_added,
         "loc_removed": loc_removed,
-        "prs_merged": prs_merged,
-        "prs_opened": prs_opened,
-        "issues_closed": issues_closed,
-        "issues_opened": issues_opened,
+        **activity,
     }
