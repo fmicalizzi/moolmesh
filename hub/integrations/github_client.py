@@ -209,6 +209,70 @@ class GitHubClient:
 
         return 200, all_items, new_etag
 
+    def get_repo(self, owner: str, repo: str,
+                 etag: str | None = None) -> tuple[int, dict | None, str | None]:
+        """GET /repos/{owner}/{repo} — the repo's numeric ``id`` and its
+        current ``owner/name`` (#94). GitHub redirects a renamed or
+        transferred repo, so the answer carries the NEW ``full_name``. With an
+        ETag an unchanged repo is a 304, which does not count against the
+        rate limit.
+        """
+        status, data, new_etag = self.rest_get(f"/repos/{owner}/{repo}",
+                                               etag=etag)
+        if status == 200 and not isinstance(data, dict):
+            return 0, None, None
+        return status, data, new_etag
+
+    # Lower bound of the rate budget ``list_owner_repos`` leaves untouched:
+    # the issues poll of every registered repo shares the same 5000/h.
+    OWNER_LIST_RATE_FLOOR = 100
+
+    def list_owner_repos(self, owner: str, max_repos: int = 300,
+                         per_page: int = 100) -> tuple[int, list[dict], bool]:
+        """Repos of an organization OR a personal account (#94), paginated.
+
+        Tries ``/orgs/{owner}/repos`` and falls back to
+        ``/users/{owner}/repos`` on a 404 (the owner is a user). Stops at
+        ``max_repos``, at the last page, or when the remaining rate budget
+        drops under ``OWNER_LIST_RATE_FLOOR``. Returns ``(status, repos,
+        truncated)``: ``status`` is that of the first page (200 on success),
+        ``truncated`` is True when more repos may exist past the stop.
+        """
+        max_repos = max(1, int(max_repos))
+        per_page = max(1, min(int(per_page), 100))
+        params = {"per_page": per_page, "sort": "full_name", "type": "all"}
+        status, data, _ = self.rest_get(f"/orgs/{owner}/repos", params)
+        base = f"/orgs/{owner}/repos"
+        if status == 404:
+            params = {"per_page": per_page, "sort": "full_name",
+                      "type": "owner"}
+            status, data, _ = self.rest_get(f"/users/{owner}/repos", params)
+            base = f"/users/{owner}/repos"
+        if status != 200 or not isinstance(data, list):
+            return status, [], False
+        repos = list(data)
+        page = 2
+        truncated = False
+        while len(data) == per_page:
+            if len(repos) >= max_repos:
+                truncated = True
+                break
+            if self._rate_remaining < self.OWNER_LIST_RATE_FLOOR:
+                truncated = True
+                break
+            page_status, data, _ = self.rest_get(base, {**params, "page": page})
+            if page_status != 200 or not isinstance(data, list):
+                truncated = True
+                break
+            if not data:
+                break
+            repos.extend(data)
+            page += 1
+        if len(repos) > max_repos:
+            repos = repos[:max_repos]
+            truncated = True
+        return 200, repos, truncated
+
     def list_pulls(self, owner: str, repo: str, state: str = "all",
                    per_page: int = 100) -> tuple[int, list[dict] | None, str | None]:
         """GET /repos/{owner}/{repo}/pulls — PRs con review info."""

@@ -234,6 +234,27 @@ def _mig_7_repo_kind(conn: sqlite3.Connection) -> int:
     return 1
 
 
+def _mig_8_repo_github_id(conn: sqlite3.Connection) -> int:
+    """Migration 8: the repo's numeric GitHub id (#94).
+
+    ``owner/name`` changes on a transfer or a rename; the numeric id does not.
+    The GitHub sync fills it (NULL until then) and, when the API answers with a
+    new ``owner/name`` for a known id, updates that row instead of creating
+    another one, so the issues/PRs series keeps its ``repo_id``. Additive and
+    idempotent (checks the column; ``IF NOT EXISTS`` index); no row is
+    rewritten.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(repos)")}
+    changed = 0
+    if "github_id" not in cols:
+        conn.execute("ALTER TABLE repos ADD COLUMN github_id INTEGER")
+        changed = 1
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_repos_github_id ON repos(github_id)")
+    conn.commit()
+    return changed
+
+
 # Register migrations
 _MIGRATIONS = [
     (1, "normalize_timestamps", _mig_1_normalize_timestamps),
@@ -243,6 +264,7 @@ _MIGRATIONS = [
     (5, "repo_github_sync", _mig_5_repo_github_sync),
     (6, "pr_stats", _mig_6_pr_stats),
     (7, "repo_kind", _mig_7_repo_kind),
+    (8, "repo_github_id", _mig_8_repo_github_id),
 ]
 
 
@@ -289,7 +311,8 @@ CREATE TABLE IF NOT EXISTS repos (
     -- Último sync exitoso de la API de GitHub (issues/PRs, 200 o 304), UTC
     -- ISO. NULL = nunca (sin token o github deshabilitado). Migración 5 (#76).
     last_github_sync_at TEXT,
-    kind TEXT NOT NULL DEFAULT 'code'  -- 'code' | 'board' (#93, migración 7)
+    kind TEXT NOT NULL DEFAULT 'code',  -- 'code' | 'board' | 'remote' (#93/#94, mig. 7)
+    github_id INTEGER  -- id numérico del repo en GitHub (#94, migración 8)
 );
 
 -- Refs snapshot (para detectar nuevos commits)
@@ -473,6 +496,48 @@ class GitStore:
             conn.commit()
             return int(row[0]) if row else 0
 
+    def get_repo_by_github_id(self, github_id: int) -> dict | None:
+        """The ``repos`` row holding this numeric GitHub id, or ``None`` (#94)."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT id, path, owner, repo_name, kind FROM repos"
+                " WHERE github_id = ? ORDER BY id LIMIT 1", (int(github_id),)
+            ).fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "path": row[1], "owner": row[2],
+                "repo_name": row[3], "kind": row[4] or "code"}
+
+    def get_github_id(self, repo_id: int) -> int | None:
+        """The repo's stored numeric GitHub id (NULL until the first sync)."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT github_id FROM repos WHERE id = ?", (repo_id,)
+            ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def set_github_identity(self, repo_id: int, github_id: int, owner: str,
+                            repo_name: str, path: str | None = None) -> None:
+        """Record the repo's GitHub id and its current ``owner/name`` (#94).
+
+        A transfer/rename updates THIS row (same ``repo_id``), so every issue,
+        PR and commit stays attached. ``path`` re-keys a clone-less repo whose
+        key embeds ``owner/name``; a code repo keeps its filesystem path.
+        """
+        with self._lock:
+            conn = self._get_conn()
+            sets = ["github_id = ?", "owner = ?", "repo_name = ?",
+                    "remote_url = ?"]
+            params: list[Any] = [int(github_id), owner, repo_name,
+                                 f"github.com/{owner}/{repo_name}"]
+            if path:
+                sets.append("path = ?")
+                params.append(path)
+            params.append(repo_id)
+            conn.execute(
+                f"UPDATE repos SET {', '.join(sets)} WHERE id = ?", params)
+            conn.commit()
+
     def sync_repo_kinds(self, repos) -> int:
         """Mirror each config repo's ``kind`` onto its ``repos`` row (#93).
 
@@ -526,7 +591,7 @@ class GitStore:
         with self._lock:
             rows = self._get_conn().execute(
                 "SELECT id, path, remote_url, owner, repo_name, added_at,"
-                " last_fetch_at, history_complete, kind FROM repos"
+                " last_fetch_at, history_complete, kind, github_id FROM repos"
             ).fetchall()
         
         return [
@@ -540,6 +605,7 @@ class GitStore:
                 "last_fetch_at": r[6],
                 "history_complete": bool(r[7]),
                 "kind": r[8] or "code",
+                "github_id": r[9],
             }
             for r in rows
         ]

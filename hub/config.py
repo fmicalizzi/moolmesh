@@ -33,8 +33,8 @@ def _normalize_path(path: str) -> str:
     Git Bash en Windows convierte 'C:\\Users\\x' a '/c/Users/x'.
     En Windows nativo, Path('/c/Users/x').resolve() daría 'C:\\c\\Users\\x' (mal).
     """
-    if path.startswith("board:"):
-        return path  # a board repo key (#93), not a filesystem path
+    if path.startswith(("board:", "remote:")):
+        return path  # a board (#93) / remote-only (#94) repo key, not a path
     if os.name == "nt":  # Windows
         # Detectar formato MSYS2: /c/... o /d/... etc.
         import re
@@ -63,10 +63,20 @@ class RepoConfig:
     github_enabled: bool = True
     # "code" (default) = a code repo: git fetch + commit ingestion + GitHub sync.
     # "board" = an issues-only backlog (#93): no git, only the GitHub issues sync.
+    # "remote" = a code repo followed only through the API (#94): no clone, no
+    # git history; issues, PRs and PR stats are synced like any code repo.
     kind: str = "code"
 
 
-REPO_KINDS = ("code", "board")
+REPO_KINDS = ("code", "board", "remote")
+# Kinds with no local clone: the git harvester never runs for them (#93, #94).
+NO_GIT_KINDS = ("board", "remote")
+
+
+def repo_has_git(repo: object) -> bool:
+    """True when ``repo`` (a RepoConfig or a ``repos`` row dict) has a clone."""
+    kind = repo.get("kind") if isinstance(repo, dict) else getattr(repo, "kind", "code")
+    return normalize_repo_kind(kind) not in NO_GIT_KINDS
 
 
 def normalize_repo_kind(value: object) -> str:
@@ -551,6 +561,77 @@ def board_repo_config(spec: str) -> RepoConfig:
         github_enabled=True,
         kind="board",
     )
+
+
+# Path prefix of a remote-only code repo (#94): followed through the GitHub
+# API alone, with no local clone. Same key shape as a board, distinct kind.
+REMOTE_PATH_PREFIX = "remote:"
+
+
+def remote_repo_config(spec: str) -> RepoConfig:
+    """RepoConfig for a remote-only code repo given as ``owner/repo`` (#94).
+
+    Raises ValueError when ``spec`` is not ``owner/repo``.
+    """
+    parsed = parse_board_slug(spec)
+    if parsed is None:
+        raise ValueError(f"Se esperaba owner/repo: {spec}")
+    owner, repo_name = parsed
+    remote = f"github.com/{owner}/{repo_name}"
+    return RepoConfig(
+        path=f"{REMOTE_PATH_PREFIX}{remote}",
+        remote_url=remote,
+        owner=owner,
+        repo=repo_name,
+        added_at=datetime.now(timezone.utc).isoformat(),
+        github_enabled=True,
+        kind="remote",
+    )
+
+
+def keyed_repo_path(kind: str, owner: str, repo: str) -> str:
+    """The config/github.db key of a clone-less repo (board or remote)."""
+    prefix = BOARD_PATH_PREFIX if kind == "board" else REMOTE_PATH_PREFIX
+    return f"{prefix}github.com/{owner}/{repo}"
+
+
+def find_repo_by_slug(repos: list[RepoConfig], spec: str) -> RepoConfig | None:
+    """The clone-less registered repo whose ``owner/repo`` matches ``spec``.
+
+    Case-insensitive (GitHub names are). Only board/remote repos: a code repo
+    is addressed by its path. ``None`` when ``spec`` is not ``owner/repo`` or
+    nothing matches.
+    """
+    parsed = parse_board_slug(spec)
+    if parsed is None:
+        return None
+    want = (parsed[0].lower(), parsed[1].lower())
+    for r in repos:
+        if not repo_has_git(r) and (r.owner.lower(), r.repo.lower()) == want:
+            return r
+    return None
+
+
+def rename_repo_in_config(old_path: str, owner: str, repo: str) -> str | None:
+    """Point the config entry ``old_path`` at ``owner/repo`` (#94).
+
+    A transfer or a rename seen through the repo's numeric GitHub id. Updates
+    ``owner``, ``repo`` and ``remote_url``; a clone-less repo's key (``path``)
+    is re-derived, a code repo keeps its filesystem path. Returns the entry's
+    (possibly new) path, or ``None`` when ``old_path`` is not registered.
+    """
+    config = load_config()
+    for r in config.repos:
+        if r.path != old_path:
+            continue
+        r.owner = owner
+        r.repo = repo
+        r.remote_url = f"github.com/{owner}/{repo}"
+        if not repo_has_git(r):
+            r.path = keyed_repo_path(r.kind, owner, repo)
+        save_config(config)
+        return r.path
+    return None
 
 
 def remove_repo(path: str) -> bool:

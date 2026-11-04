@@ -1098,6 +1098,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             # Issues-only backlog (#93): no local clone to check.
             print(green(f"  ✓ Board: {r.owner}/{r.repo} (issues only, no git)"))
             checks_ok += 1
+        elif r.kind == "remote":
+            # Remote-only code repo (#94): followed through the API, no clone.
+            print(green(f"  ✓ Remote: {r.owner}/{r.repo} (API only, no clone)"))
+            checks_ok += 1
         elif repo_path.exists() and (repo_path / ".git").exists():
             print(green(f"  ✓ Repo: {r.owner}/{r.repo} (accessible)"))
             checks_ok += 1
@@ -1941,6 +1945,24 @@ def main() -> None:
                           help="Issues-only backlog (kind = \"board\"): no git, "
                                "only the GitHub issues sync. PATH may be "
                                "owner/repo (no local clone needed)")
+    repo_add.add_argument("--remote", action="store_true",
+                          help="Code repo followed only through the GitHub API "
+                               "(kind = \"remote\"): PATH is owner/repo, no "
+                               "clone, no git history; issues, PRs and PR "
+                               "stats are synced")
+    repo_add.add_argument("--owner", metavar="OWNER",
+                          help="Register every repo of an organization or a "
+                               "personal account as remote-only (#94)")
+    repo_add.add_argument("--include", action="append", metavar="PATTERN",
+                          default=None,
+                          help="With --owner: only repos whose name matches "
+                               "this glob (repeatable, case-insensitive)")
+    repo_add.add_argument("--dry-run", action="store_true",
+                          help="With --owner: list the repos without "
+                               "registering them")
+    repo_add.add_argument("--limit", type=int, default=300, metavar="N",
+                          help="With --owner: at most N repos listed "
+                               "(default: 300)")
 
     repo_sub.add_parser("list", help="List registered repositories")
 
@@ -3071,8 +3093,9 @@ def _full_history_ingest(
     """
     from hub.harvesters.git_harvester import GIT_READ_FAILED
 
-    if getattr(repo_config, "kind", "code") == "board":
-        count = 0  # issues-only backlog (#93): no git history to read
+    from hub.config import repo_has_git
+    if not repo_has_git(repo_config):
+        count = 0  # board (#93) / remote-only (#94): no git history to read
     else:
         count = harvester.ingest_history(repo_config.path, days=None)
     if count == GIT_READ_FAILED:
@@ -3101,6 +3124,12 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
     from hub.cache.git_store import GitStore
     from hub.harvesters.git_harvester import GitHarvester
 
+    if getattr(args, "owner", None):
+        _repo_add_owner(args)
+        return
+    if getattr(args, "remote", False):
+        _repo_add_remote(args)
+        return
     board = getattr(args, "board", False)
     if board and not Path(args.path).exists():
         from hub.config import board_repo_config
@@ -3190,6 +3219,200 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
         print(f"  Ingested {count} commits (last {args.days} days)")
 
 
+def _resolve_repo_arg(spec: str) -> str:
+    """The registered key ``spec`` names: a filesystem path, or ``owner/repo``
+    of a clone-less repo (board #93 / remote #94), matched case-insensitively
+    against the config so a repo renamed since (#94) is still found by its
+    current name."""
+    from pathlib import Path
+    from hub.config import (BOARD_PATH_PREFIX, find_repo_by_slug, load_config,
+                            parse_board_slug)
+    path = str(Path(spec).resolve())
+    if Path(spec).exists():
+        return path
+    if spec.startswith(("board:", "remote:")):
+        return spec
+    found = find_repo_by_slug(load_config().repos, spec)
+    if found is not None:
+        return found.path
+    parsed = parse_board_slug(spec)
+    if parsed:  # legacy board key shape (#93)
+        return f"{BOARD_PATH_PREFIX}github.com/{parsed[0]}/{parsed[1]}"
+    return path
+
+
+def _register_remote_repo(store, client, owner: str, repo: str,
+                          github_id: int | None = None) -> tuple[str, str]:
+    """Register ``owner/repo`` as a remote-only code repo (#94).
+
+    Identity is the numeric GitHub id: when it is known (``github_id``, or
+    one ``GET /repos/{owner}/{repo}`` with a client) and a registered repo
+    already holds it, that repo was transferred or renamed — its row and
+    config entry are updated instead of creating another one. Returns
+    ``(outcome, name)``: ``added`` | ``exists`` | ``renamed`` | ``error``.
+    """
+    from hub.config import (find_repo_by_slug, keyed_repo_path, load_config,
+                            remote_repo_config, rename_repo_in_config,
+                            repo_has_git, save_config)
+
+    name = f"{owner}/{repo}"
+    if github_id is None and client is not None:
+        try:
+            status, data, _ = client.get_repo(owner, repo)
+        except Exception:
+            status, data = 0, None
+        if status == 200 and data:
+            try:
+                github_id = int(data["id"])
+                owner, repo = str(data["full_name"]).split("/", 1)
+                name = f"{owner}/{repo}"
+            except (KeyError, TypeError, ValueError):
+                github_id = None
+        elif status in (401, 403, 404):
+            return "error", f"{name}: {_github_failure(status).split(' (')[0]}"
+
+    config = load_config()
+    if github_id is not None:
+        known = store.get_repo_by_github_id(github_id)
+        if known is not None:
+            if (known["owner"].lower(), known["repo_name"].lower()) == (
+                    owner.lower(), repo.lower()):
+                return "exists", name
+            # Same GitHub repo under a new owner/name: keep its history.
+            cfg = next((r for r in config.repos if r.path == known["path"]),
+                       None)
+            new_key = None
+            if cfg is not None and not repo_has_git(cfg):
+                new_key = keyed_repo_path(cfg.kind, owner, repo)
+            store.set_github_identity(known["id"], github_id, owner, repo,
+                                      path=new_key)
+            if cfg is not None:
+                rename_repo_in_config(cfg.path, owner, repo)
+            return "renamed", f"{known['owner']}/{known['repo_name']} → {name}"
+    if find_repo_by_slug(config.repos, name) is not None or any(
+            (r.owner.lower(), r.repo.lower()) == (owner.lower(), repo.lower())
+            for r in config.repos):
+        return "exists", name
+    repo_config = remote_repo_config(name)
+    config.repos.append(repo_config)
+    save_config(config)
+    repo_id = store.register_repo(repo_config)
+    if github_id is not None:
+        store.set_github_identity(repo_id, github_id, owner, repo)
+    return "added", name
+
+
+def _repo_add_remote(args: argparse.Namespace) -> None:
+    """``mool repo add --remote OWNER/REPO`` (#94)."""
+    from hub.config import load_config, parse_board_slug
+    from hub.cache.git_store import GitStore
+
+    if args.no_github:
+        print(red("Error: a remote repo is read only through GitHub; "
+                  "--no-github leaves nothing to sync"))
+        return
+    parsed = parse_board_slug(args.path)
+    if parsed is None:
+        print(red(f"Error: expected owner/repo: {args.path}"))
+        return
+    config = load_config()
+    client = _github_client_for(config, False)
+    store = GitStore()
+    try:
+        outcome, name = _register_remote_repo(store, client, *parsed)
+        if outcome == "error":
+            print(red(f"Error: {name}"))
+            return
+        if outcome == "exists":
+            print(yellow(f"Already registered: {name}"))
+            return
+        if outcome == "renamed":
+            print(green(f"Renamed: {name} (same GitHub repo — history kept)"))
+            return
+        print(green(f"Registered remote {name}"))
+        print(dim("  kind = remote: no clone; the daemon syncs its issues, "
+                  "PRs and PR stats"))
+        if args.all_history and client is not None:
+            repo_cfg = next(r for r in load_config().repos
+                            if r.kind == "remote" and f"{r.owner}/{r.repo}" == name)
+            repo_id = store.get_repo_id(repo_cfg.path)
+            res = _full_history_ingest(store, repo_id, repo_cfg, None, client)
+            if res["reason"] == "github":
+                print(yellow(f"  {_github_failure(res.get('http_status'))}"))
+            else:
+                print(f"  Synced {res['items']} issues/PRs (full history)")
+    finally:
+        store.close()
+
+
+def _repo_add_owner(args: argparse.Namespace) -> None:
+    """``mool repo add --owner OWNER [--include PAT ...] [--dry-run]`` (#94).
+
+    Lists the repos of an organization or a personal account (paginated,
+    capped by ``--limit``, stops early on a low rate budget) and registers
+    each as remote-only — by its numeric GitHub id, so one already
+    registered under an older name is renamed, not duplicated.
+    """
+    import fnmatch
+    from hub.config import load_config
+    from hub.cache.git_store import GitStore
+
+    owner = args.owner.strip().strip("/")
+    if not owner or "/" in owner:
+        print(red(f"Error: expected an owner (organization or user): {owner}"))
+        sys.exit(2)
+    if args.limit < 1:
+        print(red("--limit must be >= 1"))
+        sys.exit(2)
+    config = load_config()
+    client = _github_client_for(config, False)
+    if client is None:
+        print(red("Error: --owner lists repos through the GitHub API and "
+                  "needs a token"))
+        sys.exit(1)
+    status, listed, truncated = client.list_owner_repos(owner,
+                                                        max_repos=args.limit)
+    if status != 200:
+        print(red(f"Error listing {owner}: "
+                  f"{_github_failure(status).split(' (')[0]}"))
+        sys.exit(1)
+    pats = [p.lower() for p in (args.include or [])]
+    chosen = []
+    for item in listed:
+        try:
+            gid = int(item["id"])
+            o, n = str(item["full_name"]).split("/", 1)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if pats and not any(fnmatch.fnmatchcase(n.lower(), p) for p in pats):
+            continue
+        chosen.append((o, n, gid, bool(item.get("archived"))))
+    print(f"\n  {bold(owner)}: {len(chosen)} repo(s)"
+          + (f" matching {', '.join(args.include)}" if pats else "")
+          + (dim(f" (listing stopped at {len(listed)} — raise --limit)")
+             if truncated else ""))
+    if args.dry_run:
+        for o, n, _gid, archived in chosen:
+            print(f"    {o}/{n}" + (dim("  archived") if archived else ""))
+        print(dim("  --dry-run: nothing registered"))
+        return
+    store = GitStore()
+    counts = {"added": 0, "exists": 0, "renamed": 0, "error": 0}
+    try:
+        for o, n, gid, _archived in chosen:
+            outcome, name = _register_remote_repo(store, None, o, n,
+                                                  github_id=gid)
+            counts[outcome] += 1
+            mark = {"added": green("+"), "exists": dim("="),
+                    "renamed": yellow("→"), "error": red("✗")}[outcome]
+            print(f"    {mark} {name}")
+    finally:
+        store.close()
+    print(green(f"  {counts['added']} registered") + dim(
+        f", {counts['exists']} already registered, "
+        f"{counts['renamed']} renamed"))
+
+
 def cmd_repo_list(args: argparse.Namespace) -> None:
     from hub.config import load_config
     from hub.cache.git_store import GitStore
@@ -3209,6 +3432,8 @@ def cmd_repo_list(args: argparse.Namespace) -> None:
         github = green("✓ GitHub") if r.github_enabled else dim("  local")
         if r.kind == "board":
             print(f"    {r.owner}/{r.repo:<25} {'board':>13}  {github}")
+        elif r.kind == "remote":
+            print(f"    {r.owner}/{r.repo:<25} {'no clone':>13}  {github}")
         else:
             print(f"    {r.owner}/{r.repo:<25} {commits:>5} commits  {github}")
         print(f"      {dim(r.path)}")
@@ -3221,12 +3446,7 @@ def cmd_repo_remove(args: argparse.Namespace) -> None:
     from hub.config import remove_repo
     from hub.cache.git_store import GitStore
 
-    from hub.config import BOARD_PATH_PREFIX, parse_board_slug
-    path = str(Path(args.path).resolve())
-    if not Path(args.path).exists():
-        parsed = parse_board_slug(args.path)
-        if parsed:  # a board repo registered as owner/repo (#93)
-            path = f"{BOARD_PATH_PREFIX}github.com/{parsed[0]}/{parsed[1]}"
+    path = _resolve_repo_arg(args.path)
 
     found = remove_repo(path)
 
@@ -3252,12 +3472,7 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
     from hub.cache.git_store import GitStore
     from hub.harvesters.git_harvester import GitHarvester
 
-    path = str(Path(args.path).resolve())
-    if not Path(args.path).exists():
-        from hub.config import BOARD_PATH_PREFIX, parse_board_slug
-        parsed = parse_board_slug(args.path)
-        if parsed:  # a board repo registered as owner/repo (#93)
-            path = f"{BOARD_PATH_PREFIX}github.com/{parsed[0]}/{parsed[1]}"
+    path = _resolve_repo_arg(args.path)
     config = load_config()
 
     repo_cfg = next((r for r in config.repos if r.path == path), None)
@@ -3276,10 +3491,10 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
     harvester = GitHarvester(store)
     days = None if args.all_history else args.days
 
-    if repo_cfg.kind == "board" and not args.all_history:
+    if repo_cfg.kind in ("board", "remote") and not args.all_history:
         store.close()
-        print(dim("kind = board: no git history to sync "
-                  "(use --all to backfill its issues)"))
+        print(dim(f"kind = {repo_cfg.kind}: no git history to sync "
+                  "(use --all to backfill its issues/PRs)"))
         return
 
     if args.all_history:
@@ -3452,8 +3667,8 @@ def _sync_all_registered(args: argparse.Namespace) -> None:
                   f"{green(f'{res['commits']} new commits')}{extra} (full history)")
             continue
 
-        if r.kind == "board":
-            print(f"  [{i}/{total}] {name}  {dim('board (no git)')}")
+        if r.kind in ("board", "remote"):
+            print(f"  [{i}/{total}] {name}  {dim(f'{r.kind} (no git)')}")
             continue
         count = harvester.ingest_history(r.path, days=days)
         if count == GIT_READ_FAILED:

@@ -33,6 +33,11 @@ class GitHubHarvester:
     # calls of 25). A larger burst (a newly added repo) is left to
     # ``mool repo backfill-pr-stats``.
     MAX_PR_STATS_PER_POLL: int = 50
+    # Repo identity check (#94): GET /repos/{owner}/{repo} per repo at most
+    # this often (an ETag makes an unchanged repo a free 304). A repo with no
+    # stored GitHub id yet is checked on the next milestones tick.
+    IDENTITY_INTERVAL: float = 6 * 3600.0
+    IDENTITY_RETRY: float = 600.0  # a repo still without id (failed call)
 
     def __init__(self, git_store: GitStore, github_client: GitHubClient,
                  sse_buffer: collections.deque | None = None):
@@ -47,6 +52,8 @@ class GitHubHarvester:
         # ETags por repo para conditional requests
         self._etags: dict[str, str] = {}  # "owner/repo/issues" -> etag
         self._sync_recorded: dict[int, float] = {}  # repo_id -> monotonic
+        self._identity_checked: dict[int, float] = {}  # repo_id -> monotonic
+        self._identity_etags: dict[int, str] = {}  # repo_id -> etag
         # Backoff de log por repo+poll: fallos consecutivos y tipo del último error
         self._error_counts: dict[str, int] = {}
         self._error_types: dict[str, str] = {}
@@ -84,6 +91,10 @@ class GitHubHarvester:
 
     def _loop_milestones(self) -> None:
         while self._running:
+            try:
+                self._poll_identities()
+            except Exception:
+                _log.warning("Error checking repo identities", exc_info=True)
             try:
                 self._poll_all_repos(self._poll_milestones)
             except Exception:
@@ -125,6 +136,46 @@ class GitHubHarvester:
             else:
                 self._error_counts.pop(error_key, None)
                 self._error_types.pop(error_key, None)
+
+    def _poll_identities(self) -> None:
+        """Keep each repo's numeric GitHub id and current name (#94).
+
+        At most one ``GET /repos/{owner}/{repo}`` per repo per
+        ``IDENTITY_INTERVAL`` (immediately for a repo with no id yet). A
+        transfer or rename updates the existing row and config entry, so the
+        series keeps its ``repo_id``.
+        """
+        config = self._get_cached_config()
+        now = time.monotonic()
+        renamed = False
+        for repo_config in config.repos:
+            if not self._running or not repo_config.github_enabled:
+                continue
+            repo_id = self._store.get_repo_id(repo_config.path)
+            if repo_id is None:
+                continue
+            last = self._identity_checked.get(repo_id)
+            interval = (self.IDENTITY_INTERVAL
+                        if self._store.get_github_id(repo_id) is not None
+                        else self.IDENTITY_RETRY)
+            if last is not None and now - last < interval:
+                continue
+            self._identity_checked[repo_id] = now
+            try:
+                status, etag, new_path = sync_repo_identity(
+                    self._store, self._client, repo_id, repo_config,
+                    etag=self._identity_etags.get(repo_id))
+            except Exception as e:
+                self._log_repo_error(
+                    f"identity:{repo_config.owner}/{repo_config.repo}",
+                    f"{repo_config.owner}/{repo_config.repo}", e)
+                continue
+            if etag:
+                self._identity_etags[repo_id] = etag
+            if new_path is not None:
+                renamed = True
+        if renamed:
+            self._config_cache = None  # the next tick reads the new names
 
     def _log_repo_error(self, error_key: str, repo_name: str, exc: Exception) -> None:
         """Log con backoff: traceback completo solo en el primer fallo o si
@@ -317,6 +368,59 @@ class GitHubHarvester:
 
         # Sin info de reviews en /issues endpoint, default a "review"
         return "review"
+
+
+def sync_repo_identity(store: GitStore, client: GitHubClient, repo_id: int,
+                       repo_config, etag: str | None = None,
+                       ) -> tuple[int, str | None, str | None]:
+    """Store the repo's numeric GitHub id; follow a transfer/rename (#94).
+
+    One ``GET /repos/{owner}/{repo}`` (GitHub redirects a moved repo, so the
+    answer names its CURRENT ``owner/name``). When that differs from the
+    registered name, the SAME ``repos`` row and config entry are updated —
+    no new row, the issues/PRs/commits keep their ``repo_id``. A clone-less
+    repo is re-keyed (``remote:``/``board:`` + new name); a code repo keeps
+    its path. Nothing changes when another row already holds the id or the
+    new key (a duplicate registration is reported, never merged).
+
+    Returns ``(status, etag, new_path)``; ``new_path`` is set only on a
+    rename.
+    """
+    from hub.config import keyed_repo_path, rename_repo_in_config, repo_has_git
+
+    owner, repo = repo_config.owner, repo_config.repo
+    status, data, new_etag = client.get_repo(owner, repo, etag=etag)
+    if status != 200 or not data:
+        return status, new_etag, None
+    try:
+        gid = int(data["id"])
+        new_owner, new_repo = str(data["full_name"]).split("/", 1)
+    except (KeyError, TypeError, ValueError):
+        return 0, None, None
+    other = store.get_repo_by_github_id(gid)
+    if other is not None and other["id"] != repo_id:
+        _log.warning("%s/%s y %s/%s son el mismo repo de GitHub (id %d); "
+                     "quitá uno con mool repo remove", owner, repo,
+                     other["owner"], other["repo_name"], gid)
+        return status, new_etag, None
+    if (new_owner.lower(), new_repo.lower()) == (owner.lower(), repo.lower()):
+        store.set_github_identity(repo_id, gid, owner, repo)
+        return status, new_etag, None
+    new_key = None
+    if not repo_has_git(repo_config):
+        new_key = keyed_repo_path(repo_config.kind, new_owner, new_repo)
+        clash = store.get_repo_id(new_key)
+        if clash is not None and clash != repo_id:
+            _log.warning("%s/%s ahora es %s/%s, que ya está registrado aparte;"
+                         " quitá uno con mool repo remove", owner, repo,
+                         new_owner, new_repo)
+            store.set_github_identity(repo_id, gid, owner, repo)
+            return status, new_etag, None
+    store.set_github_identity(repo_id, gid, new_owner, new_repo, path=new_key)
+    new_path = rename_repo_in_config(repo_config.path, new_owner, new_repo)
+    _log.info("%s/%s ahora es %s/%s (id %d): historia conservada", owner,
+              repo, new_owner, new_repo, gid)
+    return status, new_etag, new_path or repo_config.path
 
 
 def fetch_pr_stats(store: GitStore, client: GitHubClient, repo_id: int,

@@ -56,8 +56,8 @@ class GitHarvester:
                 for repo in repos:
                     if not self._running:
                         break
-                    if repo.get("kind") == "board":
-                        continue  # issues-only backlog (#93): no git
+                    if repo.get("kind") in ("board", "remote"):
+                        continue  # no clone (#93 board, #94 remote): no git
                     self._fetch_and_ingest(repo)
             except Exception:
                 _log.warning("Error en ciclo de harvesting", exc_info=True)

@@ -787,6 +787,20 @@ def _portfolio_row(r: Any) -> dict[str, Any]:
     }
 
 
+
+def _keyed_repo_project_key(repo_path: str) -> str | None:
+    """Canonical project key of a clone-less repo (board #93, remote #94).
+
+    Its ``repos.path`` is ``board:``/``remote:`` + ``github.com/owner/repo``
+    — no directory to resolve — so its project is the GitHub remote identity
+    itself, the same ``git_remote:`` key a local clone of it resolves to.
+    ``None`` for a filesystem path.
+    """
+    for prefix in ("board:", "remote:"):
+        if repo_path.startswith(prefix):
+            return "git_remote:" + repo_path[len(prefix):].lower()
+    return None
+
 class WorkspaceStore:
     """Thread-safe SQLite persistence for workspace attribution."""
 
@@ -1458,6 +1472,9 @@ class WorkspaceStore:
                 counts = outcome_by_repo.get(repo_id)
                 if not counts or not any(counts):
                     continue
+                keyed = _keyed_repo_project_key(repo_path)
+                if keyed is not None:  # clone-less repo (#93/#94)
+                    key_cache.setdefault(repo_path, keyed)
                 pk = key_cache.get(repo_path, ...)  # type: ignore[arg-type]
                 if pk is ...:
                     ident = resolve_dir(repo_path)
@@ -1542,6 +1559,9 @@ class WorkspaceStore:
             for repo_id, repo_path, complete in repos:
                 if not repo_path:
                     continue
+                keyed = _keyed_repo_project_key(repo_path)
+                if keyed is not None:  # clone-less repo (#93/#94)
+                    key_cache.setdefault(repo_path, keyed)
                 pk = key_cache.get(repo_path, ...)  # type: ignore[arg-type]
                 if pk is ...:
                     ident = resolve_dir(repo_path)
@@ -1898,6 +1918,9 @@ class WorkspaceStore:
             for repo_id, repo_path in repos:
                 if not repo_path:
                     continue
+                keyed = _keyed_repo_project_key(repo_path)
+                if keyed is not None:  # clone-less repo (#93/#94)
+                    key_cache.setdefault(repo_path, keyed)
                 pk = key_cache.get(repo_path, ...)  # type: ignore[arg-type]
                 if pk is ...:
                     ident = resolve_dir(repo_path)

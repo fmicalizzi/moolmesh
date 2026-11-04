@@ -246,7 +246,7 @@ async function loadRepos() {
     repos = await resp.json();
     const select = document.getElementById('repoSelect');
     select.innerHTML = repos.length 
-      ? repos.map(r => `<option value="${r.id}">${r.owner}/${r.repo_name}${r.kind === 'board' ? ' · board' : ''}</option>`).join('')
+      ? repos.map(r => `<option value="${r.id}">${r.owner}/${r.repo_name}${r.kind === 'board' ? ' · board' : r.kind === 'remote' ? ' · sin clon' : ''}</option>`).join('')
       : '<option value="">No hay repos registrados</option>';
     if (repos.length) {
       currentRepoId = repos[0].id;

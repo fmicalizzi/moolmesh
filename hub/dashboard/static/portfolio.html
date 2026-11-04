@@ -392,6 +392,10 @@ function outcomeCell(p, delivMeasurable){
   // así que nunca es "0 entregado": mostramos el backlog.
   if (p.board)
     return `<span class="pc-out out-cl" title="Repo board (sólo issues, sin git): el backlog es la medida — issues abiertas / cerradas (totales).">board · ${op} abiertas · ${cl} cerradas${arch}</span>`;
+  // Remote-only (#94): sin clon, sin commits — las PRs mergeadas son la
+  // entrega; sin ninguna todavía es "sin clon", nunca "0 entregado".
+  if (p.no_clone && !pr && !cl && !op)
+    return `<span class="pc-out out-na" title="Repo seguido sólo por la API de GitHub (sin clon local, sin commits): la entrega se mide por PRs mergeadas — todavía ninguna.">sin clon${arch}</span>`;
   if (!pr && !cl && !op)
     return `<span class="pc-out out-zero" title="Repo GitHub vinculado, aún sin PRs mergeados ni issues cerrados — entrega real: 0">0 entregado${arch}</span>`;
   // #59: donde el historial git está acotado (sin repo sync --all), el total NO
@@ -404,6 +408,7 @@ function outcomeCell(p, delivMeasurable){
   if (pr) parts.push(`<span class="out-pr"><b>${pr}</b> PR</span>`);
   if (cl) parts.push(`<span class="out-cl">${cl} cerr.</span>`);
   if (op) parts.push(`<span class="out-op">${op} ab.</span>`);
+  if (p.no_clone) parts.unshift('<span class="out-na" title="Sin clon local: seguido sólo por la API de GitHub; las PRs mergeadas cuentan como entrega.">sin clon</span>');
   return `<span class="pc-out" title="${tip}">${parts.join(' · ')}${arch}</span>`;
 }
 

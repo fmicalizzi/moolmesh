@@ -761,9 +761,79 @@ def _board_remote_keys(github_db: str) -> set[str]:
     }
 
 
+def _remote_repo_activity(
+    github_db: str, first_day: str, last_day: str, tz: Any,
+) -> dict[str, dict[str, str]]:
+    """Remote-only repos (#94) with GitHub activity in the window.
+
+    ``{project_key: {"label": "owner/repo", "last_day": day}}`` for every
+    ``kind = 'remote'`` repo with an issue or PR created, updated, closed or
+    merged on a local day of ``[first_day, last_day]``. Such a repo has no
+    clone, hence no session edges: without this it would never appear in the
+    portfolio. Read-only; ``{}`` when the DB, table or column is absent.
+    """
+    if not os.path.exists(github_db):
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{github_db}?mode=ro", uri=True, timeout=5)
+    except sqlite3.OperationalError:
+        return {}
+    try:
+        repos = conn.execute(
+            "SELECT id, owner, repo_name FROM repos WHERE kind = 'remote'"
+        ).fetchall()
+        if not repos:
+            return {}
+        rows = conn.execute(
+            """SELECT i.repo_id, i.created_at, i.updated_at, i.closed_at,
+                      i.pr_merged_at
+               FROM github_issues i JOIN repos r ON r.id = i.repo_id
+               WHERE r.kind = 'remote'"""
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        conn.close()
+    from hub import localtime
+    last: dict[int, str] = {}
+    for rid, *stamps in rows:
+        for ts in stamps:
+            day = localtime.local_day(ts, tz) if ts else None
+            if day and first_day <= day <= last_day and day > last.get(rid, ""):
+                last[rid] = day
+    out: dict[str, dict[str, str]] = {}
+    for rid, owner, name in repos:
+        if rid in last and owner and name:
+            out[f"git_remote:github.com/{owner}/{name}".lower()] = {
+                "label": f"{owner}/{name}", "last_day": last[rid]}
+    return out
+
+
+def _remote_only_keys(github_db: str) -> set[str]:
+    """Identities (``github.com/owner/repo``, lowercased) of remote-only repos
+    (#94, ``kind = 'remote'``). ``set()`` when absent/unmigrated."""
+    if not os.path.exists(github_db):
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{github_db}?mode=ro", uri=True, timeout=5)
+    except sqlite3.OperationalError:
+        return set()
+    try:
+        rows = conn.execute(
+            "SELECT owner, repo_name FROM repos WHERE kind = 'remote'").fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    finally:
+        conn.close()
+    return {
+        f"github.com/{owner}/{repo}".lower()
+        for owner, repo in rows if owner and repo
+    }
+
+
 def _annotate_github_measured_projects(
     projects: list[dict[str, Any]], registered: set[str],
-    boards: set[str] | None = None,
+    boards: set[str] | None = None, remotes: set[str] | None = None,
 ) -> None:
     """Mark each project ``has_remote`` (GitHub) and ``registered`` in place.
 
@@ -773,6 +843,7 @@ def _annotate_github_measured_projects(
     no names — masking is unaffected.
     """
     boards = boards or set()
+    remotes = remotes or set()
     for p in projects:
         pk = p.get("project_key") or ""
         if pk.startswith("git_remote:github.com/"):
@@ -782,10 +853,14 @@ def _annotate_github_measured_projects(
             # A board (#93) is an issues-only backlog: its outcome is the
             # backlog, never "0 entregado" for lack of merged PRs.
             p["board"] = ident in boards
+            # Remote-only (#94): no clone, so no commits — merged PRs are the
+            # delivery; the UI says "sin clon", never "0 entregado".
+            p["no_clone"] = ident in remotes
         else:
             p["has_remote"] = False
             p["registered"] = False
             p["board"] = False
+            p["no_clone"] = False
 
 
 def _get_board_issues(
@@ -1190,7 +1265,7 @@ def _get_portfolio_grouped(
     # folding (registrados sin actividad) and the "no medido" column both see it.
     _annotate_github_measured_projects(
         grouped.get("projects", []), _registered_remote_keys(github_db),
-        _board_remote_keys(github_db))
+        _board_remote_keys(github_db), _remote_only_keys(github_db))
 
     # Third tier (#29): client/org hierarchy over the flat projects. Resolve the
     # effective client config — auto-seed only when the owner identity is known
@@ -1504,10 +1579,45 @@ def _portfolio_production(
         if st:
             row["state"] = st
         projects.append(row)
+    # Remote-only repos (#94) have no clone, so no session edges: one with
+    # GitHub activity in the window gets its own row (sessions 0) so its
+    # merged PRs show up as delivery.
+    try:
+        remote_rows = _remote_repo_activity(github_db, start, today, tz)
+    except Exception:
+        _log.exception("remote repo activity failed; rows omitted")
+        remote_rows = {}
+    for pk, info in remote_rows.items():
+        if pk in proj:
+            continue
+        oc = outcome.get(pk, {})
+        row = {
+            "project_key": pk,
+            "project_label": masked_label(info["label"], hide),
+            "sessions": 0,
+            "active_days": 0,
+            "deliverables": 0,
+            "merged_prs": oc.get("merged_prs", 0),
+            "closed_issues": oc.get("closed_issues", 0),
+            "open_issues": oc.get("open_issues", 0),
+            "merged_prs_window": oc.get("merged_prs_window", 0),
+            "closed_issues_window": oc.get("closed_issues_window", 0),
+            "last_day": info["last_day"],
+            "days": {},
+        }
+        cov = coverage.get(pk)
+        if cov:
+            row["outcome_complete"] = bool(cov.get("complete"))
+            row["outcome_since"] = cov.get("since")
+        st = states.get(pk)
+        if st:
+            row["state"] = st
+        projects.append(row)
     # Registered-vs-remote honesty (#60): a GitHub remote never registered shows
     # "no medido" instead of "— sin repo" — a third, distinct state.
     _annotate_github_measured_projects(
-        projects, _registered_remote_keys(github_db), _board_remote_keys(github_db))
+        projects, _registered_remote_keys(github_db), _board_remote_keys(github_db),
+        _remote_only_keys(github_db))
     # Hottest (most-recent activity) on top; ties broken by session volume.
     projects.sort(key=lambda p: (p["last_day"], p["sessions"]), reverse=True)
 
