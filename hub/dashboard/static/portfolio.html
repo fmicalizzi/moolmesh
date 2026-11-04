@@ -911,8 +911,15 @@ function freshnessState(m, nowMs){
 function renderFreshness(m){
   const el = document.getElementById('attr-fresh');
   const st = freshnessState(m, Date.now());
-  el.className = `fs-mon ${st.cls}`;
-  el.innerHTML = `<span class="dot"></span><span>${st.html}</span>`;
+  // Touch the DOM only when the state changes (#49): aria-live="polite" would
+  // otherwise re-announce the same line on every 60 s refresh.
+  const cls = `fs-mon ${st.cls}`;
+  const html = `<span class="dot"></span><span>${st.html}</span>`;
+  if (el.className !== cls) el.className = cls;
+  if (el.dataset.freshHtml !== html){
+    el.dataset.freshHtml = html;
+    el.innerHTML = html;
+  }
 }
 
 initProdToggle();

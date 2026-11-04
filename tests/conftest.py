@@ -80,6 +80,24 @@ def _guard_isolated_home():
         )
     yield
 
+@pytest.fixture
+def home_isolation():
+    """The isolation values, for tests that check them (#49).
+
+    A fixture instead of ``from tests import conftest``: under
+    ``--import-mode=importlib`` that import would execute this file a second
+    time (a new TEST_HOME, and the `hub`-already-imported guard would abort).
+    """
+    import types
+
+    return types.SimpleNamespace(
+        TEST_HOME=TEST_HOME,
+        REAL_HOME=REAL_HOME,
+        home_derived_paths=_home_derived_paths,
+        outside_test_home=_outside_test_home,
+    )
+
+
 # Silenciar logging durante tests para no contaminar pytest output
 logging.getLogger("hub").addHandler(logging.NullHandler())
 logging.getLogger("hub").setLevel(logging.CRITICAL)

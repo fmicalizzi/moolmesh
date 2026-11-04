@@ -101,11 +101,14 @@ class WorkspaceWatcher:
         self._thread = threading.Thread(target=self._scan_loop, daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
+        """Signal and join (bounded). True iff the thread is no longer running."""
         self._running = False
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=5)
+            return not self._thread.is_alive()
+        return True
 
     @property
     def watched_count(self) -> int:

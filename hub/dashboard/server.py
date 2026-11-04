@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import http.server
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -44,6 +45,8 @@ FRESHNESS_BANNER = rb"""<div id="mm-freshness-banner" role="alert" style="displa
 </script>
 """
 
+
+_log = logging.getLogger("hub.dashboard")
 
 class DashboardStartError(RuntimeError):
     """The dashboard did not start; callers should exit non-zero (#55)."""
@@ -593,10 +596,21 @@ class DashboardServer:
             self.github_harvester.stop()
         # Stop (bounded join) before any store closes, so an in-flight
         # filesystem scan is not cut mid-write (#44).
+        joined = True
         if self.workspace_watcher:
-            self.workspace_watcher.stop()
+            joined = self.workspace_watcher.stop() is not False and joined
         if self.workspace_attributor:
-            self.workspace_attributor.stop()
+            joined = self.workspace_attributor.stop() is not False and joined
+        # Close workspace_store only once both writers joined (#49): closing it
+        # under a thread still running after a join timeout is worse than
+        # leaving it open for process exit to reclaim.
+        if self.workspace_store:
+            if joined:
+                self.workspace_store.close()
+            else:
+                _log.warning(
+                    "workspace threads did not stop in time; "
+                    "leaving workspace_store open")
         if self.git_store:
             self.git_store.close()
         self.event_store.close()

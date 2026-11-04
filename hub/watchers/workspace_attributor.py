@@ -88,10 +88,13 @@ class WorkspaceAttributor:
         )
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
+        """Signal and join (bounded). True iff the thread is no longer running."""
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=5)
+            return not self._thread.is_alive()
+        return True
 
     def _loop(self) -> None:
         if self._stop_event.wait(self._initial_delay):

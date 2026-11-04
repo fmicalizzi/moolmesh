@@ -571,6 +571,53 @@ class TestServerWiring:
         srv.event_store.close.assert_called_once()
         httpd.shutdown.assert_called_once()
 
+    def _mocked(self, tmp_path, server_env, watcher_joined=True, attributor_joined=True):
+        from unittest import mock
+        from hub.config import WorkspaceRoot
+        srv = server_env(
+            auto_attribution=True, filesystem_monitoring=True,
+            workspace_roots=[WorkspaceRoot(path=str(tmp_path), max_depth=1)],
+        )
+        srv.workspace_store.close()  # release the real one; a mock replaces it
+        calls = mock.Mock()
+        calls.workspace_watcher.stop.return_value = watcher_joined
+        calls.workspace_attributor.stop.return_value = attributor_joined
+        srv.workspace_watcher = calls.workspace_watcher
+        srv.workspace_attributor = calls.workspace_attributor
+        srv.workspace_store = calls.workspace_store
+        srv.git_store = calls.git_store
+        srv.event_store = calls.event_store
+        srv.watchers = []
+        return srv, calls
+
+    def test_shutdown_closes_workspace_store_after_both_joins(self, tmp_path, server_env):
+        """#49: workspace_store is closed, after both workspace threads stop."""
+        srv, calls = self._mocked(tmp_path, server_env)
+        srv._shutdown(calls.httpd)
+        names = [c[0] for c in calls.mock_calls]
+        assert names[:3] == [
+            "workspace_watcher.stop", "workspace_attributor.stop",
+            "workspace_store.close",
+        ]
+        calls.workspace_store.close.assert_called_once()
+
+    @pytest.mark.parametrize("w, a", [(False, True), (True, False), (False, False)])
+    def test_shutdown_leaves_workspace_store_open_on_join_timeout(
+        self, tmp_path, server_env, monkeypatch, w, a
+    ):
+        """#49: a thread still running after its join timeout keeps the store open."""
+        from unittest import mock
+        import hub.dashboard.server as server_mod
+        log = mock.Mock()
+        monkeypatch.setattr(server_mod, "_log", log)
+        srv, calls = self._mocked(tmp_path, server_env, w, a)
+        srv._shutdown(calls.httpd)
+        calls.workspace_store.close.assert_not_called()
+        calls.workspace_watcher.stop.assert_called_once()
+        calls.workspace_attributor.stop.assert_called_once()
+        calls.event_store.close.assert_called_once()
+        assert "leaving workspace_store open" in log.warning.call_args[0][0]
+
 
 def _serve(srv):
     import http.server
