@@ -40,6 +40,9 @@ class GitHubHarvester:
         self._client = github_client
         self._sse_buffer = sse_buffer
         self._running = False
+        # Set by stop(): the poll loops wait on it instead of sleeping, so a
+        # stop never waits out a 15-60 s interval (#96).
+        self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
         # ETags por repo para conditional requests
         self._etags: dict[str, str] = {}  # "owner/repo/issues" -> etag
@@ -54,6 +57,7 @@ class GitHubHarvester:
 
     def start(self) -> None:
         self._running = True
+        self._stop_event.clear()
         # Thread 1: Issues/PRs (15s)
         t1 = threading.Thread(target=self._loop_issues_prs, daemon=True)
         # Thread 2: Milestones (60s)
@@ -66,6 +70,7 @@ class GitHubHarvester:
 
     def stop(self) -> None:
         self._running = False
+        self._stop_event.set()
         for t in self._threads:
             t.join(timeout=5)
 
@@ -75,7 +80,7 @@ class GitHubHarvester:
                 self._poll_all_repos(self._poll_issues_prs)
             except Exception:
                 _log.warning("Error polling issues/PRs", exc_info=True)
-            time.sleep(self.ISSUE_PR_INTERVAL)
+            self._stop_event.wait(self.ISSUE_PR_INTERVAL)
 
     def _loop_milestones(self) -> None:
         while self._running:
@@ -83,7 +88,7 @@ class GitHubHarvester:
                 self._poll_all_repos(self._poll_milestones)
             except Exception:
                 _log.warning("Error polling milestones", exc_info=True)
-            time.sleep(self.MILESTONE_INTERVAL)
+            self._stop_event.wait(self.MILESTONE_INTERVAL)
 
     def _loop_projects(self) -> None:
         while self._running:
@@ -91,7 +96,7 @@ class GitHubHarvester:
                 self._poll_all_repos(self._poll_projects)
             except Exception:
                 _log.warning("Error polling projects", exc_info=True)
-            time.sleep(self.PROJECT_INTERVAL)
+            self._stop_event.wait(self.PROJECT_INTERVAL)
 
     def _get_cached_config(self):
         """Retorna config cacheada, recargando si expiró."""

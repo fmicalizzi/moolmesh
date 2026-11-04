@@ -75,6 +75,8 @@ class BaseHarvester(ABC):
         self._sse_buffer = sse_buffer  # shared deque for SSE broadcast
         self._running: bool = False
         self._thread: threading.Thread | None = None
+        # Set by stop(): the loop waits on it instead of sleeping (#96).
+        self._stop_event = threading.Event()
         self._watched_files: dict[Path, str] = {}  # path -> fingerprint
         # Old files to ingest quietly after a daemon outage (#45), oldest first.
         self._catchup_queue: collections.deque[Path] = collections.deque()
@@ -143,6 +145,7 @@ class BaseHarvester(ABC):
     def start(self) -> None:
         """Start harvesting in a daemon thread."""
         self._running = True
+        self._stop_event.clear()
         self._started_at = time.time()
         self._thread = threading.Thread(
             target=self._harvest_loop, name=f"{self.provider_name}-watcher",
@@ -152,6 +155,7 @@ class BaseHarvester(ABC):
 
     def stop(self) -> None:
         self._running = False
+        self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=5)
 
@@ -254,8 +258,8 @@ class BaseHarvester(ABC):
                 self._note_loop_error(exc)
 
             self._last_cycle_at = time.time()
-            # Sleep between cycles
-            time.sleep(self.POLL_INTERVAL)
+            # Wait between cycles; stop() wakes it at once (#96).
+            self._stop_event.wait(self.POLL_INTERVAL)
 
     def _note_loop_error(self, exc: BaseException) -> None:
         """Record a loop-level failure, logging once per error type."""

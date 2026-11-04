@@ -142,8 +142,10 @@ class TestStopDaemonWindows:
         pid_file.write_text("42", encoding="utf-8")
         monkeypatch.setattr(daemon, "PID_FILE", pid_file)
 
-        # Stays alive through the graceful wait, then force taskkill.
-        monkeypatch.setattr(daemon, "_pid_alive", lambda pid: True)
+        # Stays alive through the graceful wait; gone after the force
+        # taskkill (stop now waits for the exit, #96).
+        forced = []
+        monkeypatch.setattr(daemon, "_pid_alive", lambda pid: not forced)
 
         def exploding_kill(*args):
             raise AssertionError("os.kill must not be called on Windows")
@@ -151,7 +153,11 @@ class TestStopDaemonWindows:
         monkeypatch.setattr("os.kill", exploding_kill)
         monkeypatch.setattr(daemon.time, "sleep", lambda _: None)
 
-        with patch("subprocess.run") as mock_run:
+        def fake_run(cmd, **kw):
+            if "/F" in cmd:
+                forced.append(True)
+
+        with patch("subprocess.run", side_effect=fake_run) as mock_run:
             result = daemon.stop_daemon()
             assert result is True
             force_call = [c for c in mock_run.call_args_list if "/F" in c[0][0]]
@@ -193,6 +199,8 @@ class TestStopDaemonUnix:
         def fake_kill(pid, sig):
             kill_signals.append(sig)
             if sig == 0:
+                if signal.SIGKILL in kill_signals:
+                    raise ProcessLookupError  # gone after SIGKILL (#96)
                 return
             if sig == signal.SIGTERM:
                 return

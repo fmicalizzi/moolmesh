@@ -19,6 +19,14 @@ LOG_FILE = CONFIG_DIR / "daemon.log"
 DEFAULT_START_TIMEOUT = 10.0
 _POLL_INTERVAL = 0.2
 
+# How long ``stop`` (every mechanism) and a ``start`` that finds a daemon
+# shutting down wait for the old PID to exit (#96). Shutdown takes well under
+# a second now that the loops wake on their stop event; the margin covers a
+# daemon still running pre-#96 code (~26 s) right after an upgrade.
+STOP_TIMEOUT = 30.0
+# Unsupervised stop: SIGTERM grace before escalating to SIGKILL / taskkill /F.
+STOP_GRACE = 10.0
+
 # daemon.log stays bounded (#76): past LOG_MAX_BYTES it is renamed to
 # daemon.log.1 (replacing the previous one) at start and every
 # LOG_CHECK_INTERVAL seconds while the daemon runs.
@@ -36,6 +44,15 @@ _scrubbed_env: list[str] = []
 
 class DaemonStartError(RuntimeError):
     """The background daemon did not become healthy in the start window."""
+
+
+class DaemonStopTimeout(RuntimeError):
+    """The daemon process was still alive when the stop wait ran out (#96)."""
+
+    def __init__(self, pid: int, timeout: float):
+        super().__init__(f"PID {pid} still shutting down after {timeout:g}s")
+        self.pid = pid
+        self.timeout = timeout
 
 
 def read_pid() -> int | None:
@@ -123,6 +140,60 @@ def _fetch_health(host: str, port: int) -> dict | None:
             return json.loads(resp.read())
     except (OSError, ValueError, http.client.HTTPException):
         return None
+
+
+def wait_for_pid_exit(pid: int, timeout: float | None = None) -> bool:
+    """Poll until ``pid`` is gone; False if it is still alive after ``timeout``.
+
+    Counts polls rather than reading the clock, so a test that stubs
+    ``time.sleep`` finishes at once instead of spinning for ``timeout``.
+    """
+    if timeout is None:
+        timeout = STOP_TIMEOUT
+    polls = max(1, round(timeout / _POLL_INTERVAL))
+    for _ in range(polls):
+        if not _pid_alive(pid):
+            return True
+        time.sleep(_POLL_INTERVAL)
+    return not _pid_alive(pid)
+
+
+def daemon_serves(pid: int, host: str, port: int) -> bool:
+    """Does ``/health`` on ``host:port`` answer as a serving MoolMesh? (#96)
+
+    ``healthy`` or ``degraded`` both count. A payload naming another PID
+    does not: that is some other daemon, not ``pid``. A payload without a
+    ``pid`` (older daemons) is taken at face value.
+    """
+    health = _fetch_health(_probe_host(host), port)
+    if not health or health.get("status") not in ("healthy", "degraded"):
+        return False
+    other = health.get("pid")
+    return other is None or other == pid
+
+
+def wait_out_shutdown(pid: int, host: str, port: int,
+                      timeout: float | None = None) -> str:
+    """Classify a live PID found by ``start`` (#96).
+
+    Returns ``"running"`` as soon as it answers ``/health`` (a daemon that
+    is up, or still starting), ``"exited"`` once the process is gone (it was
+    shutting down), or ``"stuck"`` if neither happens within ``timeout``.
+    """
+    if timeout is None:
+        timeout = STOP_TIMEOUT
+    polls = max(1, round(timeout / _POLL_INTERVAL))
+    for _ in range(polls):
+        if not _pid_alive(pid):
+            PID_FILE.unlink(missing_ok=True)
+            return "exited"
+        if daemon_serves(pid, host, port):
+            return "running"
+        time.sleep(_POLL_INTERVAL)
+    if not _pid_alive(pid):
+        PID_FILE.unlink(missing_ok=True)
+        return "exited"
+    return "stuck"
 
 
 def _terminate_pid(pid: int, *, wait_seconds: float = 3.0) -> None:
@@ -499,11 +570,15 @@ def _run_server(
 
 
 def stop_daemon() -> bool:
-    """Stop a running daemon. Returns True if stopped successfully.
+    """Stop a running daemon and wait until its PID is gone.
 
-    Windows stops via ``taskkill /PID`` (force with ``/F``); the SIGTERM/
-    SIGKILL path is Unix-only. Liveness is always probed with ``_pid_alive``,
-    never ``os.kill`` — on Windows that would terminate the process (#55).
+    Returns False when no daemon was running, True once the process has
+    exited. SIGTERM (Windows: ``taskkill /PID``) gets ``STOP_GRACE`` seconds,
+    then SIGKILL (``taskkill /F``); the force kill also waits for the exit
+    and raises ``DaemonStopTimeout`` if the process is somehow still there
+    (#96), so callers never report "stopped" for a live process. Liveness is
+    always probed with ``_pid_alive``, never ``os.kill`` — on Windows that
+    would terminate the process (#55).
     """
     pid = read_pid()
     if pid is None:
@@ -512,13 +587,15 @@ def stop_daemon() -> bool:
     if _IS_WINDOWS:
         subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
     else:
-        os.kill(pid, signal.SIGTERM)
-
-    for _ in range(20):
-        time.sleep(0.5)
-        if not _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
             PID_FILE.unlink(missing_ok=True)
             return True
+
+    if wait_for_pid_exit(pid, STOP_GRACE):
+        PID_FILE.unlink(missing_ok=True)
+        return True
 
     # Force kill
     try:
@@ -526,9 +603,11 @@ def stop_daemon() -> bool:
             subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
         else:
             os.kill(pid, signal.SIGKILL)
-        PID_FILE.unlink(missing_ok=True)
     except ProcessLookupError:
-        PID_FILE.unlink(missing_ok=True)
+        pass
+    if not wait_for_pid_exit(pid, 5.0):
+        raise DaemonStopTimeout(pid, STOP_GRACE + 5.0)
+    PID_FILE.unlink(missing_ok=True)
     return True
 
 

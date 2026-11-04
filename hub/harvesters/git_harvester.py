@@ -4,7 +4,6 @@ from __future__ import annotations
 import collections
 import re
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 
 from hub.cache.git_store import GitStore
@@ -31,17 +30,21 @@ class GitHarvester:
         self._store = git_store
         self._sse_buffer = sse_buffer
         self._running = False
+        # Set by stop(): the loop waits on it instead of sleeping (#96).
+        self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         """Arranca en daemon thread."""
         self._running = True
+        self._stop_event.clear()
         self._thread = threading.Thread(target=self._harvest_loop, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         """Detiene el harvester."""
         self._running = False
+        self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=5)
 
@@ -56,7 +59,7 @@ class GitHarvester:
                     self._fetch_and_ingest(repo)
             except Exception:
                 _log.warning("Error en ciclo de harvesting", exc_info=True)
-            time.sleep(self.FETCH_INTERVAL)
+            self._stop_event.wait(self.FETCH_INTERVAL)
 
     def _fetch_and_ingest(self, repo: dict) -> None:
         """Fetch un repo, detectar refs nuevas, ingestar commits."""

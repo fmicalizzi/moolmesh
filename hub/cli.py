@@ -145,11 +145,14 @@ def cmd_daemon(args: argparse.Namespace) -> None:
 
     ``start``/``restart`` exit 1 when the daemon cannot start: a supervised
     or foreground bind error, or a background child that never answers
-    /health within the start window (#55, #55b). ``stop``/``status`` always
-    notify without blocking.
+    /health within the start window (#55, #55b). ``stop`` waits until the
+    PID is gone and exits 1 if it is still shutting down after the timeout;
+    ``start`` waits out a daemon that is shutting down instead of reporting
+    it as running (#96). ``status`` never blocks.
     """
     from hub.daemon import (
         stop_daemon, daemon_status, read_pid, _pid_is_supervised,
+        DaemonStopTimeout,
     )
 
     match args.daemon_command:
@@ -163,17 +166,24 @@ def cmd_daemon(args: argparse.Namespace) -> None:
             raise SystemExit(_delegate_to_supervisor(args))
 
         case "start":
-            existing = read_pid()
-            if existing:
-                print(yellow(f"MoolMesh daemon already running (PID {existing})"))
+            port = args.port if args.port is not None else 5200
+            code = _check_existing_for_start(args.host, port)
+            if code == 0:
                 return
+            if code is not None:
+                raise SystemExit(code)
             _launch_daemon(args, restarted=False)
 
         case "stop":
             pid = read_pid()
             if pid and _pid_is_supervised(pid):
                 _print_supervisor_warning("stop")
-            if stop_daemon():
+            try:
+                stopped = stop_daemon()
+            except DaemonStopTimeout as exc:
+                _print_still_shutting_down(exc.pid, exc.timeout)
+                raise SystemExit(1)
+            if stopped:
                 print(green("MoolMesh daemon stopped"))
             else:
                 print(yellow("No daemon running"))
@@ -183,7 +193,11 @@ def cmd_daemon(args: argparse.Namespace) -> None:
             if info:
                 if _pid_is_supervised(info["pid"]):
                     _print_supervisor_warning("restart")
-                stop_daemon()
+                try:
+                    stop_daemon()
+                except DaemonStopTimeout as exc:
+                    _print_still_shutting_down(exc.pid, exc.timeout)
+                    raise SystemExit(1)
                 print(dim("Stopped previous daemon"))
                 import time
                 time.sleep(0.5)
@@ -199,6 +213,42 @@ def cmd_daemon(args: argparse.Namespace) -> None:
 
         case _:
             print("Uso: mool daemon {start|stop|status|restart|install|uninstall}")
+
+
+def _print_still_shutting_down(pid: int, timeout: float) -> None:
+    print(red(f"Error: MoolMesh daemon (PID {pid}) is still shutting down "
+              f"after {timeout:g}s"), file=sys.stderr)
+    print(dim(f"  Check again with: mool daemon status — or end it: kill {pid}"),
+          file=sys.stderr)
+
+
+def _check_existing_for_start(host: str, port: int) -> int | None:
+    """What ``start`` does about a daemon PID that is already alive (#96).
+
+    None: nothing is running (or the old daemon finished shutting down while
+    we waited) — go on and start. 0: a daemon answers ``/health`` — "already
+    running". 1: the PID stayed alive without serving for ``STOP_TIMEOUT``.
+    A live PID whose ``/health`` is down is a daemon shutting down (or still
+    starting): we wait for it instead of answering "already running" for a
+    process that is about to exit and leave nothing behind.
+    """
+    from hub.daemon import read_pid, daemon_serves, wait_out_shutdown, STOP_TIMEOUT
+    pid = read_pid()
+    if not pid:
+        return None
+    if daemon_serves(pid, host, port):
+        print(yellow(f"MoolMesh daemon already running (PID {pid})"))
+        return 0
+    print(dim(f"  Daemon PID {pid} is alive but not answering on port {port}; "
+              f"waiting for it to finish (up to {STOP_TIMEOUT:g}s)"))
+    outcome = wait_out_shutdown(pid, host, port)
+    if outcome == "exited":
+        return None
+    if outcome == "running":
+        print(yellow(f"MoolMesh daemon already running (PID {pid})"))
+        return 0
+    _print_still_shutting_down(pid, STOP_TIMEOUT)
+    return 1
 
 
 # ── Run at login (#76) ───────────────────────────────────────────────
@@ -225,17 +275,24 @@ def _delegate_to_supervisor(args: argparse.Namespace) -> int:
     supervised one, and the supervisor's state never drifts from reality.
     """
     from hub import autostart
-    from hub.daemon import read_pid, stop_daemon, _fetch_health, _probe_host
+    from hub.daemon import (
+        read_pid, stop_daemon, wait_for_pid_exit, _fetch_health, _probe_host,
+        DaemonStopTimeout, STOP_TIMEOUT,
+    )
 
     state = autostart.managed_state()
     action = args.daemon_command
     name = autostart.MECHANISM_NAMES[state.mechanism]
+    host = state.host or "localhost"
+    port = state.port or 5200
 
     if action == "start":
-        existing = read_pid()
-        if existing:
-            print(yellow(f"MoolMesh daemon already running (PID {existing})"))
-            return 0
+        code = _check_existing_for_start(host, port)
+        if code is not None:
+            return code
+    # The PID the supervisor is about to stop: stop/restart wait for it to be
+    # gone, since `launchctl kill` returns before the process exits (#96).
+    old_pid = read_pid() if action in ("stop", "restart") else None
     ignored = [f for f in ("host", "port", "project", "providers")
                if getattr(args, f, None) not in (None, "localhost")]
     if action != "stop" and ignored:
@@ -246,7 +303,11 @@ def _delegate_to_supervisor(args: argparse.Namespace) -> int:
     commands = autostart.supervisor_commands(action, state.mechanism)
     if action in ("stop", "restart") and state.mechanism == "schtasks":
         # Task Scheduler never revives a stopped process: stop it directly.
-        stop_daemon()
+        try:
+            stop_daemon()
+        except DaemonStopTimeout as exc:
+            _print_still_shutting_down(exc.pid, exc.timeout)
+            return 1
     for cmd in commands or []:
         result = autostart._run(cmd)
         if result.returncode != 0:
@@ -259,20 +320,24 @@ def _delegate_to_supervisor(args: argparse.Namespace) -> int:
                       "mool daemon install"), file=sys.stderr)
             return 1
 
+    if old_pid and not wait_for_pid_exit(old_pid, STOP_TIMEOUT):
+        _print_still_shutting_down(old_pid, STOP_TIMEOUT)
+        return 1
+
     if action == "stop":
         print(green(f"MoolMesh daemon stopped via {name}"))
         print(dim("  It starts again at the next login, or with: mool daemon start"))
         return 0
 
-    host = state.host or "localhost"
-    port = state.port or 5200
     import time
     deadline = time.monotonic() + 15
     health = None
     while time.monotonic() < deadline:
         health = _fetch_health(_probe_host(host), port)
-        if health and health.get("status") in ("healthy", "degraded"):
+        if (health and health.get("status") in ("healthy", "degraded")
+                and (old_pid is None or health.get("pid") != old_pid)):
             break
+        health = None
         time.sleep(0.5)
     verb = "restarted" if action == "restart" else "started"
     if health:
@@ -305,7 +370,7 @@ def cmd_daemon_install(args: argparse.Namespace) -> int:
     (rerun with --force), or a supervisor command failed; 2 unsupported OS.
     """
     from hub import autostart
-    from hub.daemon import read_pid, stop_daemon, _pid_is_supervised
+    from hub.daemon import read_pid, stop_daemon, _pid_is_supervised, DaemonStopTimeout
 
     mechanism = autostart.detect_mechanism()
     if mechanism is None:
@@ -386,7 +451,11 @@ def cmd_daemon_install(args: argparse.Namespace) -> int:
     pid = read_pid()
     if pid and not _pid_is_supervised(pid):
         print(dim(f"  Stopping the running daemon (PID {pid}) so the supervisor owns it"))
-        stop_daemon()
+        try:
+            stop_daemon()
+        except DaemonStopTimeout as exc:
+            _print_still_shutting_down(exc.pid, exc.timeout)
+            return 1
 
     plan.path.parent.mkdir(parents=True, exist_ok=True)
     plan.path.write_text(plan.content, encoding="utf-8")
@@ -480,8 +549,12 @@ def cmd_daemon_uninstall(args: argparse.Namespace) -> int:
         return 0
 
     if mechanism == "schtasks":
-        from hub.daemon import stop_daemon
-        stop_daemon()
+        from hub.daemon import stop_daemon, DaemonStopTimeout
+        try:
+            stop_daemon()
+        except DaemonStopTimeout as exc:
+            # Removing the registration still proceeds; only the process lingers.
+            _print_still_shutting_down(exc.pid, exc.timeout)
     ok = True
     for cmd in commands:
         result = autostart._run(cmd)

@@ -85,6 +85,8 @@ class WorkspaceWatcher:
         self._store = store
         self._roots = list(roots)
         self._running: bool = False
+        # Set by stop(): the loop waits on it instead of sleeping (#96).
+        self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._touch_count: int = 0
 
@@ -95,11 +97,13 @@ class WorkspaceWatcher:
         if not self._roots:
             return
         self._running = True
+        self._stop_event.clear()
         self._thread = threading.Thread(target=self._scan_loop, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._running = False
+        self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=5)
 
@@ -132,7 +136,7 @@ class WorkspaceWatcher:
                     self._store.detect_delivery_candidates()
                 except Exception:  # noqa: BLE001
                     _log.warning("rollup/delivery build failed", exc_info=True)
-            time.sleep(self.SCAN_INTERVAL)
+            self._stop_event.wait(self.SCAN_INTERVAL)
 
     # --- one root scan (also the unit-test entry point) ---
 
