@@ -241,6 +241,64 @@ def _mig_5_opencode_first_ingest_day(conn: sqlite3.Connection) -> None:
         conn.executemany("UPDATE events SET historical = 1 WHERE id = ?", ids)
 
 
+# Returned by a migration that could not run safely yet: it is NOT recorded
+# in schema_migrations, so the next open retries it.
+_MIGRATION_DEFERRED = object()
+
+
+def _mig_6_opencode_session_times_iso(conn: sqlite3.Connection):
+    """Rewrite OpenCode ms-epoch ``first_event_at``/``last_event_at`` as ISO (#79).
+
+    Before v1.28.0 the OpenCode watcher handed ``upsert_session`` the raw
+    ``time_created`` (``"1760000000000"``) while every event timestamp is ISO,
+    so ``refresh_session_stats``' text ``MIN``/``MAX`` mixed the two clocks
+    (``"1…" < "2…"``). Each 13-digit value becomes the same fixed-width UTC ISO
+    the adapter now emits (``hub.localtime.utc_iso_from_epoch``).
+
+    Rewrites only after a consistent copy of events.db is taken with sqlite3's
+    online backup API (``hub.backfill.backup_events_db``, the copy
+    ``mool backfill --reparse --yes`` makes). If that copy fails nothing is
+    rewritten and the migration is deferred to the next open. Idempotent: only
+    all-digit values of provider ``opencode`` are touched, and a database with
+    none is left as is (no backup taken).
+    """
+    from hub.localtime import utc_iso_from_epoch
+
+    rows = conn.execute(
+        """SELECT id, first_event_at, last_event_at FROM sessions
+           WHERE provider = 'opencode'"""
+    ).fetchall()
+    updates = []
+    for sid, first, last in rows:
+        new_first = utc_iso_from_epoch(first) if first and str(first).isdigit() else first
+        new_last = utc_iso_from_epoch(last) if last and str(last).isdigit() else last
+        if (new_first, new_last) != (first, last):
+            updates.append((new_first, new_last, sid))
+    if not updates:
+        return None
+
+    db_file = next((r[2] for r in conn.execute("PRAGMA database_list")
+                    if r[1] == "main"), "")
+    if db_file:
+        from hub.backfill import backup_events_db
+        conn.commit()
+        try:
+            backup = backup_events_db(Path(db_file))
+        except (OSError, sqlite3.Error):
+            _log.warning("migración 6: no pude respaldar events.db; no reescribo "
+                         "las fechas de sesión de OpenCode, reintento al próximo "
+                         "arranque", exc_info=True)
+            return _MIGRATION_DEFERRED
+        _log.info("migración 6: respaldo de events.db en %s antes de reescribir "
+                  "%d sesiones de OpenCode", backup, len(updates))
+    conn.executemany(
+        """UPDATE sessions SET first_event_at = ?, last_event_at = ?
+           WHERE id = ? AND provider = 'opencode'""",
+        updates,
+    )
+    return None
+
+
 # Versioned, additive migrations for events.db — each runs exactly once.
 _EVENT_STORE_MIGRATIONS = [
     (1, "session_lifecycle", _mig_1_session_lifecycle),
@@ -248,6 +306,7 @@ _EVENT_STORE_MIGRATIONS = [
     (3, "historical_flag", _mig_3_historical_flag),
     (4, "registry_path_key", _mig_4_registry_path_key),
     (5, "opencode_first_ingest_day", _mig_5_opencode_first_ingest_day),
+    (6, "opencode_session_times_iso", _mig_6_opencode_session_times_iso),
 ]
 
 
@@ -572,7 +631,9 @@ class EventStore:
         for version, name, fn in _EVENT_STORE_MIGRATIONS:
             if version in applied:
                 continue
-            fn(self._conn)
+            if fn(self._conn) is _MIGRATION_DEFERRED:
+                self._conn.rollback()
+                continue
             import time
             self._conn.execute(
                 "INSERT INTO schema_migrations VALUES (?, ?, ?)",

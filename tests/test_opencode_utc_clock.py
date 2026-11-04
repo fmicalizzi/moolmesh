@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import hub.cache.event_store as es
 from hub.adapters.opencode_adapter import OpenCodeAdapter
 from hub.backfill import run_reparse_opencode
 from hub.cache.event_store import EventStore, _compute_fingerprint
@@ -125,3 +126,83 @@ class TestReparseNoOpAcrossZones:
         assert not first.isdigit() and not last.isdigit()
         assert first.endswith("+00:00") and first <= last
         store.close()
+
+
+class TestMigration6:
+    def _legacy(self, db: Path) -> None:
+        """A pre-v1.28.0 events.db: ms-epoch OpenCode session times."""
+        store = EventStore(db_path=db)
+        conn = store._get_conn()
+        conn.executemany(
+            "INSERT INTO sessions (id, provider, project, first_event_at, last_event_at,"
+            " created_at) VALUES (?, ?, 'proj', ?, ?, 0)",
+            [("s1", "opencode", "1772951400000", "1772951460000"),
+             ("s2", "opencode", "1772951400000", "2026-03-08T06:31:00-05:00"),
+             ("s3", "opencode", "2026-03-08T06:30:00.000+00:00", None),
+             ("s4", "claude", "1772951400000", "1772951400000")])
+        conn.execute("DELETE FROM schema_migrations WHERE version = 6")
+        conn.commit()
+        store.close()
+
+    def _times(self, db: Path) -> dict:
+        c = sqlite3.connect(db)
+        try:
+            return {(r[0], r[1]): (r[2], r[3]) for r in c.execute(
+                "SELECT id, provider, first_event_at, last_event_at FROM sessions")}
+        finally:
+            c.close()
+
+    def test_rewrites_after_backup_and_runs_once(self, tmp_path):
+        db = tmp_path / "events.db"
+        self._legacy(db)
+        before = self._times(db)
+
+        EventStore(db_path=db).close()   # runs migration 6
+        after = self._times(db)
+        assert after[("s1", "opencode")] == ("2026-03-08T06:30:00.000+00:00",
+                                             "2026-03-08T06:31:00.000+00:00")
+        assert after[("s2", "opencode")] == ("2026-03-08T06:30:00.000+00:00",
+                                             "2026-03-08T06:31:00-05:00")
+        assert after[("s3", "opencode")] == before[("s3", "opencode")]
+        assert after[("s4", "claude")] == before[("s4", "claude")]   # other providers untouched
+
+        backups = list((tmp_path / "backups").glob("events-*.db"))
+        assert len(backups) == 1
+        assert self._times(backups[0]) == before   # the copy predates the rewrite
+
+        EventStore(db_path=db).close()   # recorded: never runs again
+        assert self._times(db) == after
+        assert len(list((tmp_path / "backups").glob("events-*.db"))) == 1
+
+    def test_idempotent_function_and_no_backup_when_clean(self, tmp_path):
+        db = tmp_path / "events.db"
+        self._legacy(db)
+        EventStore(db_path=db).close()
+        conn = sqlite3.connect(db)
+        assert es._mig_6_opencode_session_times_iso(conn) is None   # nothing left
+        conn.close()
+        assert len(list((tmp_path / "backups").glob("events-*.db"))) == 1
+
+        fresh = tmp_path / "fresh" / "events.db"
+        EventStore(db_path=fresh).close()
+        assert not (fresh.parent / "backups").exists()
+
+    def test_backup_failure_defers_without_rewriting(self, tmp_path, monkeypatch):
+        import hub.backfill as backfill
+        db = tmp_path / "events.db"
+        self._legacy(db)
+        before = self._times(db)
+
+        def _fail(*a, **kw):
+            raise OSError("disk full")
+        monkeypatch.setattr(backfill, "backup_events_db", _fail)
+        EventStore(db_path=db).close()
+        assert self._times(db) == before
+        c = sqlite3.connect(db)
+        assert c.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = 6").fetchone() is None
+        c.close()
+
+        monkeypatch.undo()
+        EventStore(db_path=db).close()   # retried on the next open
+        assert self._times(db)[("s1", "opencode")][0] == "2026-03-08T06:30:00.000+00:00"
