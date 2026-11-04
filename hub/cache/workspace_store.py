@@ -1237,6 +1237,15 @@ class WorkspaceStore:
         for repo_path, *_ in git_rows:
             if repo_path not in git_idents:
                 git_idents[repo_path] = resolve_dir(repo_path)
+        # Registered repos are never pruned as orphans (#46). ``None`` = the
+        # registry could not be read → no pruning this pass (never guess).
+        registered = self._registered_repo_paths(github_db_path)
+        registered_keys: set[str] | None = None
+        if registered is not None:
+            for repo_path in registered:
+                if repo_path not in git_idents:
+                    git_idents[repo_path] = resolve_dir(repo_path)
+            registered_keys = {git_idents[p].key for p in registered}
 
         with self._lock:
             conn = self._conn
@@ -1353,6 +1362,10 @@ class WorkspaceStore:
                     """DELETE FROM workspace_rollup
                        WHERE session_touches = 0 AND fs_touches = 0 AND git_touches = 0"""
                 )
+                pruned = (
+                    self._prune_orphan_workspaces_locked(registered_keys)
+                    if registered_keys is not None else 0
+                )
                 conn.execute(
                     "INSERT OR REPLACE INTO rollup_meta (key, value) VALUES (?, ?)",
                     (_ROLLUP_ZONE_KEY, zone),
@@ -1383,7 +1396,58 @@ class WorkspaceStore:
             "session_reconciled": len(stale),
             "git_repos_matched": git_repos_matched,
             "git_repos_new": git_repos_new,
+            "orphans_pruned": pruned,
         }
+
+    @staticmethod
+    def _registered_repo_paths(github_db_path: str | Path) -> set[str] | None:
+        """Repo paths registered in ``github.db`` (read-only).
+
+        ``set()`` when github.db is absent (nothing is registered); ``None`` when
+        it exists but cannot be read — the orphan prune then skips the pass.
+        """
+        if not os.path.exists(str(github_db_path)):
+            return set()
+        try:
+            src = sqlite3.connect(f"file:{github_db_path}?mode=ro", uri=True, timeout=5)
+        except sqlite3.Error:
+            return None
+        try:
+            return {p for (p,) in src.execute("SELECT path FROM repos") if p}
+        except sqlite3.Error:
+            return None
+        finally:
+            src.close()
+
+    def _prune_orphan_workspaces_locked(self, registered_keys: set[str]) -> int:
+        """Delete workspaces nothing points at any more (#46). Caller holds the lock
+        and owns the transaction (runs inside ``build_rollup``'s, before commit).
+
+        An orphan has no session edge, no fs touch, no rollup row (so no git
+        days either — git lives only in the rollup), no delivery candidate and
+        no active day; is not a repo registered in github.db; and its key is
+        not another workspace's ``project_key`` (its own classification is
+        derived and cascades). No backup: every row here is derived — a
+        workspace is re-minted by the next attribution, touch or git pass that
+        resolves to its key, so nothing user-owned is lost.
+        """
+        conn = self._conn
+        rows = conn.execute(
+            """SELECT w.id, w.workspace_key FROM workspaces w
+               WHERE NOT EXISTS (SELECT 1 FROM path_attributions a WHERE a.workspace_id = w.id)
+                 AND NOT EXISTS (SELECT 1 FROM path_touches t WHERE t.workspace_id = w.id)
+                 AND NOT EXISTS (SELECT 1 FROM workspace_rollup r WHERE r.workspace_id = w.id)
+                 AND NOT EXISTS (SELECT 1 FROM delivery_candidates d WHERE d.workspace_id = w.id)
+                 AND NOT EXISTS (SELECT 1 FROM edge_active_days e WHERE e.workspace_id = w.id)
+                 AND NOT EXISTS (SELECT 1 FROM workspace_classification c
+                                 WHERE c.project_key = w.workspace_key
+                                   AND c.workspace_id <> w.id)"""
+        ).fetchall()
+        ids = [(wid,) for wid, key in rows if key not in registered_keys]
+        if ids:
+            conn.executemany("DELETE FROM workspaces WHERE id = ?", ids)
+            _log.info("rollup: %d workspace(s) huérfano(s) eliminados (#46)", len(ids))
+        return len(ids)
 
     def _rollup_zone_locked(self) -> str | None:
         """Zone key ``workspace_rollup.day`` was last built in (``None``: unset)."""
