@@ -199,6 +199,17 @@ of `workspace.db`; changing `[user] timezone` re-derives them the same way. A
 session whose events are no longer in `events.db` is dated by its last event,
 as before.
 
+The rollup views (`get_portfolio`, `get_portfolio_grouped` and its client tier,
+`mool workspace portfolio`, the `/portfolio` rows) carry the same figures next
+to the touches, additively: `sessions_worked` (distinct sessions) and
+`days_worked` (distinct local days) in the window — a client unions the
+sessions and days of its projects, so a session shared by two projects counts
+once. `days_worked_basis` says where they came from: `edge_active_days`, or
+`rollup` when the table is missing or bucketed in another zone (then
+`days_worked` is `active_days` and `sessions_worked` is `null`).
+`session_touches` and `active_days` keep their meaning. The CLI shows
+`Nd (Nd/Mses worked)`.
+
 ---
 
 ## Updating

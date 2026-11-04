@@ -273,7 +273,8 @@ function esc(s){ return String(s==null?'':s).replace(/[&<>]/g, c=>({'&':'&amp;',
 function label(r){ return r.label || r.remote_url || r.root_path || r.dir_path || r.workspace_key || '—'; }
 
 function badges(sources){ return (sources||[]).map(s => `<span class="badge b-${esc(s)}">${esc(s)}</span>`).join('') || ''; }
-function metaStr(r){ return `${r.session_touches||0}s / ${r.fs_touches||0}f / ${r.git_touches||0}g · ${r.active_days||0}d · ${esc((r.last_activity||'—').replace('T',' ').slice(0,16))}`; }
+function workedStr(r){ return r.days_worked_basis === 'edge_active_days' ? ` (${r.days_worked||0}d/${r.sessions_worked||0}ses trabajados)` : ''; }
+function metaStr(r){ return `${r.session_touches||0}s / ${r.fs_touches||0}f / ${r.git_touches||0}g · ${r.active_days||0}d${workedStr(r)} · ${esc((r.last_activity||'—').replace('T',' ').slice(0,16))}`; }
 
 // --- Production over time (#24 Stage 2): per-project contribution strip.
 // Effort = sessions (NOT duration), dated by ingestion (MAX events.created_at)

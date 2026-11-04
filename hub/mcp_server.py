@@ -1294,7 +1294,8 @@ def _get_portfolio(
                    SUM(r.fs_touches) AS fs_touches,
                    SUM(r.git_touches) AS git_touches,
                    COUNT(*) AS active_days,
-                   MAX(r.last_activity) AS last_activity
+                   MAX(r.last_activity) AS last_activity,
+                   w.id AS workspace_id
             FROM workspace_rollup r
             JOIN workspaces w ON w.id = r.workspace_id
             {where}
@@ -1305,11 +1306,19 @@ def _get_portfolio(
     except sqlite3.OperationalError:
         conn.close()
         return []
+    # Days worked (#123): distinct sessions/days from edge_active_days, same
+    # rule as the production strip; None → fallback to the rollup's days.
+    from hub.cache.workspace_store import _worked_by_workspace, _worked_fields
+    worked = _worked_by_workspace(conn, since)
     conn.close()
     excl = _exclusions()
     out = []
     for r in rows:
         d = dict(r)
+        wid = d.pop("workspace_id")
+        d.update(_worked_fields(
+            None if worked is None else worked.get(wid, set()),
+            d["active_days"]))
         if excl and excl.matches_remote(d.get("remote_url")):
             continue  # confidential repo (#95)
         d["sources"] = _lit_sources(

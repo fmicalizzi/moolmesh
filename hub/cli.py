@@ -2908,10 +2908,18 @@ def cmd_workspace_portfolio(args: argparse.Namespace) -> None:
         srcs = "+".join(r["sources"]) or "—"
         meta = (
             f"[{srcs}] {r['session_touches']}s/{r['fs_touches']}f/"
-            f"{r['git_touches']}g, {r['active_days']}d"
+            f"{r['git_touches']}g, {r['active_days']}d{_worked_suffix(r)}"
         )
         print(f"  {label}")
         print(dim(f"    {meta}  last: {r['last_activity'] or '—'}"))
+
+
+def _worked_suffix(r: dict) -> str:
+    """`` (Nd/Ms worked)`` from the #123 fields, appended after the rollup's
+    ``Nd``; empty on the fallback basis (the number would just repeat ``Nd``)."""
+    if r.get("days_worked_basis") != "edge_active_days":
+        return ""
+    return f" ({r.get('days_worked', 0)}d/{r.get('sessions_worked', 0)}ses worked)"
 
 
 def _print_portfolio_grouped(grouped: dict, json_output: bool) -> None:
@@ -2945,7 +2953,8 @@ def _print_portfolio_grouped(grouped: dict, json_output: bool) -> None:
         print(f"  {bold(label)}{extra}")
         print(dim(
             f"    [{srcs}] {p['session_touches']}s/{p['fs_touches']}f/"
-            f"{p['git_touches']}g, {p['active_days']}d  last: {p['last_activity'] or '—'}"
+            f"{p['git_touches']}g, {p['active_days']}d{_worked_suffix(p)}"
+            f"  last: {p['last_activity'] or '—'}"
         ))
         for c in p["children"]:
             clabel = masked_label(c.get("dir_path") or c.get("root_path") or "", hide)

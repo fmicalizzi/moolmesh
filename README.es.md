@@ -179,6 +179,17 @@ llena desde `events.db`, tras un respaldo de `workspace.db`; cambiar
 `[user] timezone` los recalcula igual. Una sesión cuyos eventos ya no están en
 `events.db` se fecha por su último evento, como antes.
 
+Las vistas del rollup (`get_portfolio`, `get_portfolio_grouped` y su nivel de
+clientes, `mool workspace portfolio`, las filas de `/portfolio`) traen las
+mismas cifras junto a los toques, de forma aditiva: `sessions_worked` (sesiones
+distintas) y `days_worked` (días locales distintos) en la ventana — un cliente
+une las sesiones y días de sus proyectos, así que una sesión compartida por dos
+proyectos cuenta una vez. `days_worked_basis` dice de dónde salen:
+`edge_active_days`, o `rollup` si la tabla falta o está en otra zona (entonces
+`days_worked` es `active_days` y `sessions_worked` es `null`).
+`session_touches` y `active_days` no cambian de significado. La CLI muestra
+`Nd (Nd/Mses worked)`.
+
 ---
 
 ## Instalación en producción

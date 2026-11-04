@@ -379,11 +379,20 @@ def _aggregate_client(client_key: str, label: str,
     last = ""
     merged = closed = open_ = 0
     harness = 0
+    worked: set[tuple[str, str, str]] | None = set()
     for p in members:
         s += p.get("session_touches", 0) or 0
         f += p.get("fs_touches", 0) or 0
         g += p.get("git_touches", 0) or 0
         days.update(p.get("_day_set") or [])
+        # #123: union (session, provider, day) across projects — a session
+        # shared by two projects counts once. Any member without the set
+        # (table unusable) sends the whole client to the fallback.
+        ws = p.get("_worked_set")
+        if ws is None or worked is None:
+            worked = None
+        else:
+            worked.update(tuple(x) for x in ws)
         la = p.get("last_activity") or ""
         if la > last:
             last = la
@@ -392,13 +401,14 @@ def _aggregate_client(client_key: str, label: str,
         closed += oc["closed_issues"]
         open_ += oc["open_issues"]
         harness += p.get("collapsed_harness", 0) or 0
-    from hub.cache.workspace_store import _lit_sources
+    from hub.cache.workspace_store import _lit_sources, _worked_fields
     node = {
         "client_key": client_key,
         "client_label": label,
         "bucket": "client",
         "session_touches": s, "fs_touches": f, "git_touches": g,
         "active_days": len(days),
+        **_worked_fields(worked, len(days)),
         "last_activity": last or None,
         "sources": _lit_sources(s, f, g),
         "outcome": {"merged_prs": merged, "closed_issues": closed,
@@ -486,7 +496,8 @@ def strip_internal(payload: dict[str, Any]) -> None:
     """
     def _clean(rows: list[dict[str, Any]] | None) -> None:
         for r in rows or []:
-            for k in ("_day_set", "_remote_url", "_anchor_path", "_child_orgs"):
+            for k in ("_day_set", "_worked_set", "_remote_url", "_anchor_path",
+                      "_child_orgs"):
                 r.pop(k, None)
             _clean(r.get("children"))
 

@@ -891,6 +891,70 @@ def _rewrite_project_aliases(
     return out, warnings
 
 
+def _worked_by_workspace(
+    conn: sqlite3.Connection, since: str | None = None,
+) -> dict[int, set[tuple[str, str, str]]] | None:
+    """Days worked per workspace from ``edge_active_days`` (#123).
+
+    Returns ``{workspace_id: {(session_id, provider, day), ...}}`` over the
+    window (``day >= since``, plain string compare like the rollup), so a view
+    can report DISTINCT sessions and DISTINCT days — never a sum of days —
+    across any set of workspaces (a project fold, a client union). Same rule as
+    the production strip (#114): only while the table's recorded zone is the
+    configured zone being read, and only rows whose edge (session, provider,
+    workspace, via) still exists in ``path_attributions``. ``None`` means "not
+    usable" (pre-#114 workspace.db, no zone recorded yet, or another zone):
+    the caller falls back to the rollup's ``active_days``.
+    """
+    try:
+        zrow = conn.execute(
+            "SELECT value FROM rollup_meta WHERE key = ?", (_ACTIVE_DAYS_ZONE_KEY,)
+        ).fetchone()
+        if zrow is None or zrow[0] != zone_key(user_timezone()):
+            return None
+        where = ""
+        params: list[Any] = []
+        if since:
+            where = "AND d.day >= ?"
+            params.append(since[:10])
+        rows = conn.execute(
+            f"""SELECT d.workspace_id, d.session_id, d.provider, d.day
+                FROM edge_active_days d
+                WHERE EXISTS (
+                    SELECT 1 FROM path_attributions a
+                    WHERE a.session_id = d.session_id
+                      AND a.provider = d.provider
+                      AND a.workspace_id = d.workspace_id
+                      AND a.via = d.via)
+                {where}""",
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None  # pre-#114 workspace.db: no table, no zone
+    out: dict[int, set[tuple[str, str, str]]] = {}
+    for wid, sid, prov, day in rows:
+        out.setdefault(wid, set()).add((sid, prov or "", day))
+    return out
+
+
+def _worked_fields(
+    worked: set[tuple[str, str, str]] | None, active_days: int,
+) -> dict[str, Any]:
+    """The additive #123 fields from a worked set (``None`` = fallback).
+
+    ``sessions_worked`` = distinct sessions, ``days_worked`` = distinct local
+    days, ``days_worked_basis`` says where the number came from:
+    ``edge_active_days`` or ``rollup`` (fallback: ``days_worked`` is the
+    rollup's ``active_days`` and ``sessions_worked`` is ``None`` — there is no
+    honest session count to fall back to)."""
+    if worked is None:
+        return {"sessions_worked": None, "days_worked": active_days,
+                "days_worked_basis": "rollup"}
+    return {"sessions_worked": len({(s, p) for s, p, _ in worked}),
+            "days_worked": len({d for _, _, d in worked}),
+            "days_worked_basis": "edge_active_days"}
+
+
 def _portfolio_row(r: Any) -> dict[str, Any]:
     """Shape one aggregated portfolio row (shared by the store and MCP reads)."""
     session_n, fs_n, git_n = r[5] or 0, r[6] or 0, r[7] or 0
@@ -3206,7 +3270,8 @@ class WorkspaceStore:
                            SUM(r.fs_touches) AS fs_touches,
                            SUM(r.git_touches) AS git_touches,
                            COUNT(*) AS active_days,
-                           MAX(r.last_activity) AS last_activity
+                           MAX(r.last_activity) AS last_activity,
+                           w.id AS workspace_id
                     FROM workspace_rollup r
                     JOIN workspaces w ON w.id = r.workspace_id
                     {where}
@@ -3214,7 +3279,15 @@ class WorkspaceStore:
                     ORDER BY last_activity DESC""",
                 params,
             ).fetchall()
-        return [_portfolio_row(r) for r in rows]
+            worked = _worked_by_workspace(self._conn, since)
+        out = []
+        for r in rows:
+            d = _portfolio_row(r)
+            d.update(_worked_fields(
+                None if worked is None else worked.get(r[10], set()),
+                d["active_days"]))
+            out.append(d)
+        return out
 
     def get_workspace_activity(
         self, workspace_key: str, since: str | None = None
@@ -3449,6 +3522,7 @@ class WorkspaceStore:
                     WHERE 1=1 {day_where}""",
                 params,
             ).fetchall()
+            worked_by_wid = _worked_by_workspace(conn, since)
 
         roll_by_wid: dict[int, list[Any]] = {}
         for row in roll:
@@ -3467,15 +3541,26 @@ class WorkspaceStore:
                         days.add(day)
                     if la and la > last:
                         last = la
+            worked: set[tuple[str, str, str]] | None = None
+            if worked_by_wid is not None:
+                worked = set()
+                for wid in wids:
+                    worked |= worked_by_wid.get(wid, set())
             return {
                 "session_touches": s, "fs_touches": f, "git_touches": g,
                 "active_days": len(days), "last_activity": last or None,
                 "sources": _lit_sources(s, f, g),
+                # Days worked (#123): distinct sessions/days over the fold.
+                **_worked_fields(worked, len(days)),
                 # Internal: the DISTINCT day set (not just its count) so the
                 # client rollup (#29) can UNION days across a client's projects
                 # instead of summing counts (same discipline as active_days).
                 # Stripped before the payload leaves ``_get_portfolio_grouped``.
                 "_day_set": sorted(days),
+                # Internal (#123): the (session, provider, day) set, so a
+                # client unions sessions/days across its projects. None =
+                # fallback (table unusable). Stripped like ``_day_set``.
+                "_worked_set": None if worked is None else sorted(worked),
             }
 
         # Group projects by project_key; children (nest) held per project.
