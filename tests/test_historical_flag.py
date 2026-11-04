@@ -17,13 +17,18 @@ from hub.watchers.claude_watcher import ClaudeWatcher
 DAY = 86400
 
 
+def _iso(epoch: float) -> str:
+    """UTC ISO of ``epoch``: a live fixture must carry a recent event time (#62)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(epoch))
+
+
 def _claude_file(base: Path, sid: str, age: float, n: int = 3) -> Path:
     proj = base / "-Users-test-alpha"
     proj.mkdir(parents=True, exist_ok=True)
     f = proj / f"{sid}.jsonl"
     f.write_text("\n".join(json.dumps({
         "type": "user", "sessionId": sid, "cwd": "/Users/test/alpha",
-        "uuid": f"{sid}-{i}", "timestamp": f"2026-03-15T10:0{i}:00.000Z",
+        "uuid": f"{sid}-{i}", "timestamp": _iso(time.time() - age + i),
         "message": {"role": "user", "content": f"msg {i} {sid}"},
     }) for i in range(n)) + "\n")
     t = time.time() - age
@@ -120,7 +125,7 @@ def test_recent_readers_skip_history_even_with_higher_ids(tmp_path):
     with open(f, "a") as fh:
         fh.write(json.dumps({
             "type": "user", "sessionId": "live", "cwd": "/Users/test/alpha",
-            "uuid": "live-new", "timestamp": "2026-09-26T10:00:00.000Z",
+            "uuid": "live-new", "timestamp": _iso(time.time()),
             "message": {"role": "user", "content": "new live message"},
         }) + "\n")
     _live_harvest(store, base)

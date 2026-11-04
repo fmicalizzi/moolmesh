@@ -116,9 +116,13 @@ class TestOpenCodeWatcher:
         assert offset2 > offset1
         store.close()
 
-    def test_sse_buffer_receives_events(self, tmp_path):
+    def test_sse_buffer_receives_events(self, tmp_path, monkeypatch):
         db_path = tmp_path / "opencode.db"
         _create_test_db(db_path, num_parts=3)
+        # The fixture's parts are from 2023: inside the live window only when
+        # "now" is then (#62 stores older events as history, off SSE).
+        monkeypatch.setattr(OpenCodeWatcher, "_default_cutoff",
+                            lambda self: 1700000000 - 3600)
         sse_buf = collections.deque(maxlen=100)
         store = EventStore(db_path=tmp_path / "events.db")
         watcher = OpenCodeWatcher(store, sse_buffer=sse_buf, opencode_db=db_path)

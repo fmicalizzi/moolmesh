@@ -22,7 +22,9 @@ def _claude_file(base: Path, sid: str, age: float) -> Path:
     f = proj / f"{sid}.jsonl"
     f.write_text("\n".join(json.dumps({
         "type": "user", "sessionId": sid, "cwd": "/Users/test/alpha",
-        "uuid": f"{sid}-{i}", "timestamp": f"2026-03-15T10:0{i}:00.000Z",
+        # Event time follows the file's age: a live fixture is recent (#62).
+        "uuid": f"{sid}-{i}",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - age + i)),
         "message": {"role": "user", "content": f"msg {i} {sid}"},
     }) for i in range(2)) + "\n")
     t = time.time() - age

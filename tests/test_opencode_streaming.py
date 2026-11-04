@@ -236,6 +236,8 @@ def test_rereads_after_a_streaming_part_do_not_duplicate_rows_or_sse(oc, tmp_pat
     real = watcher._parser.parse_incremental
     watcher._parser.parse_incremental = (
         lambda path, off: real(path, off, now_ms=clock["now"]))
+    # The injected clock is "now" for the live window too (#62).
+    watcher._default_cutoff = lambda: NOW / 1000 - watcher.MAX_AGE_HOURS * 3600
     try:
         rid = _put(oc, "p_stream", _text("", end=False))
         _put(oc, "p_after1", {"type": "text", "text": "question one"}, msg="m_user")

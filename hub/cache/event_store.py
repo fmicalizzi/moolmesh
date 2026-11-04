@@ -398,6 +398,32 @@ def _configured_full_text_cap() -> int:
         return DEFAULT_FULL_TEXT_MAX_CHARS
 
 
+# The live window (#62): an event whose own parsed time is older than this
+# when it is ingested is history, whatever path wrote it — a live watcher's
+# first full read of a DB-backed provider, the startup catch-up or a
+# backfill. Matches ``BaseHarvester.MAX_AGE_HOURS``; the watchers pass their
+# own cutoff to ``store_with_offset``.
+LIVE_WINDOW_HOURS = 12
+
+
+def _live_cutoff(live_since: float | None, now: float) -> float:
+    return now - LIVE_WINDOW_HOURS * 3600 if live_since is None else live_since
+
+
+def is_older_than(timestamp: Any, cutoff: float) -> bool:
+    """True when the event's parsed time is strictly before ``cutoff`` (epoch).
+
+    Mixed ISO formats and numeric epochs (seconds, or OpenCode milliseconds)
+    are parsed with the #53 definition (``_historical_event_dt``); an empty or
+    unreadable timestamp is NOT old — never guess, the row stays live.
+    """
+    if not timestamp:
+        return False
+    from hub.cache.workspace_store import _historical_event_dt
+    dt = _historical_event_dt(str(timestamp), None)
+    return dt is not None and dt.timestamp() < cutoff
+
+
 def _tokens_json(value: Any) -> str | None:
     """``json.dumps`` of a tokens payload, or None when absent/unserializable."""
     if not value:
@@ -457,7 +483,9 @@ def _insert_event_row(
             e.get("timestamp", ""), e.get("summary", ""), e.get("session_id"),
             _tokens_json(e.get("tokens")), e.get("tool_name"),
             e.get("file_path"), e.get("model"), e.get("cwd"),
-            _compute_fingerprint(e), now, 1 if historical else 0,
+            _compute_fingerprint(e), now,
+            1 if historical or is_older_than(e.get("timestamp"), _live_cutoff(None, now))
+            else 0,
         ),
     )
     if cursor.rowcount <= 0:
@@ -1012,7 +1040,7 @@ class EventStore:
         return self._conn
 
     def store(self, event_dict: dict[str, Any]) -> None:
-        """Store a single event."""
+        """Store a single event (a direct write, not an ingest path: no #62 rule)."""
         import time
         event_dict = _normalize_event(event_dict)
         tokens_json = _tokens_json(event_dict.get("tokens"))
@@ -1540,13 +1568,19 @@ class EventStore:
         file_path: str,
         new_offset: int,
         historical: bool = False,
+        live_since: float | None = None,
     ) -> list[dict]:
         """Store events and update file offset in a single atomic transaction.
 
         ``historical=True`` marks rows ingested by a non-live path (backfill /
-        catch-up, #45) so the "recent" readers skip them.
+        catch-up, #45) so the "recent" readers skip them. Independently, any
+        event whose parsed time is before ``live_since`` (epoch; default
+        ``now - LIVE_WINDOW_HOURS``) is historical too (#62): a live first read
+        of months of provider history is history by construction.
 
-        Returns the events with their assigned SQLite IDs (for SSE broadcast).
+        Returns the events with their assigned SQLite IDs (for SSE broadcast);
+        an event stored as historical by the #62 rule carries
+        ``"historical": True`` so the caller keeps it off the live stream.
         Duplicates (INSERT OR IGNORE that don't insert) are NOT returned.
         If the process crashes mid-write, both the events AND the offset
         roll back, so the next read resumes from the correct position.
@@ -1556,8 +1590,11 @@ class EventStore:
         import time
         now = time.time()
         normalized = [_normalize_event(e) for e in events]
+        cutoff = _live_cutoff(live_since, now)
+        old_flags = [bool(historical) or is_older_than(e.get("timestamp"), cutoff)
+                     for e in normalized]
         rows = []
-        for e in normalized:
+        for e, is_old in zip(normalized, old_flags):
             rows.append((
                 e.get("provider", ""),
                 e.get("project", ""),
@@ -1572,7 +1609,7 @@ class EventStore:
                 e.get("cwd"),
                 _compute_fingerprint(e),
                 now,
-                1 if historical else 0,
+                1 if is_old else 0,
             ))
 
         result_events = []
@@ -1592,6 +1629,8 @@ class EventStore:
                     if cursor.rowcount > 0:
                         ev = dict(normalized[i])
                         ev["id"] = cursor.lastrowid
+                        if old_flags[i] and not historical:
+                            ev["historical"] = True
                         full_text = ev.pop("full_text", None)
                         if full_text and cursor.lastrowid:
                             conn.execute(

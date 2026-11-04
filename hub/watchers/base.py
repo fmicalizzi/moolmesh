@@ -4,6 +4,8 @@ Each provider has ONE loop: discover -> read offset -> parse -> store -> sleep -
 The live loop only watches files modified within ``MAX_AGE_HOURS``; older
 history is ingested by ``mool backfill`` (``hub/backfill.py``) through the same
 parse/store path (``harvest_history_file``), never pushed to SSE (#45).
+An event the live loop reads whose own time is older than the live window
+is stored as history too and kept off SSE (#62).
 """
 
 from __future__ import annotations
@@ -470,17 +472,21 @@ class BaseHarvester(ABC):
         # Returns only newly-inserted events with their SQLite IDs
         try:
             stored = self._store.store_with_offset(
-                events, fingerprint, self.provider_name, str(path), new_offset
+                events, fingerprint, self.provider_name, str(path), new_offset,
+                live_since=self._default_cutoff(),
             )
         except Exception as exc:  # noqa: BLE001
             self._note_file_error(path, exc)
             return
         self._clear_file_error(path)
 
-        # Push stored events (with IDs) to SSE buffer for broadcast
+        # Push stored events (with IDs) to SSE buffer for broadcast. Events
+        # older than the live window were stored as history (#62) and, like
+        # every history path (#45), never reach the live stream.
         if self._sse_buffer is not None and stored:
             for ev in stored:
-                self._sse_buffer.append(ev)
+                if not ev.get("historical"):
+                    self._sse_buffer.append(ev)
 
     def harvest_history_file(
         self, path: Path, fingerprint: str, offset: int | None = None

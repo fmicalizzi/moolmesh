@@ -166,7 +166,17 @@ message) is capped at `[daemon] full_text_max_chars` characters (default
 256000; `0` = no cap): over it MoolMesh keeps the head and the tail around a
 `[… N caracteres omitidos por MoolMesh …]` marker, so a 20 MB tool output can no
 longer bloat `events.db`. The cap applies to new rows; text stored earlier is
-left as is. Before rewriting existing rows, migrations and `mool backfill
+left as is.
+
+**History is history on any path.** An event whose own time is older than the
+12 h live window when MoolMesh first reads it is stored as history
+(`events.historical = 1`), whether it came from the live watcher, the startup
+catch-up or `mool backfill`: the first read of an OpenCode or Cursor database
+(months of sessions) no longer floods the live feed and SSE, and the lines a
+resumed Claude session replays with their original dates stay out of "recent";
+its new messages are live as usual.
+
+**Backups.** Before rewriting existing rows, migrations and `mool backfill
 --reparse` copy the database to `~/.moolmesh/backups/`; only the newest 5
 `events-*` and 5 `workspace-*` copies are kept (older ones are deleted after
 each new backup, never the one just made).
