@@ -9,6 +9,12 @@ transcript views (``mool export``, the MCP ``get_session_events`` tool).
 Design (conservative — never hide what is not provably abandoned):
 
 * Sessions with no ``parent_id`` at all are returned unchanged (same order).
+* Only Pi sessions are pruned (#127). Pi's ``/tree`` is a real user branch.
+  Claude Code (and Qwen, same ``parentUuid`` chaining) also forks the tree
+  *without* any user branching: each parallel ``tool_use`` is its own chained
+  line and each ``tool_result`` hangs from the ``tool_use`` it answers, so a
+  tool_use has two children. A rewind/edit branch cannot be told apart from
+  that shape reliably, so those sessions are returned in stored order.
 * The leaf is the last event (in stored order) that has an ``entry_id``: the
   append-only tip of the file, which is where the conversation continues.
 * Only events in a *proven* abandoned branch are left out: walking from the
@@ -34,9 +40,20 @@ def has_tree(events: list[dict[str, Any]]) -> bool:
     return any(e.get("parent_id") for e in events)
 
 
+# Providers whose parent links are real, user-made branches (#127).
+PRUNABLE_PROVIDERS = frozenset({"pi"})
+
+
+def is_prunable(events: list[dict[str, Any]]) -> bool:
+    """True when every linked event comes from a provider with real branches."""
+    linked = [e for e in events if e.get("parent_id")]
+    return bool(linked) and all(
+        e.get("provider") in PRUNABLE_PROVIDERS for e in linked)
+
+
 def active_branch(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The events of the active branch, in input order (see module doc)."""
-    if not has_tree(events):
+    if not is_prunable(events):
         return list(events)
     ids = {e["entry_id"] for e in events if e.get("entry_id")}
     parent_of: dict[str, str] = {}

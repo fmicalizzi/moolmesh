@@ -72,13 +72,13 @@ class TestHelper:
 
     def test_drops_only_the_abandoned_subtree(self):
         evs = [
-            {"entry_id": "u1", "parent_id": None},
-            {"entry_id": "a1", "parent_id": "u1"},
-            {"entry_id": "u2", "parent_id": "a1"},
-            {"entry_id": "a2", "parent_id": "u2"},
+            {"provider": "pi", "entry_id": "u1", "parent_id": None},
+            {"provider": "pi", "entry_id": "a1", "parent_id": "u1"},
+            {"provider": "pi", "entry_id": "u2", "parent_id": "a1"},
+            {"provider": "pi", "entry_id": "a2", "parent_id": "u2"},
             {"summary": "legacy row, no id"},
-            {"entry_id": "u3", "parent_id": "a1"},
-            {"entry_id": "a3", "parent_id": "u3"},
+            {"provider": "pi", "entry_id": "u3", "parent_id": "a1"},
+            {"provider": "pi", "entry_id": "a3", "parent_id": "u3"},
         ]
         out = active_branch(evs)
         assert [e.get("entry_id") for e in out] == ["u1", "a1", None, "u3", "a3"]
@@ -87,10 +87,10 @@ class TestHelper:
         # u3's parent was never stored (a skipped bookkeeping line): what hangs
         # above the gap cannot be proven off-branch, so it is kept.
         evs = [
-            {"entry_id": "u1", "parent_id": None},
-            {"entry_id": "a1", "parent_id": "u1"},
-            {"entry_id": "u3", "parent_id": "missing"},
-            {"entry_id": "a3", "parent_id": "u3"},
+            {"provider": "pi", "entry_id": "u1", "parent_id": None},
+            {"provider": "pi", "entry_id": "a1", "parent_id": "u1"},
+            {"provider": "pi", "entry_id": "u3", "parent_id": "missing"},
+            {"provider": "pi", "entry_id": "a3", "parent_id": "u3"},
         ]
         assert active_branch(evs) == evs
 

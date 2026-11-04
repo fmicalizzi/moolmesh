@@ -105,8 +105,9 @@ def test_qwen_fills_ids_and_export_shows_active_branch(tmp_path):
                _q("u3", "u1", "active", "2026-09-21T10:00:03Z")]
     evs = [QwenAdapter().to_event(e, "proj").to_dict() for e in entries]
     assert evs[1]["entry_id"] == "u2" and evs[1]["parent_id"] == "u1"
+    # Qwen chains parentUuid like Claude: not pruned, stored order kept (#127).
     branch = active_branch(evs)
-    assert [e["entry_id"] for e in branch] == ["u1", "u3"]
+    assert [e["entry_id"] for e in branch] == ["u1", "u2", "u3"]
 
 
 def test_qwen_reread_does_not_duplicate_legacy_rows(tmp_path):
