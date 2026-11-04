@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.28.0
+Last updated: November 2026 — v1.28.1
 
 ---
 
@@ -226,6 +226,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.27.2** ([#76](https://github.com/fmicalizzi/moolmesh/issues/76)): the daemon survives a reboot. `mool daemon install` registers it with launchd, systemd `--user` or Task Scheduler (opt-in, never overwrites a hand-written file, always in the foreground); start/stop/restart then go through the supervisor. MCP portfolio tools, `get_server_info`, every dashboard page and `mool doctor` flag stale data measured from the last git and GitHub API syncs (`[daemon] stale_after_minutes`). `daemon.log` is bounded at 10 MB.
 
 - **v1.28.0** ([#81](https://github.com/fmicalizzi/moolmesh/issues/81), [#79](https://github.com/fmicalizzi/moolmesh/issues/79)): one definition of the local day (`[user] timezone`, DST-aware) shared by digests, the workspace rollup and the portfolio; `get_portfolio_production` adds `merged_prs_window` / `closed_issues_window`. OpenCode timestamps are UTC (stable fingerprints) and its session times ISO.
+
+- **v1.28.1** ([#52](https://github.com/fmicalizzi/moolmesh/issues/52), [#54](https://github.com/fmicalizzi/moolmesh/issues/54), [#62](https://github.com/fmicalizzi/moolmesh/issues/62), [#67](https://github.com/fmicalizzi/moolmesh/issues/67)): observe robustness. Streaming incremental reads, a per-event full-text cap, realpath Codex discovery, placeholder-aware live watcher, pruned backups; zero-footprint reads of closed WAL provider DBs; history is history on any ingest path; `events.entry_id` keeps parallel identical events apart.
 
 ---
 

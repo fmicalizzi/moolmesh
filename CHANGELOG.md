@@ -6,6 +6,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.28.1] — 2026-11-04
+
+Observation robustness (#52, #54, #62, #67). No new dependencies. One additive
+schema migration (a new nullable column; nothing is rewritten).
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- `~/.moolmesh/backups/` now prunes itself: the 5 newest `events-` and
+  `workspace-` copies are kept. Copy aside any older backup you want to keep.
+- Stored full text per event is capped at 256000 characters (head and tail
+  kept), for new rows only. Change it with `[daemon] full_text_max_chars` in
+  `~/.moolmesh/config.toml` (`0` = no cap).
+- Empty `-wal` / `-shm` files left next to a provider's database by earlier
+  versions are not removed (MoolMesh never writes in provider folders); you can
+  delete them by hand while the provider is closed.
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Fixed
+- **Incremental reads load the whole session file** (#52): the Claude, Codex,
+  Qwen and Pi parsers stream from the stored offset line by line.
+- **Unbounded full text** (#52): `[daemon] full_text_max_chars` caps each event's
+  stored full text, keeping head and tail.
+- **Symlinked `~/.codex`** (#52): discovery compares real paths, so `exec`
+  rollouts no longer land under `codex-sessions`.
+- **Cloud placeholders in the live watcher** (#52): dataless files are skipped,
+  as the backfill already did.
+- **Leftover `-wal` / `-shm` files** (#54): a closed WAL provider database is read
+  with `immutable=1` (only when no `-wal`/`-shm` exists), leaving its folder untouched.
+- **Old provider data read live on the first run** (#62): any event older than
+  the live window is stored as history at ingest, on every path, so a new
+  install's first read of OpenCode or Cursor no longer floods the live feed.
+- **Parallel identical events collapsed** (#67): a nullable `events.entry_id`
+  (events.db migration 7) carries the provider's own entry id (Pi, Claude) and
+  joins the fingerprint; existing rows keep theirs and are never duplicated.
+
+### Added
+- Backup retention in `~/.moolmesh/backups/` (#52).
+
 ## [1.28.0] — 2026-11-04
 
 One definition of the **local day** for digests, the workspace rollup and the
