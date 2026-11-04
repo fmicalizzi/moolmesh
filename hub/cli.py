@@ -1094,7 +1094,11 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     config = load_config()
     for r in config.repos:
         repo_path = Path(r.path)
-        if repo_path.exists() and (repo_path / ".git").exists():
+        if r.kind == "board":
+            # Issues-only backlog (#93): no local clone to check.
+            print(green(f"  ✓ Board: {r.owner}/{r.repo} (issues only, no git)"))
+            checks_ok += 1
+        elif repo_path.exists() and (repo_path / ".git").exists():
             print(green(f"  ✓ Repo: {r.owner}/{r.repo} (accessible)"))
             checks_ok += 1
         else:
@@ -1933,6 +1937,10 @@ def main() -> None:
                           help="Ingest full history (ignores --days)")
     repo_add.add_argument("--no-github", action="store_true",
                            help="Don't poll GitHub API for this repo")
+    repo_add.add_argument("--board", action="store_true",
+                          help="Issues-only backlog (kind = \"board\"): no git, "
+                               "only the GitHub issues sync. PATH may be "
+                               "owner/repo (no local clone needed)")
 
     repo_sub.add_parser("list", help="List registered repositories")
 
@@ -3063,7 +3071,10 @@ def _full_history_ingest(
     """
     from hub.harvesters.git_harvester import GIT_READ_FAILED
 
-    count = harvester.ingest_history(repo_config.path, days=None)
+    if getattr(repo_config, "kind", "code") == "board":
+        count = 0  # issues-only backlog (#93): no git history to read
+    else:
+        count = harvester.ingest_history(repo_config.path, days=None)
     if count == GIT_READ_FAILED:
         return {"ok": False, "commits": 0, "items": 0, "complete": False,
                 "reason": "git"}
@@ -3090,13 +3101,28 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
     from hub.cache.git_store import GitStore
     from hub.harvesters.git_harvester import GitHarvester
 
-    path = str(Path(args.path).resolve())
-
-    try:
-        repo_config = add_repo(path, no_github=args.no_github)
-    except ValueError as e:
-        print(red(f"Error: {e}"))
-        return
+    board = getattr(args, "board", False)
+    if board and not Path(args.path).exists():
+        from hub.config import board_repo_config
+        if args.no_github:
+            print(red("Error: a board repo is read only through GitHub; "
+                      "--no-github leaves nothing to sync"))
+            return
+        try:
+            repo_config = board_repo_config(args.path)
+        except ValueError as e:
+            print(red(f"Error: {e}"))
+            return
+        path = repo_config.path
+    else:
+        path = str(Path(args.path).resolve())
+        try:
+            repo_config = add_repo(path, no_github=args.no_github)
+        except ValueError as e:
+            print(red(f"Error: {e}"))
+            return
+        if board:
+            repo_config.kind = "board"
 
     config = load_config()
     if any(r.path == path for r in config.repos):
@@ -3111,6 +3137,23 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
     repo_id = store.get_repo_id(repo_config.path)
 
     harvester = GitHarvester(store)
+
+    if repo_config.kind == "board":
+        # Issues-only backlog (#93): no git. The daemon's issues sync fills
+        # the backlog; --all backfills every issue now.
+        items_note = ""
+        if args.all_history:
+            client = _github_client_for(config, args.no_github)
+            if client is not None:
+                items, status = _sync_github_issues(store, repo_id, repo_config, client)
+                items_note = (f"  Synced {items} issues" if items >= 0
+                              else f"  {_github_failure(status)}")
+        store.close()
+        print(green(f"Registered board {repo_config.owner}/{repo_config.repo}"))
+        print(dim("  kind = board: no git; the daemon syncs its issues"))
+        if items_note:
+            print(items_note)
+        return
 
     if args.all_history:
         print(dim("Ingesting full history — this may take several minutes..."))
@@ -3164,7 +3207,10 @@ def cmd_repo_list(args: argparse.Namespace) -> None:
         repo_id = store.get_repo_id(r.path)
         commits = store.count_commits(repo_id) if repo_id else 0
         github = green("✓ GitHub") if r.github_enabled else dim("  local")
-        print(f"    {r.owner}/{r.repo:<25} {commits:>5} commits  {github}")
+        if r.kind == "board":
+            print(f"    {r.owner}/{r.repo:<25} {'board':>13}  {github}")
+        else:
+            print(f"    {r.owner}/{r.repo:<25} {commits:>5} commits  {github}")
         print(f"      {dim(r.path)}")
     store.close()
     print()
@@ -3175,7 +3221,12 @@ def cmd_repo_remove(args: argparse.Namespace) -> None:
     from hub.config import remove_repo
     from hub.cache.git_store import GitStore
 
+    from hub.config import BOARD_PATH_PREFIX, parse_board_slug
     path = str(Path(args.path).resolve())
+    if not Path(args.path).exists():
+        parsed = parse_board_slug(args.path)
+        if parsed:  # a board repo registered as owner/repo (#93)
+            path = f"{BOARD_PATH_PREFIX}github.com/{parsed[0]}/{parsed[1]}"
 
     found = remove_repo(path)
 
@@ -3202,6 +3253,11 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
     from hub.harvesters.git_harvester import GitHarvester
 
     path = str(Path(args.path).resolve())
+    if not Path(args.path).exists():
+        from hub.config import BOARD_PATH_PREFIX, parse_board_slug
+        parsed = parse_board_slug(args.path)
+        if parsed:  # a board repo registered as owner/repo (#93)
+            path = f"{BOARD_PATH_PREFIX}github.com/{parsed[0]}/{parsed[1]}"
     config = load_config()
 
     repo_cfg = next((r for r in config.repos if r.path == path), None)
@@ -3219,6 +3275,12 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
 
     harvester = GitHarvester(store)
     days = None if args.all_history else args.days
+
+    if repo_cfg.kind == "board" and not args.all_history:
+        store.close()
+        print(dim("kind = board: no git history to sync "
+                  "(use --all to backfill its issues)"))
+        return
 
     if args.all_history:
         print(dim("Ingesting full history — this may take several minutes..."))
@@ -3390,6 +3452,9 @@ def _sync_all_registered(args: argparse.Namespace) -> None:
                   f"{green(f'{res['commits']} new commits')}{extra} (full history)")
             continue
 
+        if r.kind == "board":
+            print(f"  [{i}/{total}] {name}  {dim('board (no git)')}")
+            continue
         count = harvester.ingest_history(r.path, days=days)
         if count == GIT_READ_FAILED:
             errors.append(f"{name}: git read failed")

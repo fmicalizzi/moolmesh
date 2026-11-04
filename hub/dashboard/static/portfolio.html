@@ -388,6 +388,10 @@ function outcomeCell(p, delivMeasurable){
       return `<span class="pc-out out-na" title="Remote GitHub sin registrar — entrega NO MEDIDA (distinto de 0 entregado y de sin repo). Registralo con mool repo add.">no medido${arch}</span>`;
     return `<span class="pc-out out-na" title="Sin repo GitHub vinculado — entrega no medible (distinto de 0 entregado)">— sin repo${arch}</span>`;
   }
+  // Board (#93): backlog sólo de issues, sin código — no hay PR que mergear,
+  // así que nunca es "0 entregado": mostramos el backlog.
+  if (p.board)
+    return `<span class="pc-out out-cl" title="Repo board (sólo issues, sin git): el backlog es la medida — issues abiertas / cerradas (totales).">board · ${op} abiertas · ${cl} cerradas${arch}</span>`;
   if (!pr && !cl && !op)
     return `<span class="pc-out out-zero" title="Repo GitHub vinculado, aún sin PRs mergeados ni issues cerrados — entrega real: 0">0 entregado${arch}</span>`;
   // #59: donde el historial git está acotado (sin repo sync --all), el total NO
@@ -592,13 +596,15 @@ function renderExec(){
 
   // --- Top by delivery (merged PRs) — single hue (green) + tri-state honesty ---
   const delEl = document.getElementById('chart-del');
-  const topDel = measurable.slice().sort((a,b)=>b.merged_prs-a.merged_prs).slice(0,6);
+  // Boards (#93) carry no PRs by design: kept out of the merged-PR ranking so
+  // a backlog never reads as a 0-delivery bar.
+  const topDel = measurable.filter(p => !p.board).sort((a,b)=>b.merged_prs-a.merged_prs).slice(0,6);
   const notMeasN = projects.length - measurable.length;
   // Desglose honesto del gap (#60): remote sin registrar ("no medido") ≠ sin repo.
   const noMedidoN = projects.filter(p => p.has_remote && !isMeasurable(p) && !p.registered).length;
   const sinRepoN = notMeasN - noMedidoN;
   let delHtml = '';
-  if (!measurable.length){
+  if (!topDel.length){
     delHtml = '<div class="chart-empty">Ningún proyecto de la ventana tiene repo registrado — entrega no medible.</div>';
   } else {
     const maxDel = Math.max(1, topDel[0].merged_prs);

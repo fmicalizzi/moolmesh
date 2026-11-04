@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from hub.config import normalize_repo_kind
 from hub.log import get as get_logger
 
 _log = get_logger("GitStore")
@@ -217,6 +218,22 @@ def _mig_6_pr_stats(conn: sqlite3.Connection) -> int:
     return 0
 
 
+def _mig_7_repo_kind(conn: sqlite3.Connection) -> int:
+    """Migration 7: per-repo kind, ``code`` or ``board`` (#93).
+
+    A board repo is an issues-only backlog: the git harvester skips it and the
+    portfolio does not read it as "0 entregado". Additive and idempotent
+    (checks the column); every existing row keeps today's behaviour through
+    the ``'code'`` default — no row is rewritten.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(repos)")}
+    if "kind" in cols:
+        return 0
+    conn.execute("ALTER TABLE repos ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'")
+    conn.commit()
+    return 1
+
+
 # Register migrations
 _MIGRATIONS = [
     (1, "normalize_timestamps", _mig_1_normalize_timestamps),
@@ -225,6 +242,7 @@ _MIGRATIONS = [
     (4, "repo_history_complete", _mig_4_repo_history_complete),
     (5, "repo_github_sync", _mig_5_repo_github_sync),
     (6, "pr_stats", _mig_6_pr_stats),
+    (7, "repo_kind", _mig_7_repo_kind),
 ]
 
 
@@ -270,7 +288,8 @@ CREATE TABLE IF NOT EXISTS repos (
     history_complete INTEGER NOT NULL DEFAULT 0,
     -- Último sync exitoso de la API de GitHub (issues/PRs, 200 o 304), UTC
     -- ISO. NULL = nunca (sin token o github deshabilitado). Migración 5 (#76).
-    last_github_sync_at TEXT
+    last_github_sync_at TEXT,
+    kind TEXT NOT NULL DEFAULT 'code'  -- 'code' | 'board' (#93, migración 7)
 );
 
 -- Refs snapshot (para detectar nuevos commits)
@@ -435,21 +454,43 @@ class GitStore:
             conn = self._get_conn()
             conn.execute(
                 """INSERT INTO repos
-                       (path, remote_url, owner, repo_name, added_at, last_fetch_at)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                       (path, remote_url, owner, repo_name, added_at, last_fetch_at,
+                        kind)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(path) DO UPDATE SET
                        remote_url = excluded.remote_url,
                        owner = excluded.owner,
                        repo_name = excluded.repo_name,
-                       added_at = excluded.added_at""",
+                       added_at = excluded.added_at,
+                       kind = excluded.kind""",
                 (config.path, config.remote_url, config.owner, config.repo,
-                 config.added_at, None)
+                 config.added_at, None, normalize_repo_kind(
+                     getattr(config, "kind", "code")))
             )
             row = conn.execute(
                 "SELECT id FROM repos WHERE path = ?", (config.path,)
             ).fetchone()
             conn.commit()
             return int(row[0]) if row else 0
+
+    def sync_repo_kinds(self, repos) -> int:
+        """Mirror each config repo's ``kind`` onto its ``repos`` row (#93).
+
+        ``config.toml`` is where the owner sets ``kind``; the harvesters and
+        the read side read it from github.db. Only rows whose kind differs are
+        updated. Returns the number of rows changed.
+        """
+        changed = 0
+        with self._lock:
+            conn = self._get_conn()
+            for r in repos:
+                kind = normalize_repo_kind(getattr(r, "kind", "code"))
+                cur = conn.execute(
+                    "UPDATE repos SET kind = ? WHERE path = ? AND kind != ?",
+                    (kind, r.path, kind))
+                changed += cur.rowcount
+            conn.commit()
+        return changed
 
     def mark_history_complete(self, repo_id: int) -> None:
         """Marca el repo como de historial COMPLETO (#59).
@@ -485,7 +526,7 @@ class GitStore:
         with self._lock:
             rows = self._get_conn().execute(
                 "SELECT id, path, remote_url, owner, repo_name, added_at,"
-                " last_fetch_at, history_complete FROM repos"
+                " last_fetch_at, history_complete, kind FROM repos"
             ).fetchall()
         
         return [
@@ -498,6 +539,7 @@ class GitStore:
                 "added_at": r[5],
                 "last_fetch_at": r[6],
                 "history_complete": bool(r[7]),
+                "kind": r[8] or "code",
             }
             for r in rows
         ]

@@ -274,7 +274,8 @@ class TestToolLayer:
         # get_server_info reports staleness itself; it is not a wrapped data tool.
         assert dict_tools - {"get_server_info"} == wrapped
         assert wrapped == {"get_project_activity", "get_session_detail",
-                           "get_portfolio_grouped", "get_portfolio_production"}
+                           "get_portfolio_grouped", "get_portfolio_production",
+                           "get_board_issues"}
 
     def test_wrapping_keeps_name_signature_and_docstring_for_fastmcp(self, loaded):
         fn = loaded.tools["get_portfolio_production"]

@@ -6,6 +6,7 @@ import collections
 import http.server
 import json
 import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -268,6 +269,14 @@ class DashboardServer:
         if config.repos:
             from hub.cache.git_store import GitStore
             self.git_store = GitStore()
+            # config.toml owns each repo's kind (#93); mirror it onto github.db
+            # so the harvesters and the read side see a hand-edited change.
+            try:
+                self.git_store.sync_repo_kinds(config.repos)
+            except sqlite3.Error:
+                from hub.log import get as get_logger
+                get_logger("Dashboard").warning(
+                    "No se pudo sincronizar kind de repos", exc_info=True)
             from hub.harvesters.git_harvester import GitHarvester
             self.git_harvester = GitHarvester(self.git_store, self.sse_buffer)
             # GitHub API harvester (requires token)

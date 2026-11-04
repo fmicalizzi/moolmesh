@@ -438,7 +438,7 @@ class TestMigrations:
         store2.close()
 
         assert first_versions == second_versions
-        assert len(second_versions) == 6  # 6 migrations registered (#59, #76, #80)
+        assert len(second_versions) == 7  # 7 migrations registered (#59, #76, #80, #93)
 
     def test_migration_1_converts_local(self, tmp_path):
         """Commit con -06:00 se convierte a UTC en migration 1 (mig 3 luego lo pasa a local naive)."""

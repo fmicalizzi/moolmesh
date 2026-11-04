@@ -736,8 +736,34 @@ def _registered_remote_keys(github_db: str) -> set[str]:
     }
 
 
+def _board_remote_keys(github_db: str) -> set[str]:
+    """Identities (``github.com/owner/repo``, lowercased) of board repos (#93).
+
+    Read-only over ``github.db``; ``set()`` when the DB, the table or the
+    ``kind`` column (a DB the daemon has not migrated yet) is absent.
+    """
+    if not os.path.exists(github_db):
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{github_db}?mode=ro", uri=True, timeout=5)
+    except sqlite3.OperationalError:
+        return set()
+    try:
+        rows = conn.execute(
+            "SELECT owner, repo_name FROM repos WHERE kind = 'board'").fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    finally:
+        conn.close()
+    return {
+        f"github.com/{owner}/{repo}".lower()
+        for owner, repo in rows if owner and repo
+    }
+
+
 def _annotate_github_measured_projects(
     projects: list[dict[str, Any]], registered: set[str],
+    boards: set[str] | None = None,
 ) -> None:
     """Mark each project ``has_remote`` (GitHub) and ``registered`` in place.
 
@@ -746,14 +772,148 @@ def _annotate_github_measured_projects(
     from "— sin repo" and from a measured "0 entregado"). Both are booleans with
     no names — masking is unaffected.
     """
+    boards = boards or set()
     for p in projects:
         pk = p.get("project_key") or ""
         if pk.startswith("git_remote:github.com/"):
+            ident = pk[len("git_remote:"):].lower()
             p["has_remote"] = True
-            p["registered"] = pk[len("git_remote:"):].lower() in registered
+            p["registered"] = ident in registered
+            # A board (#93) is an issues-only backlog: its outcome is the
+            # backlog, never "0 entregado" for lack of merged PRs.
+            p["board"] = ident in boards
         else:
             p["has_remote"] = False
             p["registered"] = False
+            p["board"] = False
+
+
+def _get_board_issues(
+    github_db: str,
+    repo: str,
+    *,
+    state: str = "open",
+    label: str | None = None,
+    assignee: str | None = None,
+    min_age_days: int | None = None,
+    max_age_days: int | None = None,
+    days: int = 30,
+    limit: int = 100,
+    today: str | None = None,
+    tz: Any = None,
+) -> dict[str, Any]:
+    """Issues of one registered repo — the backlog view of a board (#93).
+
+    ``repo`` is ``owner/repo`` (case-insensitive). Filters: ``state``
+    (``open`` | ``closed`` | ``all``), ``label`` (exact, case-insensitive),
+    ``assignee`` (login, case-insensitive), and age in days since
+    ``created_at`` (``min_age_days`` / ``max_age_days``, measured in local
+    days). PRs are never listed. The window summary counts issues ``opened``
+    and ``closed`` on a local day of the last ``days`` days (``hub.localtime``;
+    ``today``/``tz`` injectable for tests, ``tz=None`` = the ``[user]
+    timezone``) over the whole backlog, not the filtered list, plus
+    ``open_by_label`` for the open backlog. Read-only over ``github.db``.
+    """
+    from hub import localtime
+
+    days = min(max(int(days), 1), 365)
+    limit = min(max(int(limit), 1), 500)
+    state = (state or "open").lower()
+    if state not in ("open", "closed", "all"):
+        return {"error": f"state must be open, closed or all (got {state!r})"}
+    parsed = repo.strip().split("/")
+    if len(parsed) != 2 or not all(parsed):
+        return {"error": f"repo must be owner/repo (got {repo!r})"}
+    owner, name = parsed
+
+    conn = _connect_optional(github_db)
+    if conn is None:
+        return {"error": "github.db not found — register a repo with mool repo add"}
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(repos)")}
+        kind_sql = "kind" if "kind" in cols else "'code'"
+        row = conn.execute(
+            f"SELECT id, owner, repo_name, {kind_sql} AS kind FROM repos"
+            " WHERE lower(owner) = lower(?) AND lower(repo_name) = lower(?)",
+            (owner, name)).fetchone()
+        if row is None:
+            return {"error": f"repo not registered: {repo}"}
+        issues = conn.execute(
+            """SELECT number, title, state, author, assignees, labels,
+                      created_at, updated_at, closed_at
+               FROM github_issues
+               WHERE repo_id = ? AND COALESCE(is_pull_request, 0) = 0
+               ORDER BY created_at DESC""",
+            (row["id"],)).fetchall()
+    except sqlite3.OperationalError:
+        return {"error": "github.db has no issues table yet"}
+    finally:
+        conn.close()
+
+    if tz is None:
+        tz = localtime.user_timezone()
+    if today is None:
+        today = localtime.today(tz)
+    start = localtime.window_start(today, days)
+    from datetime import date
+    today_d = date.fromisoformat(today)
+
+    label_l = label.lower() if label else None
+    assignee_l = assignee.lower() if assignee else None
+    opened_w = closed_w = open_total = 0
+    by_label: dict[str, int] = {}
+    out: list[dict[str, Any]] = []
+    for r in issues:
+        labels = json.loads(r["labels"]) if r["labels"] else []
+        assignees = json.loads(r["assignees"]) if r["assignees"] else []
+        created_day = localtime.local_day(r["created_at"], tz)
+        closed_day = localtime.local_day(r["closed_at"], tz) if r["closed_at"] else None
+        if created_day and start <= created_day <= today:
+            opened_w += 1
+        if closed_day and start <= closed_day <= today:
+            closed_w += 1
+        if r["state"] == "open":
+            open_total += 1
+            for lb in labels or ["(sin label)"]:
+                by_label[lb] = by_label.get(lb, 0) + 1
+        if state != "all" and r["state"] != state:
+            continue
+        if label_l and label_l not in {str(x).lower() for x in labels}:
+            continue
+        if assignee_l and assignee_l not in {str(x).lower() for x in assignees}:
+            continue
+        age = ((today_d - date.fromisoformat(created_day)).days
+                if created_day else None)
+        if min_age_days is not None and (age is None or age < int(min_age_days)):
+            continue
+        if max_age_days is not None and (age is None or age > int(max_age_days)):
+            continue
+        if len(out) < limit:
+            out.append({
+                "number": r["number"],
+                "title": r["title"],
+                "state": r["state"],
+                "labels": labels,
+                "assignees": assignees,
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+                "closed_at": r["closed_at"],
+                "age_days": age,
+            })
+    return {
+        "repo": f"{row['owner']}/{row['repo_name']}",
+        "kind": row["kind"] or "code",
+        "window_days": days,
+        "window_start": start,
+        "window_end": today,
+        "opened_window": opened_w,
+        "closed_window": closed_w,
+        "open_total": open_total,
+        "open_by_label": dict(sorted(by_label.items(),
+                                     key=lambda kv: (-kv[1], kv[0]))),
+        "matched": len(out),
+        "issues": out,
+    }
 
 
 def _mask_workspace_rows(rows: list[dict[str, Any]], hide: bool) -> list[dict[str, Any]]:
@@ -1029,7 +1189,8 @@ def _get_portfolio_grouped(
     # Registered-vs-remote honesty (#60): annotate BEFORE the client tier so the
     # folding (registrados sin actividad) and the "no medido" column both see it.
     _annotate_github_measured_projects(
-        grouped.get("projects", []), _registered_remote_keys(github_db))
+        grouped.get("projects", []), _registered_remote_keys(github_db),
+        _board_remote_keys(github_db))
 
     # Third tier (#29): client/org hierarchy over the flat projects. Resolve the
     # effective client config — auto-seed only when the owner identity is known
@@ -1345,7 +1506,8 @@ def _portfolio_production(
         projects.append(row)
     # Registered-vs-remote honesty (#60): a GitHub remote never registered shows
     # "no medido" instead of "— sin repo" — a third, distinct state.
-    _annotate_github_measured_projects(projects, _registered_remote_keys(github_db))
+    _annotate_github_measured_projects(
+        projects, _registered_remote_keys(github_db), _board_remote_keys(github_db))
     # Hottest (most-recent activity) on top; ties broken by session volume.
     projects.sort(key=lambda p: (p["last_day"], p["sessions"]), reverse=True)
 
@@ -1889,6 +2051,46 @@ if _mcp is not None:
             limit: Máximo de candidatos (max 500, default 100).
         """
         return _get_delivery_candidates(WORKSPACE_DB, limit)
+
+    @_mcp.tool()
+    @_stale_aware
+    @_freshness_aware
+    def get_board_issues(
+        repo: str,
+        state: str = "open",
+        label: str | None = None,
+        assignee: str | None = None,
+        min_age_days: int | None = None,
+        max_age_days: int | None = None,
+        days: int = 30,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Backlog de issues de un repo registrado — la vista de un repo board (#93).
+
+        Un repo `kind = "board"` es un backlog sólo de issues (sin código): no
+        corre git y no se lee como "0 entregado". Sirve igual para un repo de
+        código. Lista issues (nunca PRs) filtrables por `label`, `assignee` y
+        antigüedad (`min_age_days` / `max_age_days`, días locales desde
+        `created_at`), y resume el backlog entero: `opened_window` /
+        `closed_window` (issues abiertas / cerradas en un día local de los
+        últimos `days` días, zona `[user] timezone`), `open_total` y
+        `open_by_label`. Lectura de `github.db`; los datos son tan frescos como
+        el último sync de issues (`freshness`).
+
+        Args:
+            repo: "owner/repo" (sin distinguir mayúsculas).
+            state: open | closed | all (default open).
+            label: Sólo issues con este label (exacto, sin mayúsculas).
+            assignee: Sólo issues asignadas a este login.
+            min_age_days: Antigüedad mínima en días.
+            max_age_days: Antigüedad máxima en días.
+            days: Ventana de abiertas/cerradas (1-365, default 30).
+            limit: Máximo de issues listadas (1-500, default 100).
+        """
+        return _get_board_issues(
+            GITHUB_DB, repo, state=state, label=label, assignee=assignee,
+            min_age_days=min_age_days, max_age_days=max_age_days,
+            days=days, limit=limit)
 
 
 if __name__ == "__main__":

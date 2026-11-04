@@ -33,6 +33,8 @@ def _normalize_path(path: str) -> str:
     Git Bash en Windows convierte 'C:\\Users\\x' a '/c/Users/x'.
     En Windows nativo, Path('/c/Users/x').resolve() daría 'C:\\c\\Users\\x' (mal).
     """
+    if path.startswith("board:"):
+        return path  # a board repo key (#93), not a filesystem path
     if os.name == "nt":  # Windows
         # Detectar formato MSYS2: /c/... o /d/... etc.
         import re
@@ -59,6 +61,18 @@ class RepoConfig:
     repo: str               # "repo"
     added_at: str           # ISO timestamp
     github_enabled: bool = True
+    # "code" (default) = a code repo: git fetch + commit ingestion + GitHub sync.
+    # "board" = an issues-only backlog (#93): no git, only the GitHub issues sync.
+    kind: str = "code"
+
+
+REPO_KINDS = ("code", "board")
+
+
+def normalize_repo_kind(value: object) -> str:
+    """Return a valid repo kind; anything unknown falls back to ``"code"``."""
+    kind = str(value or "code").strip().lower()
+    return kind if kind in REPO_KINDS else "code"
 
 
 # Default max recursion depth for a marked workspace root (relative to the root).
@@ -241,6 +255,8 @@ def _serialize_toml(config: HubConfig) -> str:
         lines.append(f'repo = "{_toml_escape(repo.repo)}"')
         lines.append(f'added_at = "{_toml_escape(repo.added_at)}"')
         lines.append(f'github_enabled = {str(repo.github_enabled).lower()}')
+        if normalize_repo_kind(repo.kind) != "code":
+            lines.append(f'kind = "{normalize_repo_kind(repo.kind)}"')
         lines.append("")
 
     # Sección [[workspace_roots]] - array de tablas (issue #21, opt-in)
@@ -342,6 +358,7 @@ def load_config() -> HubConfig:
                 repo=repo_data.get("repo", ""),
                 added_at=repo_data.get("added_at", ""),
                 github_enabled=repo_data.get("github_enabled", True),
+                kind=normalize_repo_kind(repo_data.get("kind", "code")),
             )
             config.repos.append(repo)
 
@@ -482,6 +499,58 @@ def add_repo(path: str, no_github: bool = False) -> RepoConfig:
     )
     
     return repo_config
+
+
+# Path prefix of a board repo registered without a local clone (#93). The
+# ``path`` stays the repo's unique key in config and github.db; this prefix
+# makes it unmistakably not a filesystem path.
+BOARD_PATH_PREFIX = "board:"
+
+
+def parse_board_slug(spec: str) -> tuple[str, str] | None:
+    """``owner/repo`` (or ``github.com/owner/repo``, or a GitHub URL) → parts.
+
+    Returns ``None`` when ``spec`` is not of that shape.
+    """
+    s = (spec or "").strip()
+    if s.startswith(BOARD_PATH_PREFIX):
+        s = s[len(BOARD_PATH_PREFIX):]
+    for prefix in ("https://", "http://"):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+    if s.startswith("github.com/"):
+        s = s[len("github.com/"):]
+    s = s.rstrip("/")
+    if s.endswith(".git"):
+        s = s[:-4]
+    parts = s.split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    if any(ch.isspace() for ch in s):
+        return None
+    return parts[0], parts[1]
+
+
+def board_repo_config(spec: str) -> RepoConfig:
+    """RepoConfig for a board repo given as ``owner/repo`` (#93).
+
+    No local clone is needed: a board is an issues-only backlog, so no git
+    runs for it. Raises ValueError when ``spec`` is not ``owner/repo``.
+    """
+    parsed = parse_board_slug(spec)
+    if parsed is None:
+        raise ValueError(f"Se esperaba owner/repo: {spec}")
+    owner, repo_name = parsed
+    remote = f"github.com/{owner}/{repo_name}"
+    return RepoConfig(
+        path=f"{BOARD_PATH_PREFIX}{remote}",
+        remote_url=remote,
+        owner=owner,
+        repo=repo_name,
+        added_at=datetime.now(timezone.utc).isoformat(),
+        github_enabled=True,
+        kind="board",
+    )
 
 
 def remove_repo(path: str) -> bool:

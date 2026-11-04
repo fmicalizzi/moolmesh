@@ -118,7 +118,7 @@ class TestMigration:
         after = conn.execute("SELECT * FROM github_issues").fetchall()
         conn.close()
         assert {"github_pr_stats", "github_pr_closing_refs"} <= tables
-        assert versions == [1, 2, 3, 4, 5, 6]
+        assert versions == [1, 2, 3, 4, 5, 6, 7]
         assert after == before
 
     def test_previous_db_pr_listed_as_missing(self, store):
