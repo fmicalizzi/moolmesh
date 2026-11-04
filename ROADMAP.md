@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.31.1
+Last updated: November 2026 — v1.31.2
 
 ---
 
@@ -238,6 +238,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.31.0** ([#82](https://github.com/fmicalizzi/moolmesh/issues/82), [#101](https://github.com/fmicalizzi/moolmesh/issues/101)): versioned snapshot export (`mool snapshot export`, MCP `get_snapshot`, schema v1 under `docs/schema/`) as the contract for complementary tools; events caught up after a pre-v1.28.1 outage re-dated to their own days.
 
 - **v1.31.1** ([#107](https://github.com/fmicalizzi/moolmesh/issues/107), [#108](https://github.com/fmicalizzi/moolmesh/issues/108)): every module logs under `hub.*` so migration and backup lines reach the daemon log; `daemon start`/`restart` wait out a slow first start (a migration backup) instead of reporting a false error.
+
+- **v1.31.2** ([#111](https://github.com/fmicalizzi/moolmesh/issues/111)): `daemon start` tells a daemon that is still starting from one that is shutting down, and waits for the first instead of reporting "still shutting down".
 
 ---
 

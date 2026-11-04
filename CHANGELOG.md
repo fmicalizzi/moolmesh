@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.31.2] — 2026-11-04
+
+One fix, a follow-up to #108. No new dependencies, no migrations.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- While a daemon is stopping, `~/.moolmesh/moolmesh.stopping` names its PID.
+  It is removed when that process exits; a leftover one never blocks a start.
+
+### Fixed
+- **`daemon start` during a slow start** (#111): a `start` that found a live
+  daemon not yet answering `/health` (for example, during a migration backup)
+  treated it as shutting down, waited 30 s and failed with "still shutting
+  down". It now waits for a starting daemon (with a one-time
+  `starting (migrating databases?) …` notice past 10 s, up to 180 s) and
+  answers "already running" once it serves. A daemon with a stop requested is
+  waited out as before (#96).
+
+---
+
 ## [1.31.1] — 2026-11-04
 
 Two fixes found while validating 1.31.0 on macOS. No new dependencies, no
