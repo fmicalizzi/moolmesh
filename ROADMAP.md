@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.34.0
+Last updated: November 2026 — v1.34.1
 
 ---
 
@@ -246,6 +246,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.33.0** ([#67](https://github.com/fmicalizzi/moolmesh/issues/67), [#52](https://github.com/fmicalizzi/moolmesh/issues/52), [#46](https://github.com/fmicalizzi/moolmesh/issues/46), [#47](https://github.com/fmicalizzi/moolmesh/issues/47), [#48](https://github.com/fmicalizzi/moolmesh/issues/48), [#49](https://github.com/fmicalizzi/moolmesh/issues/49), [#77](https://github.com/fmicalizzi/moolmesh/issues/77)): active branch of tree sessions in export and MCP (`events.parent_id`); `mool mcp setup antigravity`; resolver skips cloud placeholders; `search_events` by event time; orphan workspaces pruned; Codex per-turn cwd and Windows paths; tool stats count calls and "files" exclude cwd edges; shutdown and accessibility cleanups.
 
 - **v1.34.0** ([#122](https://github.com/fmicalizzi/moolmesh/issues/122), [#123](https://github.com/fmicalizzi/moolmesh/issues/123)): explicit marker for per-directory extra events (Codex, Pi); Qwen active branch; days worked next to touches in the rollup views.
+
+- **v1.34.1** ([#127](https://github.com/fmicalizzi/moolmesh/issues/127)): the active-branch view no longer hides parallel tool results of Claude and Qwen sessions.
 
 ---
 

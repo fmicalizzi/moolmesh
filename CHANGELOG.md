@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.34.1] — 2026-11-04
+
+One fix to the active-branch view of v1.33.0. No new dependencies, no
+migrations.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Fixed
+- **Parallel tool results hidden** (#127): in 1.33.0–1.34.0, `mool export`
+  and the MCP session events left out the results of all but one parallel
+  tool call per turn in Claude (and Qwen) sessions, mistaking them for
+  abandoned branches. Only Pi sessions, whose branches are real, are pruned
+  now; other sessions are shown in stored order. No data was lost: the rows
+  were always in `events.db`.
+
+---
+
 ## [1.34.0] — 2026-11-04
 
 No new dependencies. One additive events.db migration (no rows rewritten).
