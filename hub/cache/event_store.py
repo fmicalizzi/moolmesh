@@ -316,6 +316,61 @@ def _mig_7_entry_id(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE events ADD COLUMN entry_id TEXT")
 
 
+def _mig_8_live_rows_older_than_ingest(conn: sqlite3.Connection):
+    """Apply the #62 ingest rule to live rows stored before it existed (#101).
+
+    Before v1.28.1 a catch-up after a daemon outage stored every caught-up
+    event as LIVE (``historical = 0``) with ``created_at`` = the catch-up
+    moment, so by the #53 rule the whole outage was clocked on the day the
+    daemon came back. Today ``_insert_event_row`` marks such an event
+    historical at ingest: its parsed time is older than ``created_at`` minus
+    the live window (``LIVE_WINDOW_HOURS``). This migration applies exactly
+    that rule — ``is_older_than(timestamp, _live_cutoff(None, created_at))`` —
+    to the live rows already on file. A row with an empty or unreadable
+    timestamp is never old (left live, never guessed); rows within the window
+    stay live.
+
+    Rewrites only after a consistent copy of events.db (``backup_events_db``,
+    like migration 6); if the copy fails nothing is rewritten and the
+    migration is deferred to the next open. Idempotent: a second run finds no
+    live row older than its own ingest window. No matching row → no backup.
+    The workspace.db attribution pass re-derives the edge clocks once this
+    migration is recorded (workspace.db migration 5).
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "historical" not in columns:
+        return None  # pre-#45 schema; migration 3 adds the column first
+    ids = [
+        (eid,)
+        for eid, ts, created_at in conn.execute(
+            "SELECT id, timestamp, created_at FROM events WHERE historical = 0"
+        )
+        if created_at is not None
+        and is_older_than(ts, _live_cutoff(None, float(created_at)))
+    ]
+    if not ids:
+        return None
+
+    db_file = next((r[2] for r in conn.execute("PRAGMA database_list")
+                    if r[1] == "main"), "")
+    if db_file:
+        from hub.backfill import backup_events_db
+        conn.commit()
+        try:
+            backup = backup_events_db(Path(db_file))
+        except (OSError, sqlite3.Error):
+            _log.warning("migración 8: no pude respaldar events.db; no marco "
+                         "como históricos los eventos ingeridos tarde, "
+                         "reintento al próximo arranque", exc_info=True)
+            return _MIGRATION_DEFERRED
+        _log.info("migración 8: respaldo de events.db en %s", backup)
+    conn.executemany(
+        "UPDATE events SET historical = 1 WHERE id = ? AND historical = 0", ids)
+    _log.info("migración 8: %d eventos ingeridos más de %d h después de su "
+              "hora pasan a históricos (#101)", len(ids), LIVE_WINDOW_HOURS)
+    return None
+
+
 # Versioned, additive migrations for events.db — each runs exactly once.
 _EVENT_STORE_MIGRATIONS = [
     (1, "session_lifecycle", _mig_1_session_lifecycle),
@@ -325,7 +380,12 @@ _EVENT_STORE_MIGRATIONS = [
     (5, "opencode_first_ingest_day", _mig_5_opencode_first_ingest_day),
     (6, "opencode_session_times_iso", _mig_6_opencode_session_times_iso),
     (7, "entry_id", _mig_7_entry_id),
+    (8, "live_rows_older_than_ingest", _mig_8_live_rows_older_than_ingest),
 ]
+
+# The events.db migration whose rewrite the workspace.db attribution pass
+# re-derives edge clocks after (#101; workspace_store migration 5).
+OUTAGE_CLOCK_MIGRATION = 8
 
 
 def file_fingerprint(path: Path) -> str:

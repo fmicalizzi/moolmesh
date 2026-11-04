@@ -321,6 +321,37 @@ def _mig_4_rollup_day_zone(conn: sqlite3.Connection) -> int:
 # rollup_meta key holding the zone ``workspace_rollup.day`` is bucketed in.
 _ROLLUP_ZONE_KEY = "day_zone"
 
+# rollup_meta key set while the #101 edge-clock re-derivation is pending.
+_ACTIVITY_REDERIVE_KEY = "activity_rederive"
+
+
+def _mig_5_activity_rederive(conn: sqlite3.Connection) -> int:
+    """Schedule a one-time re-derivation of ``activity_ts`` (#101).
+
+    events.db migration 8 re-marks as historical the live rows a pre-#62
+    outage catch-up stored, so their #53 clock becomes the event time instead
+    of the catch-up day. ``activity_ts`` only ever advances
+    (``_ACTIVITY_TS_UPSERT``), so a plain cursor reset could never move an edge
+    back to its real day: this marks the re-derivation pending and
+    ``attribute_incremental`` runs it — a full pass that REPLACES each seen
+    edge's clock — once events.db has migration 8 recorded, after a backup of
+    workspace.db. Nothing is rewritten here. A DB with no edges has nothing to
+    re-derive (no marker). Idempotent (``INSERT OR IGNORE``).
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS rollup_meta (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+           )"""
+    )
+    if not conn.execute("SELECT 1 FROM path_attributions LIMIT 1").fetchone():
+        return 0
+    conn.execute(
+        "INSERT OR IGNORE INTO rollup_meta (key, value) VALUES (?, 'pending')",
+        (_ACTIVITY_REDERIVE_KEY,),
+    )
+    return 1
+
 
 # Versioned, additive migrations — each runs exactly once (mirrors git_store).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
@@ -328,6 +359,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
     (2, "attribution_event_ts", _mig_2_attribution_event_ts),
     (3, "attribution_activity_ts", _mig_3_attribution_activity_ts),
     (4, "rollup_day_zone", _mig_4_rollup_day_zone),
+    (5, "activity_rederive", _mig_5_activity_rederive),
 ]
 
 
@@ -571,6 +603,12 @@ _EVENT_TS_UPSERT = (
 _ACTIVITY_TS_UPSERT = (
     "activity_ts = MAX(COALESCE(path_attributions.activity_ts, excluded.activity_ts),"
     " COALESCE(excluded.activity_ts, path_attributions.activity_ts))"
+)
+
+# The #101 re-derivation: a full pass REPLACES the edge clock with the one it
+# just folded from every event of that edge (a NULL still never clobbers).
+_ACTIVITY_TS_REPLACE = (
+    "activity_ts = COALESCE(excluded.activity_ts, path_attributions.activity_ts)"
 )
 
 
@@ -867,12 +905,17 @@ class WorkspaceStore:
         via: str = "file",
         event_ts: str | None = None,
         activity_ts: str | None = None,
+        replace_activity: bool = False,
     ) -> None:
         """Record one session↔workspace edge. Idempotent and self-healing.
 
         ``event_ts`` only ever moves earlier (``_EVENT_TS_UPSERT``) and
-        ``activity_ts`` only ever moves later (``_ACTIVITY_TS_UPSERT``).
+        ``activity_ts`` only ever moves later (``_ACTIVITY_TS_UPSERT``) —
+        except in the #101 re-derivation (``replace_activity``), where it is
+        replaced by the clock a full pass folded (``_ACTIVITY_TS_REPLACE``).
         """
+        activity_upsert = (_ACTIVITY_TS_REPLACE if replace_activity
+                           else _ACTIVITY_TS_UPSERT)
         self._conn.execute(
             f"""INSERT INTO path_attributions
                    (session_id, provider, file_path, workspace_id, resolved_via,
@@ -883,7 +926,7 @@ class WorkspaceStore:
                    resolved_via = excluded.resolved_via,
                    via = excluded.via,
                    {_EVENT_TS_UPSERT},
-                   {_ACTIVITY_TS_UPSERT}""",
+                   {activity_upsert}""",
             (session_id, provider, file_path, workspace_id, resolved_via, now, via,
              event_ts, activity_ts),
         )
@@ -2327,7 +2370,7 @@ class WorkspaceStore:
     # cwd-fallback edges (#40): only for sessions with NO file edge anywhere in
     # path_attributions. The existence check is repeated inside the INSERT so a
     # file edge committed after the pre-check still wins (no mixed session).
-    _CWD_EDGE_SQL = f"""INSERT INTO path_attributions
+    _CWD_EDGE_SQL_TEMPLATE = """INSERT INTO path_attributions
                (session_id, provider, file_path, workspace_id, resolved_via,
                 first_seen, via, event_ts, activity_ts)
            SELECT ?, ?, ?, ?, ?, ?, 'cwd', ?, ?
@@ -2337,8 +2380,13 @@ class WorkspaceStore:
            ON CONFLICT(session_id, provider, file_path) DO UPDATE SET
                workspace_id = excluded.workspace_id,
                resolved_via = excluded.resolved_via,
-               {_EVENT_TS_UPSERT},
-               {_ACTIVITY_TS_UPSERT}"""
+               {event},
+               {activity}"""
+    _CWD_EDGE_SQL = _CWD_EDGE_SQL_TEMPLATE.format(
+        event=_EVENT_TS_UPSERT, activity=_ACTIVITY_TS_UPSERT)
+    # #101 re-derivation: the full pass replaces the cwd edge's clock too.
+    _CWD_EDGE_SQL_REPLACE = _CWD_EDGE_SQL_TEMPLATE.format(
+        event=_EVENT_TS_UPSERT, activity=_ACTIVITY_TS_REPLACE)
 
     @staticmethod
     def _cwd_qualifies(cwd: str | None, home: str) -> bool:
@@ -2354,7 +2402,8 @@ class WorkspaceStore:
         return norm != home and os.path.dirname(norm) != norm
 
     def _attribute_event_range(
-        self, events_db_path: str | Path, lo: int, hi: int
+        self, events_db_path: str | Path, lo: int, hi: int,
+        replace_activity: bool = False,
     ) -> dict[str, int]:
         """Attribute events with ``lo < id <= hi``.
 
@@ -2388,12 +2437,18 @@ class WorkspaceStore:
         one-time cleanup of what earlier attribution runs minted (#58). The
         caller's next ``build_rollup`` reconciles ``session_touches``.
 
+        ``replace_activity`` (only with ``lo == 0``, the #101 re-derivation)
+        replaces each seen edge's ``activity_ts`` with the clock folded from
+        ALL its events instead of keeping the later of the two.
+
         ``events.db`` is opened ``mode=ro``; this never writes to it.
         """
         uri = f"file:{events_db_path}?mode=ro"
         src = sqlite3.connect(uri, uri=True, timeout=5)
         rng, params = "id > ? AND id <= ?", (lo, hi)
         full_pass = lo == 0
+        if replace_activity and not full_pass:
+            raise ValueError("replace_activity needs a full pass (lo == 0)")
         # Per-edge clocks (#42/#56), folded in Python: timestamp formats are
         # mixed, so a SQL MIN()/MAX() over the raw strings would be wrong.
         # (session, provider, file_path) -> [cwd, event_ts, activity_ts]
@@ -2498,6 +2553,7 @@ class WorkspaceStore:
                         self._record_attribution_locked(
                             session_id, provider, file_path, wid, ident.kind, now,
                             event_ts=ets, activity_ts=ats,
+                            replace_activity=replace_activity,
                         )
                     self._conn.commit()
                 except BaseException:
@@ -2508,7 +2564,8 @@ class WorkspaceStore:
             attributed += len(chunk)
 
         cwd_attributed = self._attribute_cwd_fallback(
-            cwd_rows, {(r[0], r[1]) for r in resolved}, dir_cache, now
+            cwd_rows, {(r[0], r[1]) for r in resolved}, dir_cache, now,
+            replace_activity=replace_activity,
         )
 
         # #58 cleanup: drop the stale edges a full pass proved shell-only. Same
@@ -2552,6 +2609,7 @@ class WorkspaceStore:
         file_sessions: set[tuple[str, str]],
         dir_cache: dict[str, WorkspaceIdentity],
         now: str,
+        replace_activity: bool = False,
     ) -> int:
         """Pass 2 of :meth:`_attribute_event_range` — the ``via='cwd'`` edges.
 
@@ -2599,6 +2657,8 @@ class WorkspaceStore:
                     dir_cache[cwd] = ident
                 edges.append((session_id, provider, cwd, ident, ets, ats))
 
+        edge_sql = (self._CWD_EDGE_SQL_REPLACE if replace_activity
+                    else self._CWD_EDGE_SQL)
         written = 0
         for i in range(0, len(edges), self._ATTRIBUTION_CHUNK):
             chunk = edges[i:i + self._ATTRIBUTION_CHUNK]
@@ -2617,7 +2677,7 @@ class WorkspaceStore:
                             continue
                         wid = self._upsert_workspace_locked(ident, now)
                         cur = self._conn.execute(
-                            self._CWD_EDGE_SQL,
+                            edge_sql,
                             (session_id, provider, cwd, wid, ident.kind, now, ets,
                              ats, session_id, provider),
                         )
@@ -2664,6 +2724,10 @@ class WorkspaceStore:
             return empty
 
         hi = self._read_max_event_id(events_db_path)  # FIRST — bounds the pass
+        if self._activity_rederive_ready(events_db_path):
+            rederived = self._rederive_activity(events_db_path, hi)
+            if rederived is not None:
+                return rederived
         reset = False
         if hi < cursor:
             _log.warning(
@@ -2685,6 +2749,78 @@ class WorkspaceStore:
             "cursor_from": cursor,
             "cursor_to": hi,
             "reset": reset,
+        }
+
+    def _activity_rederive_ready(self, events_db_path: str | Path) -> bool:
+        """True when the #101 re-derivation is pending AND events.db already
+        recorded the migration it follows (read-only; any read error → wait)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM rollup_meta WHERE key = ?",
+                (_ACTIVITY_REDERIVE_KEY,),
+            ).fetchone()
+        if not row or row[0] != "pending":
+            return False
+        from hub.cache.event_store import OUTAGE_CLOCK_MIGRATION
+        try:
+            src = sqlite3.connect(f"file:{events_db_path}?mode=ro", uri=True,
+                                  timeout=5)
+            try:
+                done = src.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?",
+                    (OUTAGE_CLOCK_MIGRATION,),
+                ).fetchone()
+            finally:
+                src.close()
+        except sqlite3.Error:
+            return False  # no schema_migrations yet: events.db not migrated
+        return done is not None
+
+    def _rederive_activity(
+        self, events_db_path: str | Path, hi: int
+    ) -> dict[str, Any] | None:
+        """Run the pending #101 re-derivation: one full pass over ``(0, hi]``
+        that REPLACES each edge's ``activity_ts``, then ``cursor = hi`` and the
+        marker cleared. Takes a backup of workspace.db first; if the backup
+        fails nothing is rewritten, the marker stays and ``None`` is returned
+        so the caller runs its normal incremental pass (retried next cycle).
+        An edge none of whose events is still in events.db keeps its clock.
+        """
+        with self._lock:
+            try:
+                backup = backup_workspace_db(self._conn, self.db_path)
+            except (OSError, sqlite3.Error):
+                _log.warning("atribución: no pude respaldar workspace.db; no "
+                             "recalculo los relojes de las aristas en esta "
+                             "pasada (#101)", exc_info=True)
+                return None
+            before = dict(self._conn.execute(
+                "SELECT id, activity_ts FROM path_attributions").fetchall())
+        _log.info("atribución: respaldo de workspace.db en %s antes de "
+                  "recalcular los relojes de las aristas (#101)", backup)
+        result = self._attribute_event_range(events_db_path, 0, hi,
+                                             replace_activity=True)
+        self.set_attribution_cursor(hi)  # only reached if every commit succeeded
+        with self._lock:
+            after = self._conn.execute(
+                "SELECT id, activity_ts FROM path_attributions").fetchall()
+            self._conn.execute(
+                "DELETE FROM rollup_meta WHERE key = ?", (_ACTIVITY_REDERIVE_KEY,))
+            self._conn.commit()
+        redated = sum(1 for eid, ats in after
+                      if eid in before and before[eid] != ats)
+        _log.info("atribución: %d aristas cambiaron de día de actividad (#101)",
+                  redated)
+        return {
+            "attributed": result["attributed"],
+            "cwd_attributed": result["cwd_attributed"],
+            "directories": result["directories"],
+            "skipped_non_absolute": result["skipped_non_absolute"],
+            "shell_edges_removed": result["shell_edges_removed"],
+            "cursor_from": 0,
+            "cursor_to": hi,
+            "reset": False,
+            "rederived": redated,
         }
 
     # --- Read surface ---
