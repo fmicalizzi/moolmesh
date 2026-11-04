@@ -1879,6 +1879,24 @@ def main() -> None:
     repo_sync.add_argument("--no-github", action="store_true",
                            help="Skip the GitHub issues/PRs backfill with --all")
 
+    repo_prs = repo_sub.add_parser(
+        "backfill-pr-stats",
+        help="Fetch +/-, changed files and closed issues of cached PRs",
+        description="Fetch additions, deletions, changed files and closing "
+                    "issue references (owner/repo#n) for PRs already in the "
+                    "GitHub cache that have no stats yet. The daemon fills "
+                    "new/updated PRs on its own; this covers the older ones. "
+                    "Resumable: each run only asks for PRs still missing "
+                    "stats, newest first, one GraphQL call per 25 PRs.")
+    repo_prs.add_argument("path", nargs="?", default=".",
+                          help="Path to git repo (default: current directory)")
+    repo_prs.add_argument("--all-registered", dest="all_registered",
+                          action="store_true",
+                          help="Every registered GitHub-enabled repo")
+    repo_prs.add_argument("--limit", type=int, default=200, metavar="N",
+                          help="Max PRs to fetch in this run, across repos "
+                               "(default: 200; rerun to continue)")
+
     # query (agent-friendly JSON output)
     query_parser = subparsers.add_parser("query", help="Query data as JSON (agent-friendly)")
     query_sub = query_parser.add_subparsers(dest="query_command")
@@ -2858,8 +2876,85 @@ def cmd_repo(args: argparse.Namespace) -> None:
             cmd_repo_remove(args)
         case "sync":
             cmd_repo_sync(args)
+        case "backfill-pr-stats":
+            cmd_repo_backfill_pr_stats(args)
         case _:
-            print("Usage: mool repo {add|list|remove|sync}")
+            print("Usage: mool repo {add|list|remove|sync|backfill-pr-stats}")
+
+
+def cmd_repo_backfill_pr_stats(args: argparse.Namespace) -> None:
+    """Backfill per-PR stats for cached PRs that have none (#80).
+
+    Bounded by ``--limit`` (PRs per run, across repos) and resumable: it only
+    asks for PRs still missing stats. A failed GraphQL batch is reported and
+    the run continues; exits non-zero when any batch failed.
+    """
+    from pathlib import Path
+    from hub.config import load_config
+    from hub.cache.git_store import GitStore
+    from hub.harvesters.github_harvester import fetch_pr_stats
+
+    config = load_config()
+    if args.all_registered:
+        repos = [r for r in config.repos if r.github_enabled]
+    else:
+        path = str(Path(args.path).resolve())
+        repos = [r for r in config.repos if r.path == path]
+        if not repos:
+            print(red(f"Not registered: {path}"))
+            print(dim("  Use: mool repo add /path/to/repo"))
+            sys.exit(1)
+        if not repos[0].github_enabled:
+            print(yellow("GitHub is disabled for this repo (--no-github)."))
+            return
+    if not repos:
+        print(yellow("No GitHub-enabled repositories registered."))
+        return
+    if args.limit < 1:
+        print(red("--limit must be >= 1"))
+        sys.exit(2)
+    client = _github_client_for(config, False)
+    if client is None:
+        sys.exit(1)
+
+    store = GitStore()
+    budget = args.limit
+    total_stored = 0
+    remaining = 0
+    failed_repos: list[str] = []
+    for r in repos:
+        name = f"{r.owner}/{r.repo}"
+        repo_id = store.get_repo_id(r.path)
+        if repo_id is None:
+            failed_repos.append(f"{name}: not in GitStore")
+            continue
+        missing = store.list_prs_missing_stats(repo_id)
+        todo = missing[:budget]
+        stored, failed = (0, 0)
+        if todo:
+            stored, failed = fetch_pr_stats(store, client, repo_id,
+                                            r.owner, r.repo, todo)
+        budget -= len(todo)
+        total_stored += stored
+        left = len(missing) - stored
+        remaining += left
+        line = f"  {name}  {green(f'{stored} PRs')}"
+        if left:
+            line += dim(f" ({left} pendientes)")
+        if failed:
+            failed_repos.append(f"{name}: {failed} batch(es) failed")
+            line += f" {red(f'{failed} batch(es) failed')}"
+        print(line)
+        if budget <= 0:
+            break
+    store.close()
+    print(green(f"\nPR stats: {total_stored} PRs stored."))
+    if remaining or budget <= 0:
+        print(dim("  Rerun to continue — only PRs still missing stats are fetched."))
+    if failed_repos:
+        for e in failed_repos:
+            print(red(f"    - {e}"))
+        sys.exit(1)
 
 
 def _github_client_for(config, no_github: bool):

@@ -136,10 +136,13 @@ class GitHubClient:
 
         return status, None, None
 
-    def graphql(self, query: str, variables: dict | None = None) -> dict | None:
+    def graphql(self, query: str, variables: dict | None = None,
+                allow_partial: bool = False) -> dict | None:
         """Execute GraphQL query.
 
-        Returns parsed response dict or None on error.
+        Returns parsed response dict or None on error. With ``allow_partial``
+        a response carrying both ``data`` and ``errors`` (e.g. one aliased
+        field NOT_FOUND) returns the data; the failed fields come back null.
         """
         payload = {"query": query}
         if variables:
@@ -159,6 +162,8 @@ class GitHubClient:
                 _log.debug("GitHub GraphQL JSON inválido: %s", e)
                 return None
             if "errors" in result:
+                if allow_partial and isinstance(result.get("data"), dict):
+                    return result["data"]
                 return None  # GraphQL error
             return result.get("data")
         return None
@@ -222,6 +227,63 @@ class GitHubClient:
         return self.rest_get(f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews")
 
     # --- High-level GraphQL ---
+
+    # PRs per GraphQL query (aliased fields) and closing refs read per PR.
+    PR_STATS_BATCH = 25
+    PR_CLOSING_REFS_FIRST = 50
+
+    def get_pr_stats(self, owner: str, repo: str,
+                     numbers: list[int]) -> dict[int, dict] | None:
+        """Additions/deletions/changed files + closing references (#80).
+
+        One GraphQL query for up to ``PR_STATS_BATCH`` PRs (aliased
+        ``pullRequest`` fields — about 1 point of the GraphQL budget).
+        Returns ``{number: {number, additions, deletions, changed_files,
+        updated_at, closing_refs: [(issue_repo, n)], closing_refs_total}}``;
+        a number GitHub does not resolve as a PR is absent. ``None`` when the
+        call failed (network, auth, rate limit): the caller keeps going.
+        """
+        nums = [int(n) for n in numbers][: self.PR_STATS_BATCH]
+        if not nums:
+            return {}
+        fields = "\n".join(
+            f"""p{n}: pullRequest(number: {n}) {{
+              number additions deletions changedFiles updatedAt
+              closingIssuesReferences(first: {self.PR_CLOSING_REFS_FIRST}) {{
+                totalCount
+                nodes {{ number repository {{ nameWithOwner }} }}
+              }}
+            }}"""
+            for n in nums
+        )
+        query = ("query($owner: String!, $repo: String!) {"
+                 " repository(owner: $owner, name: $repo) {"
+                 f" {fields} }} }}")
+        data = self.graphql(query, {"owner": owner, "repo": repo},
+                            allow_partial=True)
+        if not data or not isinstance(data.get("repository"), dict):
+            return None
+        out: dict[int, dict] = {}
+        for n in nums:
+            pr = data["repository"].get(f"p{n}")
+            if not isinstance(pr, dict):
+                continue
+            refs_obj = pr.get("closingIssuesReferences") or {}
+            refs = []
+            for node in refs_obj.get("nodes") or []:
+                name = ((node or {}).get("repository") or {}).get("nameWithOwner")
+                if name and node.get("number") is not None:
+                    refs.append((name, int(node["number"])))
+            out[n] = {
+                "number": n,
+                "additions": int(pr.get("additions") or 0),
+                "deletions": int(pr.get("deletions") or 0),
+                "changed_files": int(pr.get("changedFiles") or 0),
+                "updated_at": pr.get("updatedAt"),
+                "closing_refs": refs,
+                "closing_refs_total": int(refs_obj.get("totalCount") or len(refs)),
+            }
+        return out
 
     def get_repo_projects_v2(self, owner: str, repo: str) -> list[dict]:
         """Lista Projects v2 de un repo.

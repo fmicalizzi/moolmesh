@@ -287,9 +287,12 @@ Esto ingesta el historial de commits y comienza a consultar GitHub para issues, 
 mool repo list                           # Mostrar repos registrados
 mool repo remove                         # Desregistrar el repo actual
 mool repo sync --all                     # Re-ingestar historial completo
+mool repo backfill-pr-stats --all-registered --limit 200   # +/-, archivos e issues cerradas de PRs viejas
 ```
 
 Todos los subcomandos de `repo` usan el directorio actual cuando no se especifica una ruta.
+
+**Stats por PR:** el poll de GitHub guarda también, para cada PR nueva o actualizada, sus líneas agregadas y borradas, los archivos cambiados y las issues que cierra (`closingIssuesReferences`, calificadas como `owner/repo#n` — una PR puede cerrar issues de otro repo). Una llamada GraphQL cubre hasta 25 PRs, con un tope de 50 PRs por poll; si la llamada falla, el sync sigue y la PR queda sin stats. Las PRs cacheadas antes del upgrade (o que pasaron el tope) se completan con `mool repo backfill-pr-stats [PATH | --all-registered] [--limit N]` — acotado y reanudable: solo pide las PRs que todavía no tienen stats. El pipeline de PRs del dashboard (`/api/github/prs`) incluye `additions`, `deletions`, `changed_files` y `closes`.
 
 ### Token de GitHub
 
@@ -465,6 +468,7 @@ Comandos:
   repo list              Listar repos registrados con conteo de commits
   repo remove [PATH]     Desregistrar un repositorio (por defecto: directorio actual)
   repo sync [PATH]       Re-ingestar historial de commits
+  repo backfill-pr-stats Traer +/-, archivos e issues cerradas de PRs cacheadas
   query events           Eventos recientes como JSON
   query sessions         Sesiones activas como JSON
   query tokens           Uso de tokens por proveedor como JSON

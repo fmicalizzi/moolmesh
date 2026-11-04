@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import collections
 import json
+import sqlite3
 import threading
 import time
 
-from hub.cache.git_store import GitStore
+from hub.cache.git_store import GitStore, _to_local_naive
 from hub.integrations.github_client import GitHubClient
 from hub.log import get as get_logger
 
@@ -28,6 +29,10 @@ class GitHubHarvester:
     # Throttle for the durable "last GitHub sync" write (#76): the freshness
     # threshold is in minutes, so one write per repo per minute is plenty.
     SYNC_RECORD_INTERVAL: float = 60.0
+    # Per-PR stats (#80): at most this many PRs per issues poll (2 GraphQL
+    # calls of 25). A larger burst (a newly added repo) is left to
+    # ``mool repo backfill-pr-stats``.
+    MAX_PR_STATS_PER_POLL: int = 50
 
     def __init__(self, git_store: GitStore, github_client: GitHubClient,
                  sse_buffer: collections.deque | None = None):
@@ -152,6 +157,9 @@ class GitHubHarvester:
         if status == 304 or data is None:
             return  # Sin cambios
 
+        # Cached PR updated_at before the upsert: what is new/updated (#80)
+        prev_prs = self._store.get_pr_updated_map(repo_id)
+
         # Separar issues y PRs, enriquecer PRs con review info
         issues = []
         for item in data:
@@ -184,6 +192,12 @@ class GitHubHarvester:
             issues.append(issue_dict)
 
         self._store.upsert_issues(repo_id, issues)
+        try:
+            self._sync_pr_stats(repo_id, owner, repo, data, prev_prs)
+        except Exception:
+            # Best effort (#80): the issues/PRs are stored; stats can wait.
+            _log.warning("PR stats %s/%s: error inesperado", owner, repo,
+                         exc_info=True)
 
         # Push cambios significativos a SSE
         if self._sse_buffer is not None and issues:
@@ -193,6 +207,38 @@ class GitHubHarvester:
                 "repo": f"{owner}/{repo}",
                 "count": len(issues),
             })
+
+    def _sync_pr_stats(self, repo_id: int, owner: str, repo: str,
+                       items: list[dict], prev_prs: dict[int, str]) -> None:
+        """Fetch +/-, files and closing refs of the new/updated PRs (#80).
+
+        Only PRs that are new to the cache or whose ``updated_at`` changed,
+        and whose stored stats do not already describe that ``updated_at``
+        (a re-sync is a no-op). Capped at ``MAX_PR_STATS_PER_POLL``. Best
+        effort: a failed call is logged and the PRs stay without stats —
+        the issues sync already completed.
+        """
+        have = self._store.get_pr_stats_updated_map(repo_id)
+        todo: list[int] = []
+        for item in items:
+            if "pull_request" not in item:
+                continue
+            n = item["number"]
+            upd = item.get("updated_at")
+            if prev_prs.get(n) == _to_local_naive(upd or ""):
+                continue  # Unchanged since the last poll
+            if n in have and have[n] == upd:
+                continue  # Stats already match this version of the PR
+            todo.append(n)
+        if not todo:
+            return
+        skipped = len(todo) - self.MAX_PR_STATS_PER_POLL
+        todo = todo[: self.MAX_PR_STATS_PER_POLL]
+        if skipped > 0:
+            _log.info("%s/%s: %d PRs sin stats en este ciclo (tope %d); "
+                      "completalas con: mool repo backfill-pr-stats",
+                      owner, repo, skipped, self.MAX_PR_STATS_PER_POLL)
+        fetch_pr_stats(self._store, self._client, repo_id, owner, repo, todo)
 
     def _record_sync(self, repo_id: int) -> None:
         """Persist the sync time, at most once per ``SYNC_RECORD_INTERVAL``."""
@@ -266,3 +312,38 @@ class GitHubHarvester:
 
         # Sin info de reviews en /issues endpoint, default a "review"
         return "review"
+
+
+def fetch_pr_stats(store: GitStore, client: GitHubClient, repo_id: int,
+                   owner: str, repo: str, numbers: list[int]) -> tuple[int, int]:
+    """Fetch and store stats for ``numbers`` in GraphQL batches (#80).
+
+    Shared by the poll and ``mool repo backfill-pr-stats``. Returns
+    ``(stored, failed_batches)``; a failed batch is logged and skipped.
+    """
+    stored = 0
+    failed = 0
+    batch = client.PR_STATS_BATCH
+    for i in range(0, len(numbers), batch):
+        chunk = numbers[i:i + batch]
+        try:
+            res = client.get_pr_stats(owner, repo, chunk)
+        except Exception:
+            _log.warning("PR stats %s/%s: error inesperado", owner, repo,
+                         exc_info=True)
+            res = None
+        if res is None:
+            failed += 1
+            _log.info("PR stats %s/%s: la llamada falló; %d PRs quedan sin "
+                      "stats", owner, repo, len(chunk))
+            continue
+        if res:
+            try:
+                store.upsert_pr_stats(repo_id, list(res.values()))
+            except sqlite3.Error:
+                failed += 1
+                _log.warning("PR stats %s/%s: no se pudieron guardar", owner,
+                             repo, exc_info=True)
+                continue
+            stored += len(res)
+    return stored, failed

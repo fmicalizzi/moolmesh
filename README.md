@@ -311,9 +311,12 @@ This ingests commit history and starts polling GitHub for issues, PRs, milestone
 mool repo list                           # Show registered repos
 mool repo remove                         # Unregister current repo
 mool repo sync --all                     # Re-ingest full history
+mool repo backfill-pr-stats --all-registered --limit 200   # +/-, files, closed issues of older PRs
 ```
 
 All `repo` subcommands default to the current directory when no path is given.
+
+**Per-PR stats:** the GitHub poll also stores, for each new or updated PR, its additions, deletions, changed files and the issues it closes (`closingIssuesReferences`, qualified as `owner/repo#n` — a PR can close issues in other repos). One GraphQL call covers up to 25 PRs, at most 50 PRs per poll; if the call fails the sync continues and the PR stays without stats. PRs cached before the upgrade (or past the per-poll cap) are filled with `mool repo backfill-pr-stats [PATH | --all-registered] [--limit N]` — bounded and resumable, it only asks for PRs still missing stats. The dashboard's PR pipeline (`/api/github/prs`) carries `additions`, `deletions`, `changed_files` and `closes`.
 
 ### GitHub token
 
@@ -534,6 +537,7 @@ Commands:
   repo list              List registered repos with commit counts
   repo remove [PATH]     Unregister a repo (default: current directory)
   repo sync [PATH]       Re-ingest commit history
+  repo backfill-pr-stats Fetch +/-, files and closed issues of cached PRs
   query events           Recent events as JSON
   query sessions         Active sessions as JSON
   query tokens           Token usage by provider as JSON

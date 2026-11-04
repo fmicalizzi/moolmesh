@@ -172,6 +172,51 @@ def _mig_5_repo_github_sync(conn: sqlite3.Connection) -> int:
     return 1
 
 
+# Per-PR stats (#80). Kept apart from ``github_issues`` (untouched): the
+# issues poll rewrites those rows with INSERT OR REPLACE every cycle, so a
+# column there would be wiped; a side table also keeps the hot issues query
+# as it was. Closing references go to a child table, one row per closed
+# issue, qualified by ``issue_repo`` ("owner/repo" as GitHub names it): a PR
+# can close issues in other repos and two repos can share a number, and a row
+# per reference is indexable from the issue side ("which PR closed x#5").
+_PR_STATS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS github_pr_stats (
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    pr_number INTEGER NOT NULL,
+    additions INTEGER NOT NULL,
+    deletions INTEGER NOT NULL,
+    changed_files INTEGER NOT NULL,
+    -- GitHub's updatedAt (UTC ISO) of the PR the stats describe: a PR whose
+    -- updated_at still matches is not fetched again.
+    pr_updated_at TEXT,
+    -- Total closing references GitHub reports; > rows stored when truncated.
+    closing_refs_total INTEGER NOT NULL DEFAULT 0,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (repo_id, pr_number)
+);
+CREATE TABLE IF NOT EXISTS github_pr_closing_refs (
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    pr_number INTEGER NOT NULL,
+    issue_repo TEXT NOT NULL,
+    issue_number INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, pr_number, issue_repo, issue_number)
+);
+CREATE INDEX IF NOT EXISTS idx_pr_closing_refs_issue
+    ON github_pr_closing_refs(issue_repo, issue_number);
+"""
+
+
+def _mig_6_pr_stats(conn: sqlite3.Connection) -> int:
+    """Migration 6: per-PR +/-, changed files and closing references (#80).
+
+    Additive: two new tables, no existing row is read or rewritten. Idempotent
+    (``IF NOT EXISTS``); the same DDL also runs with ``_SCHEMA`` on open.
+    """
+    conn.executescript(_PR_STATS_SCHEMA)
+    conn.commit()
+    return 0
+
+
 # Register migrations
 _MIGRATIONS = [
     (1, "normalize_timestamps", _mig_1_normalize_timestamps),
@@ -179,6 +224,7 @@ _MIGRATIONS = [
     (3, "utc_to_local", _mig_3_utc_to_local),
     (4, "repo_history_complete", _mig_4_repo_history_complete),
     (5, "repo_github_sync", _mig_5_repo_github_sync),
+    (6, "pr_stats", _mig_6_pr_stats),
 ]
 
 
@@ -359,6 +405,7 @@ class GitStore:
         self._lock = threading.Lock()
 
         self._conn.executescript(_SCHEMA)
+        self._conn.executescript(_PR_STATS_SCHEMA)
         self._conn.commit()
 
         # Run migrations versionadas (solo las pendientes)
@@ -883,6 +930,7 @@ class GitStore:
                 (repo_id,)
             ).fetchall()
         
+        stats = self.get_pr_stats(repo_id)
         pipeline = {"draft": [], "review": [], "approved": [], "merged": [], "closed": []}
         for r in rows:
             pr = {
@@ -890,10 +938,120 @@ class GitStore:
                 "pr_state": r[3] or "review", "merged_at": r[4],
                 "updated_at": r[5], "assignees": json.loads(r[6]) if r[6] else [], "labels": json.loads(r[7]) if r[7] else [],
             }
+            # Per-PR stats (#80): None until fetched (no token, not yet synced).
+            st = stats.get(r[0])
+            pr["additions"] = st["additions"] if st else None
+            pr["deletions"] = st["deletions"] if st else None
+            pr["changed_files"] = st["changed_files"] if st else None
+            pr["closes"] = st["closes"] if st else []
             state = pr["pr_state"]
             if state in pipeline:
                 pipeline[state].append(pr)
         return pipeline
+
+    def get_pr_updated_map(self, repo_id: int) -> dict[int, str]:
+        """``{pr_number: updated_at}`` of the cached PRs (local naive)."""
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT number, updated_at FROM github_issues"
+                " WHERE repo_id = ? AND is_pull_request = 1",
+                (repo_id,),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def get_pr_stats_updated_map(self, repo_id: int) -> dict[int, str | None]:
+        """``{pr_number: pr_updated_at}`` of the PRs that already have stats."""
+        with self._lock:
+            rows = self._get_conn().execute(
+                "SELECT pr_number, pr_updated_at FROM github_pr_stats"
+                " WHERE repo_id = ?",
+                (repo_id,),
+            ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def upsert_pr_stats(self, repo_id: int, stats: list[dict]) -> None:
+        """Store per-PR stats and replace each PR's closing references (#80).
+
+        ``stats`` items: ``number, additions, deletions, changed_files,
+        updated_at, closing_refs`` (list of ``(issue_repo, issue_number)``),
+        ``closing_refs_total``. One transaction; rerunning with the same input
+        leaves the same rows.
+        """
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                for st in stats:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO github_pr_stats
+                           (repo_id, pr_number, additions, deletions,
+                            changed_files, pr_updated_at, closing_refs_total,
+                            fetched_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (repo_id, st["number"], st["additions"], st["deletions"],
+                         st["changed_files"], st.get("updated_at"),
+                         st.get("closing_refs_total", 0), now),
+                    )
+                    conn.execute(
+                        "DELETE FROM github_pr_closing_refs"
+                        " WHERE repo_id = ? AND pr_number = ?",
+                        (repo_id, st["number"]),
+                    )
+                    conn.executemany(
+                        """INSERT OR IGNORE INTO github_pr_closing_refs
+                           (repo_id, pr_number, issue_repo, issue_number)
+                           VALUES (?, ?, ?, ?)""",
+                        [(repo_id, st["number"], r, n)
+                         for r, n in st.get("closing_refs", [])],
+                    )
+                conn.commit()
+            except sqlite3.Error:
+                conn.rollback()
+                raise
+
+    def list_prs_missing_stats(self, repo_id: int, limit: int | None = None) -> list[int]:
+        """Cached PR numbers without stats, newest first (backfill, #80)."""
+        sql = """SELECT i.number FROM github_issues i
+                 LEFT JOIN github_pr_stats s
+                   ON s.repo_id = i.repo_id AND s.pr_number = i.number
+                 WHERE i.repo_id = ? AND i.is_pull_request = 1
+                   AND s.pr_number IS NULL
+                 ORDER BY i.number DESC"""
+        params: list[Any] = [repo_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        with self._lock:
+            rows = self._get_conn().execute(sql, params).fetchall()
+        return [r[0] for r in rows]
+
+    def get_pr_stats(self, repo_id: int) -> dict[int, dict]:
+        """``{pr_number: {additions, deletions, changed_files, closes}}``.
+
+        ``closes`` is a sorted list of qualified ``owner/repo#n`` strings.
+        """
+        with self._lock:
+            conn = self._get_conn()
+            rows = conn.execute(
+                """SELECT pr_number, additions, deletions, changed_files
+                   FROM github_pr_stats WHERE repo_id = ?""",
+                (repo_id,),
+            ).fetchall()
+            refs = conn.execute(
+                """SELECT pr_number, issue_repo, issue_number
+                   FROM github_pr_closing_refs WHERE repo_id = ?
+                   ORDER BY issue_repo, issue_number""",
+                (repo_id,),
+            ).fetchall()
+        out = {
+            r[0]: {"additions": r[1], "deletions": r[2],
+                   "changed_files": r[3], "closes": []}
+            for r in rows
+        }
+        for pr, issue_repo, n in refs:
+            if pr in out:
+                out[pr]["closes"].append(f"{issue_repo}#{n}")
+        return out
 
     def get_milestones(self, repo_id: int) -> list[dict]:
         """SELECT * con estado, open/closed counts, due_on."""
