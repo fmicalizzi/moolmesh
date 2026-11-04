@@ -118,6 +118,48 @@ Eso es todo. MoolMesh auto-descubre tus sesiones de IA inmediatamente. No requie
 > mool dashboard
 > ```
 
+### Arrancar al iniciar sesión
+
+`mool daemon start` no sobrevive a un reinicio. Para que el daemon vuelva solo,
+registralo en el supervisor del sistema (opt-in: no se instala nada por defecto):
+
+```bash
+mool daemon install            # registra y arranca ya (localhost:5200)
+mool daemon install --host 0.0.0.0 --port 5200
+mool daemon install --dry-run  # muestra el archivo y los comandos, no cambia nada
+mool daemon uninstall          # borra exactamente lo que creó install
+```
+
+| SO | Mecanismo | Archivo |
+|----|-----------|---------|
+| macOS | LaunchAgent, label `dev.moolmesh.daemon` (`launchctl bootstrap gui/<uid>`; si falla, `load -w`) | `~/Library/LaunchAgents/dev.moolmesh.daemon.plist` |
+| Linux | unit de systemd `--user` (`Restart=on-failure`, logs en `journalctl --user -u moolmesh.service`) | `~/.config/systemd/user/moolmesh.service` |
+| Windows | tarea `MoolMesh` del Programador de tareas al iniciar sesión, con `pythonw.exe` (sin consola) | registro en `~/.moolmesh/autostart-task.json` |
+
+- El proceso supervisado corre siempre `python -m hub.cli daemon start --foreground`
+  con el intérprete desde el que instalaste y el `PATH` del momento de instalar
+  (launchd y systemd arrancan con uno mínimo; sin `gh` el sync de GitHub se
+  queda sin token). ¿Reinstalaste o moviste MoolMesh? Corré `mool daemon install`
+  de nuevo — `mool doctor` marca un registro cuyo intérprete ya no existe.
+- Con el autoarranque instalado, `mool daemon start|stop|restart` pasan por el
+  supervisor (`systemctl --user …`, `launchctl kickstart/kill`, `schtasks /Run`):
+  nunca queda un segundo daemon al lado del supervisado.
+- `install` nunca pisa un archivo que no creó (por ejemplo una `moolmesh.service`
+  escrita a mano): sale con código 1 y muestra el diff. `--force` lo reemplaza
+  después de guardar una copia `.bak-<fecha>` (en launchd la copia va a `~/.moolmesh/`).
+- **Linux:** sin *linger* una unit de usuario solo arranca cuando iniciás sesión.
+  `install` consulta `loginctl show-user "$USER" -p Linger` y, si está apagado,
+  te indica `loginctl enable-linger "$USER"` (nunca lo ejecuta por vos).
+
+**Datos viejos.** Las tools MCP que leen el portafolio (`get_portfolio_grouped`,
+`get_portfolio_production`) y `get_server_info` traen un bloque `freshness` —
+`daemon_running`, `last_git_sync_at`, `last_github_sync_at`, `repos_stale`,
+`last_ingest_at`, `data_age_seconds`, `stale` — y `stale: true` arriba cuando el
+daemon no corre o el último sync de git / API de GitHub es más viejo que
+`[daemon] stale_after_minutes` (default 60) en `~/.moolmesh/config.toml`. En ese
+caso el dashboard muestra un banner en todas las páginas y `mool doctor` imprime
+una línea de frescura. `daemon.log` rota a `daemon.log.1` al pasar los 10 MB.
+
 ---
 
 ## Instalación en producción
@@ -175,6 +217,8 @@ otro gestor, usá su propia actualización (`scoop update moolmesh`,
 `uv tool upgrade moolmesh`).
 
 ### Servicio systemd (Linux)
+
+`mool daemon install` (ver [Arrancar al iniciar sesión](#arrancar-al-iniciar-sesión)) escribe y administra esta unit por vos; la unit manual de abajo sigue siendo válida.
 
 Usa `mool dashboard` (foreground) como punto de entrada — MoolMesh auto-detecta systemd y se queda en primer plano:
 
@@ -400,6 +444,8 @@ Comandos:
   daemon stop            Detener el servicio en background
   daemon status          Mostrar PID, uptime, tamaño de log
   daemon restart         Reiniciar el servicio en background
+  daemon install         Arrancar el daemon al iniciar sesión (launchd / systemd --user / Task Scheduler)
+  daemon uninstall       Quitar el autoarranque creado por daemon install
   status [--json]        Atajo rápido para daemon status
   mcp setup [TARGET]     Configurar servidor MCP (claude-code|claude-desktop|cursor|codex|qwen|opencode|json)
   doctor                 Ejecutar diagnóstico del sistema
