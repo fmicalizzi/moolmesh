@@ -112,6 +112,7 @@ class ClaudeAdapter(BaseAdapter):
             model=entry.model,
             cwd=entry.cwd or None,
             full_text=full_text,
+            entry_id=entry.uuid or None,  # native per-line id (#67)
         )
 
     def to_session_meta(self, entry: ClaudeEntry, project: str) -> SessionMeta | None:

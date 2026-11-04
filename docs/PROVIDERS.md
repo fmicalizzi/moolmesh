@@ -64,6 +64,11 @@ logic beyond field definitions.
 - A cost, when the format reports one, goes in the event `tokens` JSON as
   `cost` (the `sessions.cost` column is a monotonic maximum — do not put a
   per-message cost there).
+- When the format gives every entry a stable native id (Pi's `id`, Claude's
+  `uuid`), set it as `UnifiedEvent.entry_id`: it is stored in
+  `events.entry_id` and is part of the dedupe fingerprint, so two distinct
+  entries in the same millisecond with the same summary (parallel tool
+  results) are both kept (#67). Leave it `None` when there is no such id.
 - `to_session_meta` fills id, cwd, model (last `model_change` or the
   assistant's own), title + initial prompt (first user prompt; explicit names
   win) and any small additive `metadata` (parent session, active leaf id).

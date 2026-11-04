@@ -171,6 +171,7 @@ class PiAdapter(BaseAdapter):
             model=entry.model or None,
             cwd=entry.cwd or None,
             full_text=self._extract_full_text(entry),
+            entry_id=entry.entry_id or None,  # native tree id (#67)
         )
         return event, paths
 

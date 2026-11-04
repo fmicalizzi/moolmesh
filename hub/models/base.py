@@ -100,6 +100,9 @@ class UnifiedEvent:
     model: str | None = None
     cwd: str | None = None  # working directory of the session
     full_text: str | None = None
+    # Provider-native per-entry id (#67), when the format has one (Pi entry
+    # ``id``, Claude line ``uuid``). Part of the dedupe fingerprint.
+    entry_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -123,6 +126,8 @@ class UnifiedEvent:
             d["cwd"] = self.cwd
         if self.full_text:
             d["full_text"] = self.full_text
+        if self.entry_id:
+            d["entry_id"] = self.entry_id
         return d
 
     def to_json(self) -> str:

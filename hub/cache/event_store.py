@@ -301,6 +301,21 @@ def _mig_6_opencode_session_times_iso(conn: sqlite3.Connection):
     return None
 
 
+def _mig_7_entry_id(conn: sqlite3.Connection) -> None:
+    """Additive, nullable ``events.entry_id`` (#67).
+
+    The provider-native per-entry id (Pi entry ``id``, Claude line ``uuid``),
+    filled for new rows by the adapters that have one. No existing row is
+    rewritten (no backup needed): old rows keep ``entry_id = NULL`` and their
+    fingerprint, and ``_legacy_row_exists`` keeps a re-read from inserting
+    them a second time under the new fingerprint. Idempotent via the
+    ``PRAGMA table_info`` guard.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "entry_id" not in columns:
+        conn.execute("ALTER TABLE events ADD COLUMN entry_id TEXT")
+
+
 # Versioned, additive migrations for events.db — each runs exactly once.
 _EVENT_STORE_MIGRATIONS = [
     (1, "session_lifecycle", _mig_1_session_lifecycle),
@@ -309,6 +324,7 @@ _EVENT_STORE_MIGRATIONS = [
     (4, "registry_path_key", _mig_4_registry_path_key),
     (5, "opencode_first_ingest_day", _mig_5_opencode_first_ingest_day),
     (6, "opencode_session_times_iso", _mig_6_opencode_session_times_iso),
+    (7, "entry_id", _mig_7_entry_id),
 ]
 
 
@@ -333,7 +349,7 @@ def file_fingerprint(path: Path) -> str:
 # watcher thread with it (issue #65).
 _EVENT_SCALAR_KEYS = (
     "provider", "project", "event_type", "timestamp", "summary",
-    "session_id", "tool_name", "file_path", "model", "cwd",
+    "session_id", "tool_name", "file_path", "model", "cwd", "entry_id",
 )
 _SCALAR_MAX_LEN = 2000
 
@@ -448,22 +464,49 @@ def _normalize_event(event: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _compute_fingerprint(event_dict: dict[str, Any]) -> str:
+def _compute_fingerprint(event_dict: dict[str, Any], *, legacy: bool = False) -> str:
     """Compute a unique fingerprint for deduplication.
 
     Uses provider + session_id + timestamp + event_type + summary
-    to uniquely identify an event. Callers pass an event normalized by
+    to uniquely identify an event, plus the provider-native ``entry_id`` when
+    the event has one (#67): two distinct entries in the same millisecond with
+    the same summary (parallel tool results) no longer collapse. Events
+    without an ``entry_id`` keep exactly the pre-#67 fingerprint;
+    ``legacy=True`` returns that pre-#67 value for any event (see
+    ``_legacy_row_exists``). Callers pass an event normalized by
     ``_normalize_event`` so the fingerprint is stable regardless of value
     shape.
     """
-    key = "|".join([
+    parts = [
         str(event_dict.get("provider", "") or ""),
         str(event_dict.get("session_id") or ""),
         str(event_dict.get("timestamp", "") or ""),
         str(event_dict.get("event_type", "") or ""),
         str(event_dict.get("summary", "") or ""),
-    ])
-    return hashlib.md5(key.encode()).hexdigest()
+    ]
+    entry_id = event_dict.get("entry_id")
+    if entry_id and not legacy:
+        parts.append(f"entry:{entry_id}")
+    return hashlib.md5("|".join(parts).encode()).hexdigest()
+
+
+def _legacy_row_exists(conn: sqlite3.Connection, e: dict[str, Any]) -> bool:
+    """True when ``e`` (with an ``entry_id``) was already stored before #67.
+
+    Rows written before ``events.entry_id`` existed keep their fingerprint,
+    which lacks the entry id, and have ``entry_id IS NULL``. Re-reading such a
+    file (backfill from offset 0, a legacy registry offset) computes the new
+    fingerprint and would insert the same event a second time; this lookup —
+    one probe of the fingerprint index — finds the old row instead, so the
+    event is skipped. Only rows with no entry id count: a post-#67 row with the
+    same legacy key is a different entry (the very collision #67 fixes).
+    """
+    if not e.get("entry_id"):
+        return False
+    return conn.execute(
+        "SELECT 1 FROM events WHERE fingerprint = ? AND entry_id IS NULL LIMIT 1",
+        (_compute_fingerprint(e, legacy=True),),
+    ).fetchone() is not None
 
 
 def _insert_event_row(
@@ -472,12 +515,14 @@ def _insert_event_row(
 ) -> int:
     """INSERT OR IGNORE one event (+ its capped full text); 1 if inserted, else 0."""
     e = _normalize_event(e)
+    if _legacy_row_exists(conn, e):
+        return 0
     cursor = conn.execute(
         """INSERT OR IGNORE INTO events
            (provider, project, event_type, timestamp, summary,
             session_id, tokens_json, tool_name, file_path, model, cwd,
-            fingerprint, created_at, historical)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            fingerprint, created_at, historical, entry_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             e.get("provider", ""), e.get("project", ""), e.get("event_type", ""),
             e.get("timestamp", ""), e.get("summary", ""), e.get("session_id"),
@@ -486,6 +531,7 @@ def _insert_event_row(
             _compute_fingerprint(e), now,
             1 if historical or is_older_than(e.get("timestamp"), _live_cutoff(None, now))
             else 0,
+            e.get("entry_id"),
         ),
     )
     if cursor.rowcount <= 0:
@@ -1046,12 +1092,14 @@ class EventStore:
         tokens_json = _tokens_json(event_dict.get("tokens"))
         fingerprint = _compute_fingerprint(event_dict)
         with self._write() as conn:
+            if _legacy_row_exists(conn, event_dict):
+                return
             cursor = conn.execute(
                 """INSERT OR IGNORE INTO events
                    (provider, project, event_type, timestamp, summary,
                     session_id, tokens_json, tool_name, file_path, model, cwd,
-                    fingerprint, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    fingerprint, created_at, entry_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     event_dict.get("provider", ""),
                     event_dict.get("project", ""),
@@ -1066,6 +1114,7 @@ class EventStore:
                     event_dict.get("cwd"),
                     fingerprint,
                     time.time(),
+                    event_dict.get("entry_id"),
                 ),
             )
             full_text = event_dict.get("full_text")
@@ -1088,12 +1137,14 @@ class EventStore:
         with self._write() as conn:
             for raw in events:
                 e = _normalize_event(raw)
+                if _legacy_row_exists(conn, e):
+                    continue
                 cursor = conn.execute(
                     """INSERT OR IGNORE INTO events
                        (provider, project, event_type, timestamp, summary,
                         session_id, tokens_json, tool_name, file_path, model, cwd,
-                        fingerprint, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        fingerprint, created_at, entry_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         e.get("provider", ""),
                         e.get("project", ""),
@@ -1108,6 +1159,7 @@ class EventStore:
                         e.get("cwd"),
                         _compute_fingerprint(e),
                         now,
+                        e.get("entry_id"),
                     ),
                 )
                 full_text = e.get("full_text")
@@ -1610,6 +1662,7 @@ class EventStore:
                 _compute_fingerprint(e),
                 now,
                 1 if is_old else 0,
+                e.get("entry_id"),
             ))
 
         result_events = []
@@ -1618,17 +1671,21 @@ class EventStore:
             self._begin_immediate(conn)
             try:
                 for i, row in enumerate(rows):
+                    if _legacy_row_exists(conn, normalized[i]):
+                        continue  # stored before #67 under its old fingerprint
                     cursor = conn.execute(
                         """INSERT OR IGNORE INTO events
                            (provider, project, event_type, timestamp, summary,
                             session_id, tokens_json, tool_name, file_path, model, cwd,
-                            fingerprint, created_at, historical)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            fingerprint, created_at, historical, entry_id)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         row,
                     )
                     if cursor.rowcount > 0:
                         ev = dict(normalized[i])
                         ev["id"] = cursor.lastrowid
+                        # Not part of the SSE payload (contract unchanged, #67).
+                        ev.pop("entry_id", None)
                         if old_flags[i] and not historical:
                             ev["historical"] = True
                         full_text = ev.pop("full_text", None)
