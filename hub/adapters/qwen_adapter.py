@@ -82,6 +82,8 @@ class QwenAdapter(BaseAdapter):
             model=entry.model,
             cwd=entry.cwd or None,
             full_text=full_text,
+            entry_id=entry.uuid or None,  # native per-line id (#122, like #67)
+            parent_id=entry.parent_uuid or None,  # native parent (#122)
         )
 
     def to_session_meta(self, entry: QwenEntry, project: str) -> SessionMeta | None:

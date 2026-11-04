@@ -134,6 +134,7 @@ class PiAdapter(BaseAdapter):
                     file_path=p,
                     tokens=None,
                     full_text=None,
+                    dir_extra=True,  # explicit marker (#122)
                 ))
         return events
 

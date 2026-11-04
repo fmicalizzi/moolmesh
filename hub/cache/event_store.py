@@ -387,6 +387,23 @@ def _mig_9_parent_id(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE events ADD COLUMN parent_id TEXT")
 
 
+def _mig_10_dir_extra(conn: sqlite3.Connection) -> None:
+    """Additive, nullable ``events.dir_extra`` (#122).
+
+    ``1`` on the per-directory extra ``tool_use`` events Codex and Pi
+    ``to_events`` emit next to the primary call, so surfaces that count calls
+    skip them without guessing by shape. Not part of the fingerprint. No
+    existing row is rewritten (no backup needed): old rows keep ``NULL``; old
+    Codex extras are still excluded by their shape (``CODEX_DIR_EXTRA_SQL``),
+    old Pi extras keep being counted (their shape matches a primary call). A
+    re-read dedupes against the old row by fingerprint and leaves it as is.
+    Idempotent via the ``PRAGMA table_info`` guard.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "dir_extra" not in columns:
+        conn.execute("ALTER TABLE events ADD COLUMN dir_extra INTEGER")
+
+
 # Versioned, additive migrations for events.db — each runs exactly once.
 _EVENT_STORE_MIGRATIONS = [
     (1, "session_lifecycle", _mig_1_session_lifecycle),
@@ -398,6 +415,7 @@ _EVENT_STORE_MIGRATIONS = [
     (7, "entry_id", _mig_7_entry_id),
     (8, "live_rows_older_than_ingest", _mig_8_live_rows_older_than_ingest),
     (9, "parent_id", _mig_9_parent_id),
+    (10, "dir_extra", _mig_10_dir_extra),
 ]
 
 # The events.db migration whose rewrite the workspace.db attribution pass
@@ -599,8 +617,9 @@ def _insert_event_row(
         """INSERT OR IGNORE INTO events
            (provider, project, event_type, timestamp, summary,
             session_id, tokens_json, tool_name, file_path, model, cwd,
-            fingerprint, created_at, historical, entry_id, parent_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            fingerprint, created_at, historical, entry_id, parent_id,
+            dir_extra)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             e.get("provider", ""), e.get("project", ""), e.get("event_type", ""),
             e.get("timestamp", ""), e.get("summary", ""), e.get("session_id"),
@@ -611,6 +630,7 @@ def _insert_event_row(
             else 0,
             e.get("entry_id"),
             e.get("parent_id"),
+            1 if e.get("dir_extra") else None,
         ),
     )
     if cursor.rowcount <= 0:
@@ -1198,8 +1218,8 @@ class EventStore:
                 """INSERT OR IGNORE INTO events
                    (provider, project, event_type, timestamp, summary,
                     session_id, tokens_json, tool_name, file_path, model, cwd,
-                    fingerprint, created_at, entry_id, parent_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    fingerprint, created_at, entry_id, parent_id, dir_extra)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     event_dict.get("provider", ""),
                     event_dict.get("project", ""),
@@ -1216,6 +1236,7 @@ class EventStore:
                     time.time(),
                     event_dict.get("entry_id"),
                     event_dict.get("parent_id"),
+                    1 if event_dict.get("dir_extra") else None,
                 ),
             )
             full_text = event_dict.get("full_text")
@@ -1244,8 +1265,8 @@ class EventStore:
                     """INSERT OR IGNORE INTO events
                        (provider, project, event_type, timestamp, summary,
                         session_id, tokens_json, tool_name, file_path, model, cwd,
-                        fingerprint, created_at, entry_id, parent_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        fingerprint, created_at, entry_id, parent_id, dir_extra)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         e.get("provider", ""),
                         e.get("project", ""),
@@ -1262,6 +1283,7 @@ class EventStore:
                         now,
                         e.get("entry_id"),
                         e.get("parent_id"),
+                        1 if e.get("dir_extra") else None,
                     ),
                 )
                 full_text = e.get("full_text")
@@ -1766,6 +1788,7 @@ class EventStore:
                 1 if is_old else 0,
                 e.get("entry_id"),
                 e.get("parent_id"),
+                1 if e.get("dir_extra") else None,
             ))
 
         result_events = []
@@ -1780,8 +1803,9 @@ class EventStore:
                         """INSERT OR IGNORE INTO events
                            (provider, project, event_type, timestamp, summary,
                             session_id, tokens_json, tool_name, file_path, model, cwd,
-                            fingerprint, created_at, historical, entry_id, parent_id)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            fingerprint, created_at, historical, entry_id, parent_id,
+                            dir_extra)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         row,
                     )
                     if cursor.rowcount > 0:

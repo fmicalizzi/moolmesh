@@ -107,6 +107,10 @@ class UnifiedEvent:
     # ``parentUuid``). Lets a tree-shaped session be shown as its active
     # branch (``hub.linearize``). Never part of the fingerprint.
     parent_id: str | None = None
+    # True for a per-directory extra ``tool_use`` that Codex/Pi ``to_events``
+    # emits next to the primary call (#122). Stored as ``events.dir_extra``;
+    # surfaces that count *calls* skip it. Never part of the fingerprint.
+    dir_extra: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -134,6 +138,8 @@ class UnifiedEvent:
             d["entry_id"] = self.entry_id
         if self.parent_id:
             d["parent_id"] = self.parent_id
+        if self.dir_extra:
+            d["dir_extra"] = True
         return d
 
     def to_json(self) -> str:

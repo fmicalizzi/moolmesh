@@ -193,6 +193,36 @@ CODEX_DIR_EXTRA_SQL = (
 )
 
 
+# Since #122 Codex and Pi mark every extra they emit (``events.dir_extra = 1``).
+# Rows stored before the marker existed keep ``dir_extra`` NULL: old Codex
+# extras are still recognised by the shape above; old Pi extras cannot be told
+# apart from a primary Pi call by shape and keep being counted.
+DIR_EXTRA_SQL = f"(COALESCE(dir_extra, 0) = 1 OR {CODEX_DIR_EXTRA_SQL})"
+
+
+def dir_extra_sql(conn) -> str:
+    """The extra-exclusion predicate for ``conn``'s ``events`` table.
+
+    ``DIR_EXTRA_SQL`` when the ``dir_extra`` column exists (events.db
+    migration 10), else the pre-#122 Codex shape rule — a read-only reader
+    (the MCP server) may open a DB a not-yet-upgraded daemon has not migrated.
+    """
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
+    except Exception:
+        cols = set()
+    return DIR_EXTRA_SQL if "dir_extra" in cols else CODEX_DIR_EXTRA_SQL
+
+
+def is_dir_extra(event: dict) -> bool:
+    """True for a per-directory extra of Codex or Pi ``to_events`` (#48, #122).
+
+    The explicit marker first (``dir_extra``); the Codex shape rule for
+    events without one.
+    """
+    return bool(event.get("dir_extra")) or is_codex_dir_extra(event)
+
+
 def is_codex_dir_extra(event: dict) -> bool:
     """True for a per-directory extra event of ``to_events`` (see above)."""
     tool = event.get("tool_name")
@@ -270,6 +300,7 @@ class CodexAdapter(BaseAdapter):
                     file_path=p,
                     tokens=None,
                     full_text=None,
+                    dir_extra=True,  # explicit marker (#122)
                 ))
         return events
 

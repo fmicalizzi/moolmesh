@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 # Default ``tz`` of the portfolio: the ``[user] timezone`` zone (#81).
-from hub.adapters.codex_adapter import CODEX_DIR_EXTRA_SQL
+from hub.adapters.codex_adapter import dir_extra_sql
 from hub.localtime import CONFIGURED as _CONFIGURED_TZ
 
 _log = logging.getLogger("hub.mcp_server")
@@ -294,6 +294,7 @@ def _get_active_sessions(db_path: str, hours: int = 4, limit: int = 50) -> list[
     """Lista sesiones con actividad en las últimas N horas."""
     limit = min(limit, 200)
     conn = _connect(db_path)
+    extra_sql = dir_extra_sql(conn)
     rows = conn.execute(f"""
         SELECT provider, project, session_id,
             COUNT(*) AS events,
@@ -301,7 +302,7 @@ def _get_active_sessions(db_path: str, hours: int = 4, limit: int = 50) -> list[
                 THEN COALESCE(json_extract(tokens_json, '$.input'), 0) ELSE 0 END) AS input_tokens,
             SUM(CASE WHEN tokens_json IS NOT NULL
                 THEN COALESCE(json_extract(tokens_json, '$.output'), 0) ELSE 0 END) AS output_tokens,
-            SUM(CASE WHEN tool_name IS NOT NULL AND NOT {CODEX_DIR_EXTRA_SQL}
+            SUM(CASE WHEN tool_name IS NOT NULL AND NOT {extra_sql}
                 THEN 1 ELSE 0 END) AS tool_calls,
             GROUP_CONCAT(DISTINCT model) AS models,
             MAX(timestamp) AS last_event,
@@ -358,9 +359,11 @@ def _get_tool_stats(
     """Top herramientas usadas por los agentes AI.
 
     Cuenta llamadas, no directorios: excluye los ``tool_use`` extra que
-    ``CodexAdapter.to_events`` emite por directorio adicional (#48).
+    Codex y Pi emiten por directorio adicional (#48; marca explícita
+    ``dir_extra`` desde #122, forma de Codex para filas viejas).
     """
-    where = f"tool_name IS NOT NULL AND NOT {CODEX_DIR_EXTRA_SQL}"
+    conn = _connect(db_path)
+    where = f"tool_name IS NOT NULL AND NOT {dir_extra_sql(conn)}"
     params: list = []
     if project:
         where += " AND project LIKE ?"
@@ -369,7 +372,6 @@ def _get_tool_stats(
         where += " AND timestamp >= ?"
         params.append(since)
 
-    conn = _connect(db_path)
     rows = conn.execute(f"""
         SELECT tool_name, COUNT(*) AS count,
             COUNT(DISTINCT project) AS projects
@@ -468,7 +470,7 @@ def _get_project_activity(
     tools = conn.execute(f"""
         SELECT tool_name, COUNT(*) AS count
         FROM events WHERE {where} AND tool_name IS NOT NULL
-            AND NOT {CODEX_DIR_EXTRA_SQL}
+            AND NOT {dir_extra_sql(conn)}
         GROUP BY tool_name ORDER BY count DESC LIMIT 10
     """, params).fetchall()
 
