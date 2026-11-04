@@ -166,7 +166,7 @@ class TestHarvesters:
                 h._running = False  # one cycle only
 
             with patch.object(h, "_fetch_and_ingest", side_effect=fake_fetch), \
-                 patch("hub.harvesters.git_harvester.time.sleep"):
+                 patch.object(h._stop_event, "wait"):
                 h._harvest_loop()
             assert seen == ["widget-services"]
         finally:
