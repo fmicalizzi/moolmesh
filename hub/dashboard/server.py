@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hub.adapters.codex_adapter import is_codex_dir_extra
 from hub.cache.event_store import EventStore
 
 # Stale-data banner injected before </body> on every dashboard page (#76).
@@ -114,7 +115,8 @@ class SessionTracker:
 
             # Tools
             tool = event_dict.get("tool_name")
-            if tool:
+            # Count calls, not directories: skip Codex per-directory extras (#48).
+            if tool and not is_codex_dir_extra(event_dict):
                 p["tool_calls"] += 1
                 self.tool_counts[tool] = self.tool_counts.get(tool, 0) + 1
 

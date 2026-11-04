@@ -181,6 +181,31 @@ def _exec_tool_name(js: str) -> str:
     return inner.pop() if len(inner) == 1 else "exec"
 
 
+# A per-directory extra emitted by ``CodexAdapter.to_events`` (#40) is a
+# ``tool_use`` whose summary is exactly ``"<tool_name>: <file_path>"`` and that
+# carries no tokens. A primary Codex call's summary is ``"<fc.name>: <args>"``
+# (raw arguments, never the bare extracted path), so the shapes don't collide.
+# Read surfaces that count *calls* exclude extras (#48); the workspace
+# attribution layer keeps using them (it counts directories).
+CODEX_DIR_EXTRA_SQL = (
+    "(provider = 'codex' AND file_path IS NOT NULL AND tool_name IS NOT NULL"
+    " AND tokens_json IS NULL AND summary = tool_name || ': ' || file_path)"
+)
+
+
+def is_codex_dir_extra(event: dict) -> bool:
+    """True for a per-directory extra event of ``to_events`` (see above)."""
+    tool = event.get("tool_name")
+    path = event.get("file_path")
+    return bool(
+        event.get("provider") == "codex"
+        and tool and path
+        and not event.get("tokens")
+        and not event.get("tokens_json")
+        and event.get("summary") == f"{tool}: {path}"
+    )
+
+
 class CodexAdapter(BaseAdapter):
 
     def to_unified(self, entry: CodexEntry, project: str) -> UnifiedMessage | None:

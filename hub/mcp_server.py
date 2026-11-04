@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 # Default ``tz`` of the portfolio: the ``[user] timezone`` zone (#81).
+from hub.adapters.codex_adapter import CODEX_DIR_EXTRA_SQL
 from hub.localtime import CONFIGURED as _CONFIGURED_TZ
 
 _log = logging.getLogger("hub.mcp_server")
@@ -293,14 +294,15 @@ def _get_active_sessions(db_path: str, hours: int = 4, limit: int = 50) -> list[
     """Lista sesiones con actividad en las últimas N horas."""
     limit = min(limit, 200)
     conn = _connect(db_path)
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT provider, project, session_id,
             COUNT(*) AS events,
             SUM(CASE WHEN tokens_json IS NOT NULL
                 THEN COALESCE(json_extract(tokens_json, '$.input'), 0) ELSE 0 END) AS input_tokens,
             SUM(CASE WHEN tokens_json IS NOT NULL
                 THEN COALESCE(json_extract(tokens_json, '$.output'), 0) ELSE 0 END) AS output_tokens,
-            SUM(CASE WHEN tool_name IS NOT NULL THEN 1 ELSE 0 END) AS tool_calls,
+            SUM(CASE WHEN tool_name IS NOT NULL AND NOT {CODEX_DIR_EXTRA_SQL}
+                THEN 1 ELSE 0 END) AS tool_calls,
             GROUP_CONCAT(DISTINCT model) AS models,
             MAX(timestamp) AS last_event,
             MIN(timestamp) AS first_event
@@ -353,8 +355,12 @@ def _get_tool_stats(
     since: Optional[str] = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Top herramientas usadas por los agentes AI."""
-    where = "tool_name IS NOT NULL"
+    """Top herramientas usadas por los agentes AI.
+
+    Cuenta llamadas, no directorios: excluye los ``tool_use`` extra que
+    ``CodexAdapter.to_events`` emite por directorio adicional (#48).
+    """
+    where = f"tool_name IS NOT NULL AND NOT {CODEX_DIR_EXTRA_SQL}"
     params: list = []
     if project:
         where += " AND project LIKE ?"
@@ -462,6 +468,7 @@ def _get_project_activity(
     tools = conn.execute(f"""
         SELECT tool_name, COUNT(*) AS count
         FROM events WHERE {where} AND tool_name IS NOT NULL
+            AND NOT {CODEX_DIR_EXTRA_SQL}
         GROUP BY tool_name ORDER BY count DESC LIMIT 10
     """, params).fetchall()
 
@@ -1128,12 +1135,13 @@ def _get_session_workspaces(
             params.append(provider)
         rows = conn.execute(f"""
             SELECT w.workspace_key, w.kind, w.remote_url, w.root_path, w.dir_path,
-                   a.provider, COUNT(DISTINCT a.file_path) AS files
+                   a.provider, COUNT(DISTINCT CASE WHEN a.via = 'cwd' THEN NULL ELSE a.file_path END) AS files,
+                   COUNT(DISTINCT CASE WHEN a.via = 'cwd' THEN a.file_path END) AS cwd_edges
             FROM path_attributions a
             JOIN workspaces w ON w.id = a.workspace_id
             WHERE {where}
             GROUP BY w.id, a.provider
-            ORDER BY files DESC
+            ORDER BY files DESC, cwd_edges DESC
         """, params).fetchall()
     except sqlite3.OperationalError:
         conn.close()
@@ -1149,12 +1157,13 @@ def _get_workspace_sessions(db_path: str, workspace_key: str) -> list[dict[str, 
         return []
     try:
         rows = conn.execute("""
-            SELECT a.session_id, a.provider, COUNT(DISTINCT a.file_path) AS files
+            SELECT a.session_id, a.provider, COUNT(DISTINCT CASE WHEN a.via = 'cwd' THEN NULL ELSE a.file_path END) AS files,
+                   COUNT(DISTINCT CASE WHEN a.via = 'cwd' THEN a.file_path END) AS cwd_edges
             FROM path_attributions a
             JOIN workspaces w ON w.id = a.workspace_id
             WHERE w.workspace_key = ?
             GROUP BY a.session_id, a.provider
-            ORDER BY files DESC
+            ORDER BY files DESC, cwd_edges DESC
         """, (workspace_key,)).fetchall()
     except sqlite3.OperationalError:
         conn.close()
@@ -1174,6 +1183,8 @@ def _list_workspaces(db_path: str) -> list[dict[str, Any]]:
         rows = conn.execute("""
             SELECT w.workspace_key, w.kind, w.remote_url, w.root_path, w.dir_path,
                    w.first_seen, COUNT(a.id) AS attributions,
+                   COUNT(CASE WHEN a.via = 'cwd' THEN NULL ELSE a.id END) AS files,
+                   COUNT(CASE WHEN a.via = 'cwd' THEN a.id END) AS cwd_edges,
                    COUNT(DISTINCT a.session_id || '/' || a.provider) AS sessions,
                    (SELECT COUNT(*) FROM path_touches t
                     WHERE t.workspace_id = w.id) AS touches

@@ -3111,6 +3111,8 @@ class WorkspaceStore:
             rows = self._conn.execute(
                 """SELECT w.workspace_key, w.kind, w.remote_url, w.root_path, w.dir_path,
                           w.first_seen, COUNT(a.id) AS attributions,
+                   COUNT(CASE WHEN a.via = 'cwd' THEN NULL ELSE a.id END) AS files,
+                   COUNT(CASE WHEN a.via = 'cwd' THEN a.id END) AS cwd_edges,
                           COUNT(DISTINCT a.session_id || '/' || a.provider) AS sessions,
                           (SELECT COUNT(*) FROM path_touches t
                            WHERE t.workspace_id = w.id) AS touches
@@ -3123,7 +3125,10 @@ class WorkspaceStore:
             {
                 "workspace_key": r[0], "kind": r[1], "remote_url": r[2],
                 "root_path": r[3], "dir_path": r[4], "first_seen": r[5],
-                "attributions": r[6], "sessions": r[7], "touches": r[8],
+                # ``attributions`` = every edge; ``files`` excludes the
+                # ``via='cwd'`` fallback edges, reported apart (#48).
+                "attributions": r[6], "files": r[7], "cwd_edges": r[8],
+                "sessions": r[9], "touches": r[10],
             }
             for r in rows
         ]
@@ -3131,7 +3136,10 @@ class WorkspaceStore:
     def get_session_workspaces(
         self, session_id: str, provider: str | None = None
     ) -> list[dict[str, Any]]:
-        """Which workspaces a session touched, with per-workspace file counts."""
+        """Which workspaces a session touched, with per-workspace file counts.
+
+        ``files`` excludes ``via='cwd'`` edges; those are in ``cwd_edges`` (#48).
+        """
         where = "a.session_id = ?"
         params: list[Any] = [session_id]
         if provider:
@@ -3140,18 +3148,22 @@ class WorkspaceStore:
         with self._lock:
             rows = self._conn.execute(
                 f"""SELECT w.workspace_key, w.kind, w.remote_url, w.root_path, w.dir_path,
-                           a.provider, COUNT(DISTINCT a.file_path) AS files
+                           a.provider, COUNT(DISTINCT CASE WHEN a.via = 'cwd' THEN NULL ELSE a.file_path END) AS files,
+                   COUNT(DISTINCT CASE WHEN a.via = 'cwd' THEN a.file_path END) AS cwd_edges
                     FROM path_attributions a
                     JOIN workspaces w ON w.id = a.workspace_id
                     WHERE {where}
                     GROUP BY w.id, a.provider
-                    ORDER BY files DESC""",
+                    ORDER BY files DESC, cwd_edges DESC""",
                 params,
             ).fetchall()
         return [
             {
                 "workspace_key": r[0], "kind": r[1], "remote_url": r[2],
-                "root_path": r[3], "dir_path": r[4], "provider": r[5], "files": r[6],
+                "root_path": r[3], "dir_path": r[4], "provider": r[5],
+                # ``files`` counts real file edges; ``via='cwd'`` fallback
+                # edges are reported apart in ``cwd_edges`` (#48).
+                "files": r[6], "cwd_edges": r[7],
             }
             for r in rows
         ]
@@ -3160,16 +3172,17 @@ class WorkspaceStore:
         """Which sessions touched a workspace, with per-session file counts."""
         with self._lock:
             rows = self._conn.execute(
-                """SELECT a.session_id, a.provider, COUNT(DISTINCT a.file_path) AS files
+                """SELECT a.session_id, a.provider, COUNT(DISTINCT CASE WHEN a.via = 'cwd' THEN NULL ELSE a.file_path END) AS files,
+                   COUNT(DISTINCT CASE WHEN a.via = 'cwd' THEN a.file_path END) AS cwd_edges
                    FROM path_attributions a
                    JOIN workspaces w ON w.id = a.workspace_id
                    WHERE w.workspace_key = ?
                    GROUP BY a.session_id, a.provider
-                   ORDER BY files DESC""",
+                   ORDER BY files DESC, cwd_edges DESC""",
                 (workspace_key,),
             ).fetchall()
         return [
-            {"session_id": r[0], "provider": r[1], "files": r[2]}
+            {"session_id": r[0], "provider": r[1], "files": r[2], "cwd_edges": r[3]}
             for r in rows
         ]
 

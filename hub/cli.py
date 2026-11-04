@@ -2997,12 +2997,19 @@ def cmd_workspace_list(args: argparse.Namespace) -> None:
         label = r["remote_url"] or r["root_path"] or r["dir_path"] or r["workspace_key"]
         label = masked_label(label, hide)
         meta = (
-            f"{r['sessions']} sessions, {r['attributions']} files, "
+            f"{r['sessions']} sessions, {_files_label(r)}, "
             f"{r.get('touches', 0)} fs-touches  ·  {r['workspace_key']}"
         )
         print(f"    [{r['kind']:<10}] {label}")
         print(f"      {dim(meta)}")
     print()
+
+
+def _files_label(r: dict) -> str:
+    """``"N files"``, plus the cwd-fallback edges apart when present (#48)."""
+    files = r.get("files", r.get("attributions", 0))
+    cwd = r.get("cwd_edges") or 0
+    return f"{files} files" + (f" (+{cwd} cwd)" if cwd else "")
 
 
 def cmd_workspace_session(args: argparse.Namespace) -> None:
@@ -3026,7 +3033,7 @@ def cmd_workspace_session(args: argparse.Namespace) -> None:
     print(f"  {'─' * 60}")
     for r in rows:
         label = r["remote_url"] or r["root_path"] or r["dir_path"] or r["workspace_key"]
-        print(f"    [{r['kind']:<10}] {label}  {dim(str(r['files']) + ' files')}")
+        print(f"    [{r['kind']:<10}] {label}  {dim(_files_label(r))}")
     print()
 
 
@@ -3049,7 +3056,7 @@ def cmd_workspace_sessions(args: argparse.Namespace) -> None:
     print(f"\n  Sessions that touched {args.workspace_key}")
     print(f"  {'─' * 60}")
     for r in rows:
-        print(f"    [{r['provider']:<8}] {r['session_id'][:40]}  {dim(str(r['files']) + ' files')}")
+        print(f"    [{r['provider']:<8}] {r['session_id'][:40]}  {dim(_files_label(r))}")
     print()
 
 
