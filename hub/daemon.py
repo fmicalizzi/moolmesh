@@ -340,6 +340,13 @@ def _run_foreground(
     the CLI can exit 1 when the dashboard could not start (#55).
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if sys.stdout is None or sys.stderr is None:
+        # pythonw.exe (Task Scheduler, #76/#78) has no stdio: log to the file.
+        log_fh = open(LOG_FILE, "a", encoding="utf-8", buffering=1)
+        if sys.stdout is None:
+            sys.stdout = log_fh
+        if sys.stderr is None:
+            sys.stderr = log_fh
     write_pid(os.getpid())
     _run_server(host, port, project_filter, providers, fixed_port=fixed_port)
     return os.getpid()
