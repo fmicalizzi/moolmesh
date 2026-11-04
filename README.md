@@ -393,6 +393,26 @@ The dashboard adds a read-on-load **`/portfolio`** view over `workspace.db` (the
 - `[workspace] reference_containers = ["<path>"]` — the folder and its children go to the "Contenedores / referencia" section (never projects), and their activity no longer makes the parent active. Works even if the folder no longer exists.
 - `[workspace] temporary_containers = ["<path>"]` — direct children render in their own visible, collapsed "Temporal" section, keeping their state and history.
 
+**One client across several owners, a shared registry, confidential repos (#95)** — every key is optional and empty by default:
+
+- `[workspace] client_owner_aliases = { "acme-labs" = "acme" }` — map a whole owner (an organization or a personal account) to a client. Every repo of that owner, including one created tomorrow, lands under the client with no per-project override. The client attribution ladder, first match wins: **`client_overrides` (per project) > `client_owner_aliases` (per owner) > `personal_orgs` / `client_orgs` > the rest** (externos / referencia, shared folder). An alias also applies to a gitless parent folder (`_acme-labs`) and counts toward the client in the child-repo majority. An alias outranks `personal_orgs`, so an account that is "yours" on one machine can still be grouped under a client.
+- `[workspace] client_registry = "~/shared/clients.toml"` — an optional, **read-only** client registry several machines share so they group the same way (a relative path is relative to `~/.moolmesh`). It is merged under the local values: local wins on a conflicting key, lists are unioned, and it is never copied into `config.toml`. A missing or invalid file logs a warning once and the local config applies alone. Format (every key optional; `personal_orgs` is deliberately per machine and not read from it):
+
+  ```toml
+  version = 1
+  client_orgs = ["acme", "globex"]
+  exclude_owners = ["initech"]
+  exclude_repos = ["globex/secret-plans"]
+
+  [client_owner_aliases]
+  "acme-labs" = "acme"
+
+  [client_overrides]
+  "git_remote:github.com/globex/widget-services" = "acme"
+  ```
+
+- `[workspace] exclude_owners = ["initech"]`, `exclude_repos = ["globex/secret-plans"]` — confidential repos that are **never read**: no `git fetch`/`git log`, no GitHub API call (issues, PRs, milestones, projects, identity checks), `repo add` (path, `--board`, `--remote`, `--owner`) refuses them (`--owner` on an excluded owner refuses before listing anything), `repo sync`/`backfill-pr-stats` skip them, and they disappear from the portfolio, the MCP tools (`get_portfolio`, `get_portfolio_grouped`, `get_portfolio_production`, `get_board_issues`) and `/api/repos`. Matching is case-insensitive; `exclude_repos` accepts `owner/repo`, `github.com/owner/repo` or a GitHub URL. A repo registered **before** it was excluded keeps its stored data — the daemon just skips it (logged once per repo). To delete that data: `mool repo remove <path | owner/repo>` (config entry and its `github.db` rows). Registering a local clone by path still reads its `origin` URL once to learn the owner, and then stops.
+
 **Full history once:** `mool repo sync --all-registered [--all | --days N]` syncs every registered repo in one bounded, resumable pass (one repo's error never stops the rest) and prints a summary. With `--all` it ingests the full git history **and** the full issues/PRs history (the incremental poll is capped at 1000 items per repo), marking each repo `history_complete`; until then the portfolio labels outcome totals `desde <first ingested commit>` instead of "all-time". Registered repos that never lit up locally fold into a collapsed "registrados sin actividad" subgroup per client, and a GitHub remote that was never registered reads "no medido" (distinct from "— sin repo" and from a measured "0 entregado").
 
 ---

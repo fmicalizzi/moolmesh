@@ -300,6 +300,26 @@ Todos los subcomandos de `repo` usan el directorio actual cuando no se especific
 
 **Repos sólo por remoto (sin clon local):** un repo de código que seguís sólo por GitHub se registra con `mool repo add --remote acme/widgets` — sin clon ni historia git; sus issues, PRs y stats por PR se sincronizan como en cualquier repo de código (`kind = "remote"` en `config.toml`, clave `remote:github.com/acme/widgets`; con `--all` además completa ya todas las issues/PRs). Un board sigue siendo distinto: un board es un backlog, un repo remoto es código cuyas PRs mergeadas son la entrega. Para seguir una organización entera **o una cuenta personal**: `mool repo add --owner acme [--include 'widget*' ...] [--dry-run] [--limit N]` lista sus repos (paginado, hasta `--limit`, 300 por defecto; el listado corta antes si quedan menos de 100 llamadas a la API en la hora) y registra cada uno como remoto; `--dry-run` sólo lista. El portfolio muestra un repo remoto con actividad de GitHub en la ventana como `sin clon` — nunca "0 entregado" por falta de commits; sus PRs mergeadas cuentan como entrega. **La identidad es el id numérico de GitHub** (migración 8 de github.db, columna aditiva `repos.github_id`): el daemon chequea cada repo registrado con un `GET /repos/{owner}/{repo}` cada 6 h como mucho (con ETag, un repo sin cambios es un 304, que no cuenta contra el rate limit; un repo todavía sin id se reintenta cada 10 min), y cuando GitHub responde otro `owner/name` para el mismo id — una transferencia o un rename — se actualizan la fila y la entrada de config existentes, así la serie de issues/PRs conserva su historia; `repo add --remote`/`--owner` con el nombre nuevo renombra en vez de duplicar. `repo remove`, `repo sync` y `get_board_issues` aceptan `owner/repo` para un repo sin clon.
 
+**Un cliente con varios dueños, registro compartido, repos confidenciales (#95)** — todas las claves son opcionales y vacías por defecto:
+
+- `[workspace] client_owner_aliases = { "acme-labs" = "acme" }` — asigna un dueño entero (una organización o una cuenta personal) a un cliente. Todo repo de ese dueño, incluso uno creado mañana, cae en el cliente sin override por proyecto. La escalera de atribución, gana la primera coincidencia: **`client_overrides` (por proyecto) > `client_owner_aliases` (por dueño) > `personal_orgs` / `client_orgs` > el resto** (externos / referencia, carpeta compartida). El alias también aplica a una carpeta padre sin git (`_acme-labs`) y suma para el cliente en la mayoría de repos hijos. Un alias gana sobre `personal_orgs`, así una cuenta que es "tuya" en una máquina puede agruparse bajo un cliente.
+- `[workspace] client_registry = "~/shared/clients.toml"` — registro de clientes opcional y **de sólo lectura** que varias máquinas comparten para agrupar igual (una ruta relativa es relativa a `~/.moolmesh`). Se fusiona debajo de los valores locales: la config local gana en una clave en conflicto, las listas se unen y nunca se copia a `config.toml`. Si falta o es inválido se avisa una vez en el log y se sigue con la config local. Formato (todas las claves opcionales; `personal_orgs` es por máquina a propósito y no se lee de ahí):
+
+  ```toml
+  version = 1
+  client_orgs = ["acme", "globex"]
+  exclude_owners = ["initech"]
+  exclude_repos = ["globex/secret-plans"]
+
+  [client_owner_aliases]
+  "acme-labs" = "acme"
+
+  [client_overrides]
+  "git_remote:github.com/globex/widget-services" = "acme"
+  ```
+
+- `[workspace] exclude_owners = ["initech"]`, `exclude_repos = ["globex/secret-plans"]` — repos confidenciales que **nunca se leen**: ni `git fetch`/`git log`, ni llamadas a la API de GitHub (issues, PRs, milestones, projects, chequeo de identidad); `repo add` (ruta, `--board`, `--remote`, `--owner`) los rechaza (`--owner` sobre un dueño excluido se rechaza antes de listar nada), `repo sync`/`backfill-pr-stats` los saltean, y desaparecen del portfolio, de las herramientas MCP (`get_portfolio`, `get_portfolio_grouped`, `get_portfolio_production`, `get_board_issues`) y de `/api/repos`. La comparación ignora mayúsculas; `exclude_repos` acepta `owner/repo`, `github.com/owner/repo` o una URL de GitHub. Un repo registrado **antes** de excluirlo conserva sus datos guardados — el daemon sólo lo saltea (se loguea una vez por repo). Para borrarlos: `mool repo remove <ruta | owner/repo>` (entrada de config y sus filas de `github.db`). Registrar un clon local por ruta igual lee una vez su URL de `origin` para saber el dueño, y ahí se detiene.
+
 ### Token de GitHub
 
 El token se resuelve automáticamente en este orden:
