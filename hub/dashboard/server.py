@@ -778,7 +778,13 @@ class DashboardServer:
                     # --- API: Repos ---
                     case "/api/repos":
                         if server_ref.git_store:
-                            self._serve_json(server_ref.git_store.list_repos())
+                            # Confidential repos (#95) are never listed.
+                            from hub.config import exclusions_of, load_config
+                            excl = exclusions_of(load_config())
+                            self._serve_json([
+                                r for r in server_ref.git_store.list_repos()
+                                if not excl.matches(r.get("owner"),
+                                                    r.get("repo_name"))])
                         else:
                             self._serve_json([])
                     # --- API: GitHub ---

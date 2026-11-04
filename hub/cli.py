@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from hub.colors import green, yellow, red, dim, bold
+from hub.config import exclusions_of
 from hub.discovery import ProjectDiscovery
 
 
@@ -2999,7 +3000,8 @@ def cmd_repo_backfill_pr_stats(args: argparse.Namespace) -> None:
 
     config = load_config()
     if args.all_registered:
-        repos = [r for r in config.repos if r.github_enabled]
+        repos = [r for r in config.repos if r.github_enabled
+                 and not exclusions_of(config).matches(r.owner, r.repo)]
     else:
         path = str(Path(args.path).resolve())
         repos = [r for r in config.repos if r.path == path]
@@ -3010,6 +3012,8 @@ def cmd_repo_backfill_pr_stats(args: argparse.Namespace) -> None:
         if not repos[0].github_enabled:
             print(yellow("GitHub is disabled for this repo (--no-github)."))
             return
+        if _repo_excluded(config, repos[0].owner, repos[0].repo):
+            sys.exit(1)
     if not repos:
         print(yellow("No GitHub-enabled repositories registered."))
         return
@@ -3154,6 +3158,8 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
             repo_config.kind = "board"
 
     config = load_config()
+    if _repo_excluded(config, repo_config.owner, repo_config.repo):
+        return
     if any(r.path == path for r in config.repos):
         print(yellow(f"Already registered: {repo_config.owner}/{repo_config.repo}"))
         return
@@ -3219,6 +3225,18 @@ def cmd_repo_add(args: argparse.Namespace) -> None:
         print(f"  Ingested {count} commits (last {args.days} days)")
 
 
+_EXCLUDED_MSG = ("{name} está excluido (exclude_owners/exclude_repos): "
+                 "MoolMesh nunca lo lee")
+
+
+def _repo_excluded(config, owner: str, repo: str) -> bool:
+    """Print and return True when ``owner/repo`` is excluded (#95)."""
+    if exclusions_of(config).matches(owner, repo):
+        print(red("Error: " + _EXCLUDED_MSG.format(name=f"{owner}/{repo}")))
+        return True
+    return False
+
+
 def _resolve_repo_arg(spec: str) -> str:
     """The registered key ``spec`` names: a filesystem path, or ``owner/repo``
     of a clone-less repo (board #93 / remote #94), matched case-insensitively
@@ -3256,6 +3274,8 @@ def _register_remote_repo(store, client, owner: str, repo: str,
                             repo_has_git, save_config)
 
     name = f"{owner}/{repo}"
+    if exclusions_of(load_config()).matches(owner, repo):
+        return "error", _EXCLUDED_MSG.format(name=name)
     if github_id is None and client is not None:
         try:
             status, data, _ = client.get_repo(owner, repo)
@@ -3272,6 +3292,8 @@ def _register_remote_repo(store, client, owner: str, repo: str,
             return "error", f"{name}: {_github_failure(status).split(' (')[0]}"
 
     config = load_config()
+    if exclusions_of(config).matches(owner, repo):  # the API named an excluded repo
+        return "error", _EXCLUDED_MSG.format(name=name)
     if github_id is not None:
         known = store.get_repo_by_github_id(github_id)
         if known is not None:
@@ -3316,6 +3338,8 @@ def _repo_add_remote(args: argparse.Namespace) -> None:
         print(red(f"Error: expected owner/repo: {args.path}"))
         return
     config = load_config()
+    if _repo_excluded(config, *parsed):
+        return
     client = _github_client_for(config, False)
     store = GitStore()
     try:
@@ -3365,6 +3389,10 @@ def _repo_add_owner(args: argparse.Namespace) -> None:
         print(red("--limit must be >= 1"))
         sys.exit(2)
     config = load_config()
+    if owner.lower() in exclusions_of(config).owners:
+        # Confidential owner (#95): not even listed — no API call.
+        print(red("Error: " + _EXCLUDED_MSG.format(name=owner)))
+        sys.exit(1)
     client = _github_client_for(config, False)
     if client is None:
         print(red("Error: --owner lists repos through the GitHub API and "
@@ -3378,11 +3406,15 @@ def _repo_add_owner(args: argparse.Namespace) -> None:
         sys.exit(1)
     pats = [p.lower() for p in (args.include or [])]
     chosen = []
+    skipped = 0
     for item in listed:
         try:
             gid = int(item["id"])
             o, n = str(item["full_name"]).split("/", 1)
         except (KeyError, TypeError, ValueError):
+            continue
+        if exclusions_of(config).matches(o, n):
+            skipped += 1  # confidential (#95): never registered
             continue
         if pats and not any(fnmatch.fnmatchcase(n.lower(), p) for p in pats):
             continue
@@ -3390,7 +3422,8 @@ def _repo_add_owner(args: argparse.Namespace) -> None:
     print(f"\n  {bold(owner)}: {len(chosen)} repo(s)"
           + (f" matching {', '.join(args.include)}" if pats else "")
           + (dim(f" (listing stopped at {len(listed)} — raise --limit)")
-             if truncated else ""))
+             if truncated else "")
+          + (dim(f" ({skipped} excluded)") if skipped else ""))
     if args.dry_run:
         for o, n, _gid, archived in chosen:
             print(f"    {o}/{n}" + (dim("  archived") if archived else ""))
@@ -3480,6 +3513,8 @@ def cmd_repo_sync(args: argparse.Namespace) -> None:
         print(red(f"Not registered: {path}"))
         print(dim("  Use: mool repo add /path/to/repo"))
         return
+    if _repo_excluded(config, repo_cfg.owner, repo_cfg.repo):
+        sys.exit(1)
 
     store = GitStore()
     repo_id = store.get_repo_id(path)
@@ -3643,6 +3678,9 @@ def _sync_all_registered(args: argparse.Namespace) -> None:
     errors: list[str] = []
     for i, r in enumerate(config.repos, 1):
         name = f"{r.owner}/{r.repo}"
+        if exclusions_of(config).matches(r.owner, r.repo):
+            print(f"  [{i}/{total}] {name}  {dim('excluded (skipped)')}")
+            continue
         repo_id = store.get_repo_id(r.path)
         if repo_id is None:
             errors.append(f"{name}: not in GitStore")

@@ -33,6 +33,8 @@ class GitHarvester:
         # Set by stop(): the loop waits on it instead of sleeping (#96).
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        # Excluded repos already logged as skipped (#95), logged once each.
+        self._excluded_logged: set = set()
 
     def start(self) -> None:
         """Arranca en daemon thread."""
@@ -53,15 +55,37 @@ class GitHarvester:
         while self._running:
             try:
                 repos = self._store.list_repos()
+                excl = self._exclusions()
                 for repo in repos:
                     if not self._running:
                         break
                     if repo.get("kind") in ("board", "remote"):
                         continue  # no clone (#93 board, #94 remote): no git
+                    if excl.matches(repo.get("owner"), repo.get("repo_name")):
+                        self._skip_excluded(repo)
+                        continue  # confidential (#95): never read
                     self._fetch_and_ingest(repo)
             except Exception:
                 _log.warning("Error en ciclo de harvesting", exc_info=True)
             self._stop_event.wait(self.FETCH_INTERVAL)
+
+    def _exclusions(self):
+        """Excluded owners/repos (#95), re-read each cycle from the config."""
+        from hub.config import Exclusions, exclusions_of, load_config
+        try:
+            return exclusions_of(load_config())
+        except Exception:
+            _log.warning("No pude leer las exclusiones de la config", exc_info=True)
+            return Exclusions()
+
+    def _skip_excluded(self, repo: dict) -> None:
+        """Log once per repo that an excluded, already-registered repo is skipped."""
+        rid = repo.get("id")
+        if rid in self._excluded_logged:
+            return
+        self._excluded_logged.add(rid)
+        _log.info("Repo excluido (exclude_owners/exclude_repos), no se lee: %s/%s",
+                  repo.get("owner", "?"), repo.get("repo_name", "?"))
 
     def _fetch_and_ingest(self, repo: dict) -> None:
         """Fetch un repo, detectar refs nuevas, ingestar commits."""

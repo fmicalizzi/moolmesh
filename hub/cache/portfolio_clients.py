@@ -12,6 +12,12 @@ The client attribution **ladder** (first match wins), per project:
 
   1. **Manual override** (``client_overrides``: ``project_key → client``) — for
      the borders the automatic rungs get wrong.
+  1b. **Owner alias** (``client_owner_aliases``: ``owner → client``, #95) — a
+     whole org or personal account mapped to a client. Checked on the git
+     owner, the gitless parent folder and the child-repo majority, BEFORE
+     ``personal_orgs``/``client_orgs``: an account that is "personal" by
+     identity but works for a client lands under that client. So a new repo
+     in that account needs no override.
   2. **Git-remote owner (primary)** — ``github.com/<org>/<repo>`` → org ``<org>``:
        * org ∈ ``personal_orgs`` → **personal**: the project stays LOOSE (no
          client node — the owner's own org, decided not to group).
@@ -180,6 +186,7 @@ def resolve_client(
     personal_orgs: set[str],
     overrides: dict[str, str],
     child_orgs: list[str] | None = None,
+    owner_aliases: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the attribution ladder for ONE project.
 
@@ -193,17 +200,21 @@ def resolve_client(
     repos) of one KNOWN org attributes the container to that client/personal
     bucket. A tie or an unknown majority changes nothing; ``client_overrides``
     still wins over everything.
+
+    ``owner_aliases`` (#95) maps a normalized owner (or folder) to a client
+    name; it outranks ``personal_orgs`` and ``client_orgs`` on every rung.
     """
+    aliases = owner_aliases or {}
     # 1. Manual override wins outright.
     if project_key and project_key in overrides:
-        name = overrides[project_key]
-        return {"bucket": "client", "client_key": f"client:{_norm_org(name)}",
-                "client_label": name}
+        return _client_ref(overrides[project_key])
 
     # 2. Git-remote owner (primary).
     org = _org_from_remote(remote_url) or _org_from_project_key(project_key)
     if org:
         norm = _norm_org(org)
+        if norm in aliases:
+            return _client_ref(aliases[norm])
         if norm in personal_orgs:
             return {"bucket": "personal", "client_key": None, "client_label": None}
         if norm in client_orgs:
@@ -215,6 +226,8 @@ def resolve_client(
     folder = _folder_client(anchor)
     if folder:
         norm = _norm_org(folder)
+        if norm in aliases:
+            return _client_ref(aliases[norm])
         if norm in personal_orgs:
             return {"bucket": "personal", "client_key": None, "client_label": None}
         if norm in client_orgs:
@@ -224,8 +237,11 @@ def resolve_client(
         # ≥ 2 repos, known org). Only upgrades a shared folder; personal and
         # client folders already resolved above, and unknown majorities change
         # nothing.
-        majority = _majority_org(child_orgs or [])
+        majority = _majority_org(child_orgs or [], aliases)
         if majority:
+            targets = {_norm_org(v): v for v in aliases.values()}
+            if majority in targets:
+                return _client_ref(targets[majority])
             if majority in client_orgs:
                 return {"bucket": "client", "client_key": f"client:{majority}",
                         "client_label": majority}
@@ -240,15 +256,30 @@ def resolve_client(
     return {"bucket": "personal", "client_key": None, "client_label": None}
 
 
-def _majority_org(child_orgs: list[str]) -> str | None:
+def _client_ref(name: str) -> dict[str, Any]:
+    """A client bucket for client ``name`` (key normalized, label verbatim)."""
+    return {"bucket": "client", "client_key": f"client:{_norm_org(name)}",
+            "client_label": name}
+
+
+def _majority_org(child_orgs: list[str],
+                  aliases: dict[str, str] | None = None) -> str | None:
     """The org with a STRICT majority (> 50 %) among direct child repos, if any.
 
     Requires ≥ 2 repos total: a single repo is not a majority statement. Ties
     (and 2-vs-2 splits) return ``None`` — the rung then changes nothing.
+    An aliased owner (#95) counts as its client's own org name, so repos of a
+    client's org and of an account aliased to it vote together.
     """
     if len(child_orgs) < 2:
         return None
-    counts: Counter[str] = Counter(_norm_org(o) for o in child_orgs if _norm_org(o))
+    aliases = aliases or {}
+
+    def key(o: str) -> str:
+        n = _norm_org(o)
+        return _norm_org(aliases[n]) if n in aliases else n
+
+    counts: Counter[str] = Counter(key(o) for o in child_orgs if _norm_org(o))
     if not counts:
         return None
     top, n = counts.most_common(1)[0]
@@ -387,6 +418,7 @@ def group_by_client(
     client_orgs: set[str],
     personal_orgs: set[str],
     overrides: dict[str, str],
+    owner_aliases: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Split the flat project list into client nodes + loose + external drawer.
 
@@ -394,7 +426,8 @@ def group_by_client(
     ``projects`` passes through and ``clients``/``external`` are empty. Member
     projects keep their full per-project shape (label, children, state, …).
     """
-    if not client_orgs and not personal_orgs and not overrides:
+    if not client_orgs and not personal_orgs and not overrides \
+            and not owner_aliases:
         return {"clients": [], "projects": projects, "external": []}
 
     clients: dict[str, dict[str, Any]] = {}
@@ -407,6 +440,7 @@ def group_by_client(
             p.get("project_key"), p.get("_remote_url"), p.get("_anchor_path"),
             client_orgs=client_orgs, personal_orgs=personal_orgs,
             overrides=overrides, child_orgs=p.get("_child_orgs"),
+            owner_aliases=owner_aliases,
         )
         bucket = ref["bucket"]
         if bucket == "client":

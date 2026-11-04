@@ -155,6 +155,21 @@ class HubConfig:
     # Override manual para bordes: project_key → nombre de cliente. Gana sobre
     # la escalera git-org/carpeta.
     client_overrides: dict[str, str] = field(default_factory=dict)
+    # Alias de dueño (issue #95): dueño entero (org o cuenta personal) → cliente.
+    # Un repo nuevo de ese dueño cae en el cliente sin override. Precedencia:
+    # client_overrides > client_owner_aliases > personal_orgs/client_orgs > resto.
+    client_owner_aliases: dict[str, str] = field(default_factory=dict)
+    # Registro externo de clientes (issue #95): ruta a un TOML compartido entre
+    # máquinas (ver ``load_client_registry``). Sólo lectura; si falta o es
+    # inválido se avisa en el log y se sigue con la config local.
+    client_registry: str = ""
+    # Repos confidenciales que NUNCA se leen (issue #95): ni git, ni sync de
+    # GitHub, ni `repo add`, ni portfolio, ni MCP. Dueños enteros y owner/repo.
+    exclude_owners: list[str] = field(default_factory=list)
+    exclude_repos: list[str] = field(default_factory=list)
+    # Registro cargado (no se serializa: nunca se copia a config.toml).
+    registry: "ClientRegistry | None" = field(default=None, repr=False,
+                                              compare=False)
     # --- Orden por config (issue #36, decisiones 3/4/5; #64 parte 2) ---
     # Alias de proyectos: origen (ruta o clave) → proyecto canónico (clave o
     # ruta). Los workspaces del origen (y sus hijos) suman su historia al
@@ -174,6 +189,204 @@ class HubConfig:
     # Tope de caracteres del texto completo guardado por evento (issue #52):
     # sobre el tope se conservan la cabeza y la cola. 0 = sin tope.
     full_text_max_chars: int = DEFAULT_FULL_TEXT_MAX_CHARS
+
+    # --- Vista efectiva cliente/exclusiones (issue #95): local + registro ---
+
+    def effective_client_orgs(self) -> list[str]:
+        """``client_orgs`` local unido al del registro (orden estable)."""
+        out = list(self.client_orgs)
+        if self.registry:
+            out += [o for o in self.registry.client_orgs if o not in out]
+        return out
+
+    def effective_owner_aliases(self) -> dict[str, str]:
+        """Alias de dueño normalizados (``lower``); la config local gana."""
+        merged: dict[str, str] = {}
+        if self.registry:
+            merged.update(self.registry.client_owner_aliases)
+        merged.update(self.client_owner_aliases)
+        return {_norm_owner(k): v for k, v in merged.items() if _norm_owner(k)}
+
+    def effective_client_overrides(self) -> dict[str, str]:
+        """``client_overrides`` del registro con la config local encima."""
+        merged: dict[str, str] = {}
+        if self.registry:
+            merged.update(self.registry.client_overrides)
+        merged.update(self.client_overrides)
+        return merged
+
+    def exclusions(self) -> "Exclusions":
+        """Dueños y repos excluidos (local ∪ registro), normalizados."""
+        owners = list(self.exclude_owners)
+        repos = list(self.exclude_repos)
+        if self.registry:
+            owners += self.registry.exclude_owners
+            repos += self.registry.exclude_repos
+        return Exclusions.build(owners, repos)
+
+    def is_excluded(self, owner: str | None, repo: str | None) -> bool:
+        """True when ``owner/repo`` must never be read (issue #95)."""
+        return self.exclusions().matches(owner, repo)
+
+
+def _norm_owner(name: object) -> str:
+    """GitHub owner/repo names compare case-insensitively."""
+    return str(name or "").strip().lower()
+
+
+@dataclass(frozen=True)
+class Exclusions:
+    """Confidential owners/repos that are never read (issue #95)."""
+    owners: frozenset[str] = frozenset()
+    repos: frozenset[str] = frozenset()   # "owner/repo", lowercased
+
+    @classmethod
+    def build(cls, owners: list[str], repos: list[str]) -> "Exclusions":
+        o = {_norm_owner(x).strip("/") for x in owners if _norm_owner(x)}
+        r = set()
+        for spec in repos:
+            parsed = parse_board_slug(str(spec))
+            if parsed:
+                r.add(f"{parsed[0]}/{parsed[1]}".lower())
+        return cls(frozenset(o), frozenset(r))
+
+    def __bool__(self) -> bool:
+        return bool(self.owners or self.repos)
+
+    def matches(self, owner: str | None, repo: str | None) -> bool:
+        o = _norm_owner(owner)
+        if not o:
+            return False
+        if o in self.owners:
+            return True
+        return f"{o}/{_norm_owner(repo)}" in self.repos
+
+    def matches_remote(self, remote: str | None) -> bool:
+        """Match a ``github.com/owner/repo`` remote or a ``git_remote:`` key."""
+        if not remote or not self:
+            return False
+        r = remote
+        if r.startswith("git_remote:"):
+            r = r[len("git_remote:"):]
+        parsed = parse_board_slug(r)
+        return bool(parsed) and self.matches(*parsed)
+
+
+def exclusions_of(config: object) -> Exclusions:
+    """The exclusions of ``config``; empty for anything not a real HubConfig.
+
+    Callers outside this module go through here so a stand-in config (tests,
+    a partial object) never reads as "everything excluded".
+    """
+    fn = getattr(config, "exclusions", None)
+    res = fn() if callable(fn) else None
+    return res if isinstance(res, Exclusions) else Exclusions()
+
+
+# --- Registro externo de clientes (issue #95) ---
+
+CLIENT_REGISTRY_VERSION = 1
+
+
+@dataclass
+class ClientRegistry:
+    """A shared, read-only client attribution file (issue #95).
+
+    Format (TOML, ``version = 1``)::
+
+        version = 1
+        client_orgs = ["acme"]
+        exclude_owners = ["initech"]
+        exclude_repos = ["globex/secret-plans"]
+
+        [client_owner_aliases]
+        "acme-labs" = "acme"
+
+        [client_overrides]
+        "git_remote:github.com/globex/widget-services" = "acme"
+
+    Every key is optional. ``personal_orgs`` is deliberately absent: who is
+    "me" is per machine. Merged under the local ``[workspace]`` values (local
+    wins on a conflicting key; lists are unioned).
+    """
+    path: str = ""
+    client_orgs: list[str] = field(default_factory=list)
+    client_owner_aliases: dict[str, str] = field(default_factory=dict)
+    client_overrides: dict[str, str] = field(default_factory=dict)
+    exclude_owners: list[str] = field(default_factory=list)
+    exclude_repos: list[str] = field(default_factory=list)
+
+
+# (path, mtime or error) already warned about — a broken registry is logged
+# once, not on every config reload of the harvester loops.
+_registry_warned: set[tuple[str, str]] = set()
+
+
+def _registry_warn(path: str, why: str) -> None:
+    if (path, why) in _registry_warned:
+        return
+    _registry_warned.add((path, why))
+    from hub.log import get as get_logger
+    get_logger("Config").warning(
+        "Registro de clientes %s: %s; sigo con la config local", path, why)
+
+
+def _str_list(value: object) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    return [str(v).strip() for v in value if str(v).strip()]
+
+
+def _str_map(value: object) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    return {str(k).strip(): str(v).strip() for k, v in value.items()
+            if str(k).strip() and isinstance(v, str) and v.strip()}
+
+
+def resolve_registry_path(path: str) -> Path:
+    """``~`` expanded; a relative path is relative to ``~/.moolmesh``."""
+    p = Path(os.path.expanduser(path))
+    return p if p.is_absolute() else CONFIG_DIR / p
+
+
+def load_client_registry(path: str) -> ClientRegistry | None:
+    """Read the shared client registry (read-only, never written).
+
+    Missing file, unreadable TOML or an unknown ``version`` → a warning in
+    the log and ``None`` (the local config alone applies). A key with the
+    wrong type is skipped with a warning; the rest of the file still applies.
+    """
+    if not path:
+        return None
+    p = resolve_registry_path(path)
+    try:
+        with open(p, "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        _registry_warn(str(p), "no existe")
+        return None
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        _registry_warn(str(p), f"no se pudo leer ({type(e).__name__})")
+        return None
+    version = data.get("version", CLIENT_REGISTRY_VERSION)
+    if version != CLIENT_REGISTRY_VERSION:
+        _registry_warn(str(p), f"version {version!r} no soportada")
+        return None
+    reg = ClientRegistry(path=str(p))
+    for key, conv in (("client_orgs", _str_list),
+                      ("exclude_owners", _str_list),
+                      ("exclude_repos", _str_list),
+                      ("client_owner_aliases", _str_map),
+                      ("client_overrides", _str_map)):
+        if key not in data:
+            continue
+        val = conv(data[key])
+        if val is None:
+            _registry_warn(str(p), f"'{key}' tiene un tipo inválido, lo ignoro")
+            continue
+        setattr(reg, key, val)
+    return reg
 
 
 def _serialize_toml(config: HubConfig) -> str:
@@ -229,6 +442,22 @@ def _serialize_toml(config: HubConfig) -> str:
             for k, v in config.client_overrides.items()
         )
         lines.append(f'client_overrides = {{{pairs}}}')
+    # Issue #95 — alias de dueño, registro externo y exclusiones (sólo con
+    # contenido; el registro cargado NUNCA se copia aquí).
+    if config.client_owner_aliases:
+        pairs = ", ".join(
+            f'"{_toml_escape(k)}" = "{_toml_escape(v)}"'
+            for k, v in config.client_owner_aliases.items()
+        )
+        lines.append(f'client_owner_aliases = {{{pairs}}}')
+    if config.client_registry:
+        lines.append(f'client_registry = "{_toml_escape(config.client_registry)}"')
+    if config.exclude_owners:
+        vals = ", ".join(f'"{_toml_escape(o)}"' for o in config.exclude_owners)
+        lines.append(f'exclude_owners = [{vals}]')
+    if config.exclude_repos:
+        vals = ", ".join(f'"{_toml_escape(o)}"' for o in config.exclude_repos)
+        lines.append(f'exclude_repos = [{vals}]')
     # Orden por config (decisiones 3/4/5) — mismas reglas: sólo con contenido.
     if config.project_aliases:
         pairs = ", ".join(
@@ -387,6 +616,15 @@ def load_config() -> HubConfig:
             str(k): str(v) for k, v in dict(ws.get("client_overrides", {})).items()
             if str(k) and str(v)
         }
+        # Issue #95 — alias de dueño, registro externo, exclusiones.
+        config.client_owner_aliases = _str_map(
+            ws.get("client_owner_aliases", {})) or {}
+        reg_path = ws.get("client_registry", "")
+        config.client_registry = reg_path.strip() if isinstance(reg_path, str) else ""
+        config.exclude_owners = _str_list(ws.get("exclude_owners", [])) or []
+        config.exclude_repos = _str_list(ws.get("exclude_repos", [])) or []
+        if config.client_registry:
+            config.registry = load_client_registry(config.client_registry)
         # Orden por config (decisiones 3/4/5) — todas opcionales, default vacío.
         config.project_aliases = {
             str(k): str(v) for k, v in dict(ws.get("project_aliases", {})).items()

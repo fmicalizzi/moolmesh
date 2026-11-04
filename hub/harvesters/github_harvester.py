@@ -8,6 +8,7 @@ import threading
 import time
 
 from hub.cache.git_store import GitStore, _to_local_naive
+from hub.config import exclusions_of
 from hub.integrations.github_client import GitHubClient
 from hub.log import get as get_logger
 
@@ -61,6 +62,8 @@ class GitHubHarvester:
         self._config_cache: dict | None = None
         self._config_cache_time: float = 0
         self._config_cache_ttl: float = 60.0  # 60 segundos
+        # Excluded repos already logged as skipped (#95), logged once each.
+        self._excluded_logged: set[str] = set()
 
     def start(self) -> None:
         self._running = True
@@ -121,9 +124,12 @@ class GitHubHarvester:
     def _poll_all_repos(self, poll_fn) -> None:
         """Itera repos registrados que tengan github_enabled."""
         config = self._get_cached_config()
+        excl = exclusions_of(config)
         for repo_config in config.repos:
             if not self._running or not repo_config.github_enabled:
                 continue
+            if self._excluded(excl, repo_config):
+                continue  # confidential (#95): no API call
             repo_id = self._store.get_repo_id(repo_config.path)
             if repo_id is None:
                 continue
@@ -148,9 +154,12 @@ class GitHubHarvester:
         config = self._get_cached_config()
         now = time.monotonic()
         renamed = False
+        excl = exclusions_of(config)
         for repo_config in config.repos:
             if not self._running or not repo_config.github_enabled:
                 continue
+            if self._excluded(excl, repo_config):
+                continue  # confidential (#95): no API call
             repo_id = self._store.get_repo_id(repo_config.path)
             if repo_id is None:
                 continue
@@ -176,6 +185,17 @@ class GitHubHarvester:
                 renamed = True
         if renamed:
             self._config_cache = None  # the next tick reads the new names
+
+    def _excluded(self, excl, repo_config) -> bool:
+        """True (and logged once) for a registered repo now excluded (#95)."""
+        if not excl.matches(repo_config.owner, repo_config.repo):
+            return False
+        name = f"{repo_config.owner}/{repo_config.repo}"
+        if name not in self._excluded_logged:
+            self._excluded_logged.add(name)
+            _log.info("Repo excluido (exclude_owners/exclude_repos), sin "
+                      "llamadas a GitHub: %s", name)
+        return True
 
     def _log_repo_error(self, error_key: str, repo_name: str, exc: Exception) -> None:
         """Log con backoff: traceback completo solo en el primer fallo o si

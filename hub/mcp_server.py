@@ -710,6 +710,59 @@ def _temporary_containers() -> list[str]:
         return []
 
 
+def _exclusions():
+    """Confidential owners/repos from ``[workspace]`` + registry (issue #95).
+
+    Lazy like the other config reads; a failure degrades to no exclusions
+    being known here (the harvesters still never read them).
+    """
+    from hub.config import Exclusions
+    try:
+        from hub.config import exclusions_of, load_config
+        return exclusions_of(load_config())
+    except Exception:
+        _log.exception("exclusions unavailable")
+        return Exclusions()
+
+
+def _row_excluded(row: dict[str, Any], excl: Any) -> bool:
+    """True when a portfolio row is an excluded repo (key or remote)."""
+    return (excl.matches_remote(row.get("project_key"))
+            or excl.matches_remote(row.get("_remote_url")))
+
+
+def _drop_excluded_rows(rows: list[dict[str, Any]], excl: Any) -> list[dict[str, Any]]:
+    """Rows minus excluded repos, recursively through ``children`` (#95)."""
+    out = []
+    for r in rows or []:
+        if _row_excluded(r, excl):
+            continue
+        if r.get("children"):
+            r["children"] = _drop_excluded_rows(r["children"], excl)
+        out.append(r)
+    return out
+
+
+def _drop_excluded_grouped(grouped: dict[str, Any], excl: Any) -> None:
+    """Remove excluded repos from every section of the grouped payload (#95).
+
+    Data already in the stores is not deleted; it is only never shown.
+    """
+    if not excl:
+        return
+    for sec in ("projects", "unclassified", "reference", "temporary"):
+        if sec in grouped:
+            grouped[sec] = _drop_excluded_rows(grouped[sec], excl)
+    summary = grouped.get("summary")
+    if isinstance(summary, dict) and summary:
+        projects = grouped.get("projects", []) + grouped.get("temporary", [])
+        summary["projects"] = len(projects)
+        summary["children"] = sum(len(p.get("children") or []) for p in projects)
+        for sec in ("unclassified", "reference", "temporary"):
+            if sec in summary:
+                summary[sec] = len(grouped.get(sec, []))
+
+
 def _registered_remote_keys(github_db: str) -> set[str]:
     """Registered repo identities (``github.com/owner/repo``, lowercased).
 
@@ -900,6 +953,9 @@ def _get_board_issues(
     if len(parsed) != 2 or not all(parsed):
         return {"error": f"repo must be owner/repo (got {repo!r})"}
     owner, name = parsed
+    if _exclusions().matches(owner, name):
+        # Confidential (#95): answered exactly like an unknown repo.
+        return {"error": f"repo not registered: {repo}"}
 
     conn = _connect_optional(github_db)
     if conn is None:
@@ -1175,9 +1231,12 @@ def _get_portfolio(
         conn.close()
         return []
     conn.close()
+    excl = _exclusions()
     out = []
     for r in rows:
         d = dict(r)
+        if excl and excl.matches_remote(d.get("remote_url")):
+            continue  # confidential repo (#95)
         d["sources"] = _lit_sources(
             d["session_touches"] or 0, d["fs_touches"] or 0, d["git_touches"] or 0
         )
@@ -1261,6 +1320,9 @@ def _get_portfolio_grouped(
     finally:
         store.close()
 
+    # Confidential repos (#95) never surface, whatever is already stored.
+    _drop_excluded_grouped(grouped, _exclusions())
+
     # Registered-vs-remote honesty (#60): annotate BEFORE the client tier so the
     # folding (registrados sin actividad) and the "no medido" column both see it.
     _annotate_github_measured_projects(
@@ -1293,19 +1355,22 @@ def _apply_client_hierarchy(
         personal = list(cfg.personal_orgs)
         if not personal and cfg.github_handle:
             personal = [cfg.github_handle]
-        client_orgs = list(cfg.client_orgs)
+        # Local [workspace] values merged with the shared registry (#95).
+        client_orgs = cfg.effective_client_orgs()
         if not client_orgs and personal:
             client_orgs = suggest_client_orgs(workspace_db, github_db)
-        overrides = dict(cfg.client_overrides)
+        overrides = cfg.effective_client_overrides()
+        aliases = cfg.effective_owner_aliases()
     except Exception:
         _log.exception("client config unavailable; portfolio stays flat")
-        personal, client_orgs, overrides = [], [], {}
+        personal, client_orgs, overrides, aliases = [], [], {}, {}
 
     hierarchy = group_by_client(
         grouped.get("projects", []),
         client_orgs={_norm_org(o) for o in client_orgs},
         personal_orgs={_norm_org(o) for o in personal},
         overrides=overrides,
+        owner_aliases={_norm_org(k): v for k, v in aliases.items()},
     )
     grouped["clients"] = hierarchy["clients"]
     grouped["projects"] = hierarchy["projects"]
@@ -1613,6 +1678,11 @@ def _portfolio_production(
         if st:
             row["state"] = st
         projects.append(row)
+    # Confidential repos (#95) never surface, whatever is already stored.
+    excl = _exclusions()
+    if excl:
+        projects = [p for p in projects
+                    if not excl.matches_remote(p["project_key"])]
     # Registered-vs-remote honesty (#60): a GitHub remote never registered shows
     # "no medido" instead of "— sin repo" — a third, distinct state.
     _annotate_github_measured_projects(
@@ -1676,9 +1746,12 @@ def _get_workspace_activity(
         conn.close()
         return []
     conn.close()
+    excl = _exclusions()
     out = []
     for r in rows:
         d = dict(r)
+        if excl and excl.matches_remote(d.get("remote_url")):
+            continue  # confidential repo (#95)
         d["sources"] = _lit_sources(
             d["session_touches"] or 0, d["fs_touches"] or 0, d["git_touches"] or 0
         )
