@@ -44,7 +44,7 @@ from urllib.parse import unquote, urlparse
 from hub.log import get as get_logger
 from hub.models.antigravity import AntigravityEntry, AntigravitySummary, AntigravityToolCall
 from hub.parsers.base import BaseParser
-from hub.sqlite_ro import ro_uri
+from hub.sqlite_ro import zero_footprint_uri
 
 _log = get_logger("AntigravityParser")
 
@@ -189,14 +189,11 @@ def _summaries_uri(db: Path) -> str:
     With the CLI running its ``-wal`` sits next to the file: open ``mode=ro``
     without ``immutable`` so the reader sees the WAL frames. With the CLI shut
     down there is no ``-wal``, and a plain read-only open of a WAL database
-    leaves empty ``-wal``/``-shm`` files behind: ``immutable=1`` avoids that
-    (safe, nobody is writing). Built here so ``hub.sqlite_ro.connect_ro`` stays
-    unchanged for the providers that do not need it.
+    leaves empty ``-wal``/``-shm`` files behind: ``immutable=1`` avoids that.
+    The condition is ``hub.sqlite_ro.zero_footprint_uri``'s, shared by every
+    provider database since #54.
     """
-    uri = ro_uri(db)
-    if not Path(str(db) + "-wal").exists():
-        uri += "&immutable=1"
-    return uri
+    return zero_footprint_uri(db)
 
 
 def _s(value: Any) -> str:
