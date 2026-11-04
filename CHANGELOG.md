@@ -6,6 +6,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.31.1] — 2026-11-04
+
+Two fixes found while validating 1.31.0 on macOS. No new dependencies, no
+migrations.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- Log lines from the event store, backups, backfill, watchers, the watcher
+  supervisor and the MCP registry/server now reach `daemon.log` / `hub.log`,
+  under `hub.<module>` instead of `moolmesh.<module>`. Only matters if you
+  filter the log by that name.
+- In 1.28.0–1.31.0 the counts of events.db migrations 6 and 8 were not logged
+  (the migrations and their backups ran normally). To recount migration 8,
+  read-only, against the backup it took just before it ran
+  (`~/.moolmesh/backups/events-<date>.db`):
+  ```sh
+  sqlite3 -readonly ~/.moolmesh/events.db "SELECT version, datetime(applied_at,'unixepoch','localtime') FROM schema_migrations WHERE version IN (6,8);"
+  B=~/.moolmesh/backups/events-YYYYMMDD-HHMMSS.db
+  sqlite3 -readonly ~/.moolmesh/events.db "ATTACH 'file:$B?mode=ro' AS b; SELECT COUNT(*) FROM events e JOIN b.events o ON o.id = e.id WHERE o.historical = 0 AND e.historical = 1;"
+  ```
+  If the migration found no rows it took no backup (count 0); if the backup
+  was already pruned there is no exact recount.
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Fixed
+- **Logs from `moolmesh.*` loggers were dropped** (#107): seven modules logged
+  under a namespace the log setup did not cover, so their INFO lines (such as
+  the migration counts) never reached the log. All modules now log under
+  `hub.*`; a test guards against new loggers outside it.
+- **False error on a slow start** (#108): `mool daemon start`/`restart`
+  (launchd, systemd or no supervisor) failed after 15 s (10 s unsupervised)
+  even when the new daemon was alive and busy with a migration backup. Now a
+  live process past that window is waited for up to 180 s, with a one-time
+  `starting (migrating databases?) …` notice; the command fails at once if the
+  process exits.
+
+---
+
 ## [1.31.0] — 2026-11-04
 
 Versioned snapshot export (#82) and outage days dated correctly (#101). No new
