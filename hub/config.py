@@ -88,6 +88,11 @@ class HubConfig:
     # vacía → no se marca nada (comportamiento previo). NUNCA se exponen los
     # emails ni conteos por autor en ninguna superficie: sólo un booleano.
     user_emails: list[str] = field(default_factory=list)
+    # Zona horaria del "día local" (issue #81): nombre IANA, vacío = zona del
+    # sistema. Se valida al usarse (hub.localtime.resolve_timezone): un nombre
+    # desconocido cae a la zona del sistema con un aviso en el log, sin
+    # reescribir el valor del usuario.
+    timezone: str = ""
     # --- LLM (sección canónica) ---
     llm_provider: str = "ollama"
     llm_api_url: str = "https://ollama.com/api"
@@ -169,6 +174,8 @@ def _serialize_toml(config: HubConfig) -> str:
     if config.user_emails:
         emails = ", ".join(f'"{_toml_escape(e)}"' for e in config.user_emails)
         lines.append(f'emails = [{emails}]')
+    if config.timezone:
+        lines.append(f'timezone = "{_toml_escape(config.timezone)}"')
     lines.append("")
 
     # Sección [workspace] (privacidad — escalar; DEBE ir antes de cualquier
@@ -293,6 +300,15 @@ def load_config() -> HubConfig:
         config.user_emails = [
             str(e).strip() for e in user.get("emails", []) if str(e).strip()
         ]
+        # Zona horaria (issue #81) — string; cualquier otro tipo se ignora.
+        tz_name = user.get("timezone", "")
+        if isinstance(tz_name, str):
+            config.timezone = tz_name.strip()
+        else:
+            from hub.log import get as get_logger
+            get_logger("Config").warning(
+                "[user] timezone debe ser un nombre IANA entre comillas; "
+                "uso la zona del sistema")
     
     # Parse repos array
     if "repos" in data:
