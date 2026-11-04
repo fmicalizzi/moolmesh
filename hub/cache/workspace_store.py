@@ -430,6 +430,30 @@ def _mig_6_edge_active_days(conn: sqlite3.Connection) -> int:
     return 1
 
 
+def _mig_7_live_catchup_day(conn: sqlite3.Connection) -> int:
+    """Schedule re-dating the live rows of an outage catch-up (#131).
+
+    ``_edge_activity_dt`` now clocks a live row by its own time when that lies
+    within the live window before its ingest, so the evening before a
+    just-past-midnight restart counts on its own day. Existing edges were
+    bucketed on the ingest day: this marks BOTH one-time re-derivations
+    pending — the edge clocks (#101 marker; it runs only once events.db has
+    migration 8, as before) and the days worked (#114 marker) — and
+    ``attribute_incremental`` runs them as one full pass after a backup of
+    workspace.db (``_rederive_full``). Nothing is rewritten here. A DB with no
+    edges has nothing to re-derive. Idempotent (``INSERT OR REPLACE`` of the
+    same values).
+    """
+    if not conn.execute("SELECT 1 FROM path_attributions LIMIT 1").fetchone():
+        return 0
+    for key in (_ACTIVITY_REDERIVE_KEY, _ACTIVE_DAYS_REDERIVE_KEY):
+        conn.execute(
+            "INSERT OR REPLACE INTO rollup_meta (key, value) VALUES (?, 'pending')",
+            (key,),
+        )
+    return 1
+
+
 # Versioned, additive migrations — each runs exactly once (mirrors git_store).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
     (1, "attribution_via", _mig_1_attribution_via),
@@ -438,6 +462,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
     (4, "rollup_day_zone", _mig_4_rollup_day_zone),
     (5, "activity_rederive", _mig_5_activity_rederive),
     (6, "edge_active_days", _mig_6_edge_active_days),
+    (7, "live_catchup_day", _mig_7_live_catchup_day),
 ]
 
 
@@ -641,19 +666,29 @@ def _max_ts(a: str | None, b: str | None) -> str | None:
     return max(a, b)
 
 
+# The live window of events.db (``event_store.LIVE_WINDOW_HOURS``, #62): an
+# event ingested live within it of its own time is a catch-up, not a replay.
+_LIVE_WINDOW = timedelta(hours=12)
+
+
 def _edge_activity_dt(
     timestamp: str | None, created_at: float | None, historical: bool
 ) -> datetime | None:
     """One event's #53 activity clock: the honest time of THAT event.
 
-    Live rows (``historical = 0``) use the ingest epoch ``created_at`` — a
-    resumed session replays original timestamps spanning months (#18), so the
-    ingest clock is the honest one for watched work. Historical rows (#45:
-    backfill / catch-up / re-parse) stored ``created_at = now`` at import, so
-    their parsed event time is the only honest clock
-    (:func:`_historical_event_dt`, which also falls back to ``created_at``).
-    A live row with no usable ``created_at`` falls back to the parsed
-    timestamp; an unreadable row yields ``None``.
+    Live rows (``historical = 0``) are clocked by the ingest epoch
+    ``created_at`` — a resumed session replays original timestamps spanning
+    months (#18) — EXCEPT when the event's own parsed time lies inside the
+    live window before that ingest (``[created_at - LIVE_WINDOW, created_at]``):
+    then the event time is honest and wins (#131). That is the catch-up after
+    an outage: the evening before a just-past-midnight restart is ingested
+    live, and must count on its own local day, not on the restart day. A
+    replay older than the window, or a timestamp in the future of its ingest,
+    keeps the ingest clock. Historical rows (#45: backfill / catch-up /
+    re-parse) stored ``created_at = now`` at import, so their parsed event
+    time is the only honest clock (:func:`_historical_event_dt`, which also
+    falls back to ``created_at``). A live row with no usable ``created_at``
+    falls back to the parsed timestamp; an unreadable row yields ``None``.
     """
     if historical:
         return _historical_event_dt(timestamp, created_at)
@@ -663,7 +698,13 @@ def _edge_activity_dt(
             dt = datetime.fromtimestamp(float(created_at), tz=timezone.utc)
         except (TypeError, ValueError, OverflowError, OSError):
             dt = None
-    return dt if dt is not None else _parse_ts(timestamp)
+    if dt is None:
+        return _parse_ts(timestamp)
+    if timestamp:
+        own = _historical_event_dt(str(timestamp), None)
+        if own is not None and timedelta(0) <= dt - own <= _LIVE_WINDOW:
+            return own
+    return dt
 
 
 # NULL-safe "keep the earliest" for the event_ts upsert (#42). SQLite's scalar
