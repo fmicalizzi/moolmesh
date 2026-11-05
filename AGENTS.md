@@ -127,7 +127,7 @@ mool --help                       # run the CLI
 ```
 
 - Every change keeps the suite green. New behavior ships with tests. Baseline
-  at v1.36.1: 2409 passed / 8 skipped with the privacy denylist, 2408 / 9
+  at v1.36.5: 2512 passed / 9 skipped with the privacy denylist, 2511 / 10
   without it. The count only grows; the badge and the README line are synced
   by CI on each release.
 - **Isolate HOME.** Tests and manual runs of the branch code use

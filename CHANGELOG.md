@@ -6,10 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
-## [Unreleased]
+## [1.36.5] — 2026-11-05
+
+Portfolio fixes for removed worktrees and agent scratchpads, and `mool device` in English. No new dependencies. One additive `workspace.db` migration (9), followed by one automatic re-derivation that backs the database up first.
+
+### Upgrade notes
+- `pipx upgrade moolmesh --pip-args=--no-cache-dir` (or `uv tool upgrade moolmesh --no-cache`), then `mool daemon restart`, then restart open agent sessions so their MCP servers load the new code.
+- **Removed worktrees (#161):**
+  - The first daemon pass after the upgrade backs up `workspace.db` to `~/.moolmesh/backups/` and recomputes the attribution once.
+  - Before that, it reads the `git worktree add` commands from the agents' own session files. Access is read-only, and only files that mention `worktree` are parsed.
+  - It is resumable if cut, and it does not run again. The counts go to `hub.log`. It takes seconds.
+- No config change is needed. A folder named like a worktree with no readable `git worktree add` stays as it is: no command, a path with a variable, or a piped command. `project_aliases` stays the manual fallback.
+- In `mool device show`, the field labels changed: `file`, `label`, `created`, `machine`.
 
 ### Fixed
-- **`mool device init` and `mool device show` print in English** (#156 follow-up), like the rest of the CLI. In `show`, the labels are now `file`, `label`, `created` and `machine`. Exit codes and the `id` lines do not change.
+- **Worktrees removed before 1.36.3 still showed as repo-less projects (#161 A).**
+  - #149 read only the capped summary of a shell call, which cuts the worktree path. A removed worktree now folds into its repo from the full `git worktree add` command, resolved against the cwd of the session that ran it.
+  - Every provider whose tool call carries the command keeps it whole for a shell call that adds a worktree: Claude, Codex, Qwen, OpenCode, Pi and Antigravity. So a worktree created and removed between two polls folds too.
+  - Older history is read once from the session files.
+  - It never goes by folder name, and evidence that names two repos for one path folds nothing.
+  - A scratchpad whose session ran in a removed worktree folds into that repo.
+- **Throwaway git repos were projects (#161 B).** A git repo without a remote that an agent creates in its scratchpad now folds into the session's project. One under an OS temp root shows as temporary. A repo with a remote stays its remote's project wherever it was checked out.
+- **Linux scratchpads were unclassified (#161 C).** The harness scratchpad is matched by its shape, `<tmp>/claude-<uid>/<encoded-cwd>/<session-uuid>/`, on macOS, Linux or any `$TMPDIR`. The same goes for the harness tooling folders. macOS behaves as before.
+- **`mool device init` and `mool device show` print in English** (#156 follow-up). Exit codes and the `id` lines do not change. The test that guards the export messages covers them too.
 
 ---
 
