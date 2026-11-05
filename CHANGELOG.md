@@ -6,6 +6,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.35.0] — 2026-11-05
+
+Two additions. No new dependencies, no migrations, no new GitHub API calls.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+- To bring in earlier Antigravity desktop/IDE history, run `mool backfill`.
+  The startup catch-up covers the usual window.
+
+### Added
+- **Per-contributor breakdown, opt-in** (#83). A new `[team]` section in
+  `~/.moolmesh/config.toml`:
+  - `per_contributor = true` (default `false`) breaks the portfolio's delivery
+    down by GitHub login: merged PRs, closed and open issues, and PR lines when
+    their stats are cached. It shows in `get_portfolio_production` (MCP),
+    `/api/workspace/portfolio/production` and the daily and weekly digests, and
+    the dashboard shows "per-person view active".
+  - `contributor_aliases = { "old-login" = "login" }` is optional; several
+    logins mapped to one alias are summed.
+  - `bot_logins = [...]` is optional and adds to dependabot, `*[bot]` and
+    `app/*`.
+
+  A PR counts for its author. An issue counts for its first assignee who is
+  not a bot, or its author if there is none. Bots never count as a person. It
+  uses only data already cached in `github.db`. With the option off or absent,
+  the output is byte-identical to before. The digests' LLM narrative never
+  receives per-person data. Digests already cached keep their text until
+  regenerated.
+- **Antigravity desktop app and IDE** (#77): besides the CLI
+  (`~/.gemini/antigravity-cli`), MoolMesh reads `~/.gemini/antigravity`, where
+  Antigravity 2.0 (desktop) and the IDE keep the same format, read-only.
+  - Sessions appear under the same `antigravity` provider, and each session's
+    metadata says which surface it came from (`surface`).
+  - A conversation found in both directories is ingested once; the CLI copy
+    wins.
+  - If you only use the CLI, nothing changes.
+
+---
+
 ## [1.34.3] — 2026-11-05
 
 Two fixes. No new dependencies, no migrations.
