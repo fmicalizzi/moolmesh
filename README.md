@@ -98,7 +98,9 @@ mool daemon start
 # → open http://localhost:5200
 ```
 
-The daemon runs on all platforms (macOS, Linux, Windows). Use `mool daemon stop` to stop it, `mool daemon status` to check.
+The daemon runs on all platforms (macOS, Linux, Windows). Use `mool daemon stop` to stop it, `mool daemon status` to check (it exits 1 when a watcher is degraded).
+
+`mool daemon stop` returns only once the process has exited; after 30 s it reports "still shutting down (PID N)" and exits 1. `mool daemon start`/`restart` wait for a daemon that is still shutting down, and for one that is still starting (for example, while a migration backs up a database: a one-time `starting (migrating databases?) …` notice past 10 s, up to 180 s), so a stop followed by a start never leaves it down.
 
 That's it. MoolMesh auto-discovers your AI sessions immediately. No configuration needed.
 
@@ -215,42 +217,63 @@ once. `days_worked_basis` says where they came from: `edge_active_days`, or
 ## Updating
 
 ```bash
-# pipx (recommended)
-pipx upgrade moolmesh --pip-args=--no-cache-dir
+pipx upgrade moolmesh --pip-args=--no-cache-dir         # pipx (recommended)
+uv tool upgrade moolmesh --no-cache                      # uv tool
+python -m pip install --upgrade --no-cache-dir moolmesh  # pip inside a virtual environment
 
-# pip inside a virtual environment
-python -m pip install --upgrade --no-cache-dir moolmesh
-
-# uv tool
-uv tool upgrade moolmesh
+mool daemon restart                                      # run the new version
 ```
 
-Then restart the daemon so it runs the new version:
+`--no-cache-dir` / `--no-cache` skip the local cache: right after a release, a
+cached wheel (or a lagging mirror) can make the upgrade resolve the previous
+version. With a tool manager such as Scoop, use its own upgrade
+(`scoop update moolmesh`).
 
-```bash
-mool daemon restart
-```
+Then **restart open agent sessions** (or their MCP servers) so they load the new
+code. Every agent session keeps its own `hub.mcp_server` alive until it closes, so
+it keeps serving the old version after the upgrade and `mool daemon restart`;
+`mool doctor` lists the ones running old code.
 
-`--no-cache-dir` skips the local pip cache: right after a release, a cached
-wheel (or a lagging mirror) can make the upgrade resolve the previous version.
+**What an upgrade does on its own.** A migration that rewrites existing rows
+first copies the database to `~/.moolmesh/backups/` (the newest 5 `events-*` and
+5 `workspace-*` copies are kept), and every applied migration is logged
+(`Migration N applied: …`) in `daemon.log`, or in `hub.log` when the CLI or an
+MCP server applied it. A first start that is busy with such a backup can take a
+while; `daemon start`/`restart` wait for it (see [Start](#start)). Each
+version's upgrade notes are in [CHANGELOG.md](CHANGELOG.md).
 
-After upgrading, restart open agent sessions (or their MCP servers) so they load
-the new code; `mool doctor` lists stale ones (1.26.2+). Every agent session keeps
-its own `hub.mcp_server` alive until it closes, so it keeps serving the old
-version after the upgrade and `mool daemon restart`. Servers started by 1.26.1 or
-earlier can't report that they are stale and are not listed — only a restart
-replaces them.
+**Coming from an older version** — only what still needs an action. Each item
+applies if the version you are upgrading *from* is older than the one named:
 
-**OpenCode users:** after upgrading to 1.27.1, run `mool backfill --reparse opencode`
-(a simulation that writes nothing) and then `mool backfill --reparse opencode --yes`
-to recover the replies, reasoning and tool details that earlier versions stored
-without their text (events.db is backed up first).
+- **Older than 1.26.2:** MCP servers started by 1.26.1 or earlier cannot report
+  that they are stale, so `mool doctor` does not list them. Restart every open
+  agent session once.
+- **Older than 1.27.2:** `mool daemon start` does not survive a reboot. Register
+  the daemon with `mool daemon install` (see [Run at login](#run-at-login)), from
+  the pipx / uv tool install, not from a development virtualenv.
+- **Older than 1.28.0, OpenCode users:** run `mool backfill --reparse opencode`
+  (a simulation that writes nothing), then `mool backfill --reparse opencode --yes`
+  (events.db is backed up first). It recovers the replies, reasoning and tool
+  details earlier versions stored without text, and re-stores OpenCode events
+  with the UTC timestamps (and fingerprints) 1.28.0 introduced.
+- **Older than 1.28.1:** backups now prune themselves to the newest 5 of each
+  kind; copy aside any older backup in `~/.moolmesh/backups/` you want to keep.
+  Empty `-wal` / `-shm` files that earlier versions left next to a provider's
+  database are not removed; delete them by hand while the provider is closed.
+- **Older than 1.29.0:** PRs cached before the upgrade get their stats with
+  `mool repo backfill-pr-stats --all-registered` (200 PRs per run; rerun to
+  continue).
+- **Older than 1.35.0, Antigravity desktop/IDE users:** run `mool backfill` to
+  bring in history older than the startup catch-up window.
+
+**Downgrading** is not supported once a newer version has migrated your
+databases. In particular, versions before 1.30.0 read `kind = "remote"` and
+`kind = "board"` repos as code repos: do not downgrade with such repos
+registered.
 
 **Windows:** a running daemon can lock files inside the pipx venv and make
 `pipx upgrade` fail or apply only partially — stop it first
-(`mool daemon stop`), upgrade, then `mool daemon start`. If you installed with
-Scoop or another tool manager, use its own upgrade (`scoop update moolmesh`,
-`uv tool upgrade moolmesh`).
+(`mool daemon stop`), upgrade, then `mool daemon start`.
 
 ---
 
@@ -515,15 +538,38 @@ the `hub` package and fails with `No module named 'hub'`.
 
 ### Available tools
 
+All tools are read-only.
+
 | Tool | Description |
 |------|-------------|
-| `get_recent_events` | Latest N events across all providers |
+| `get_server_info` | Running vs installed version of this MCP server, plus a `freshness` block — call it if results look inconsistent: a stale server must be restarted |
+| **Events & sessions** | |
+| `get_recent_events` | Latest N events across all providers (`offset` for paging) |
 | `get_active_sessions` | Sessions active in the last N hours |
+| `get_sessions` | Sessions with metadata (title, model, branch, cwd), filterable by provider and branch |
+| `get_session_detail` | One session's metadata, stats and `linked_sessions` |
+| `get_session_events` | A session's events, paginated (up to 500 per page), with `text_mode` none / snippet / full; Pi sessions show only the active branch |
 | `get_token_usage` | Token consumption by provider |
 | `get_tool_stats` | Top tools used by AI agents |
-| `search_events` | Full-text search on event summaries |
+| `search_events` | Full-text search on event summaries (newest first) |
+| `search_session_content` | Full-text search on the stored full text of events |
 | `get_project_activity` | Complete project summary with stats |
-| `get_server_info` | Running vs installed version of this MCP server — call it if results look inconsistent: a stale server must be restarted |
+| **Correlation** | |
+| `get_branch_sessions` | Sessions correlated with a git branch |
+| `get_session_chain` | Sessions linked to a session (predecessors and successors) |
+| **Workspace & portfolio** | |
+| `list_workspaces` | Known workspaces with session, file and filesystem-touch counts |
+| `get_session_workspaces` | Workspaces a session touched |
+| `get_workspace_sessions` | Sessions that touched a workspace |
+| `get_workspace_touches` | Filesystem touches attributed to a workspace |
+| `get_workspace_activity` | Per-day activity of one workspace (session / filesystem / git) |
+| `get_portfolio` | Machine-wide portfolio rollup (with `sessions_worked` / `days_worked`) |
+| `get_portfolio_grouped` | The portfolio grouped by client → project → materials, with `freshness` |
+| `get_portfolio_production` | Production strip per project: days worked, outcome (all-time and in the window), optional per-contributor breakdown, `freshness` |
+| `get_delivery_candidates` | Likely-delivered work, as candidates with confidence |
+| **GitHub** | |
+| `get_board_issues` | A repo's issues by label, assignee and age, with opened/closed counts per local day |
+| `get_snapshot` | The versioned snapshot of `mool snapshot export` ([`docs/schema/snapshot.v1.md`](docs/schema/snapshot.v1.md)) |
 
 Resources: `hub://schema` (database schema), `hub://projects` (project list with stats).
 
@@ -584,33 +630,42 @@ mool report --project myapp --provider claude --output ./exports
 mool <command> [options]
 
 Commands:
-  dashboard              Start the live monitoring dashboard
-  daemon start           Run dashboard as a background service
-  daemon stop            Stop the background service
-  daemon status          Show daemon PID, uptime, log size
+  dashboard              Start the live monitoring dashboard (foreground)
+  daemon start           Run the dashboard as a background service (--foreground: stay attached)
+  daemon stop            Stop the background service (returns once it has exited)
+  daemon status          Show daemon PID, uptime, autostart, log size (exit 1 if a watcher is degraded)
   daemon restart         Restart the background service
   daemon install         Start the daemon at login (launchd / systemd --user / Task Scheduler)
   daemon uninstall       Remove the autostart created by daemon install
   status [--json]        Quick alias for daemon status
-  mcp setup [TARGET]     Configure MCP server (claude-code|claude-desktop|cursor|codex|qwen|opencode|antigravity|json)
-  doctor                 Run system diagnostics
+  doctor                 Run system diagnostics (freshness, autostart, stale MCP servers)
   install                Install mool command globally (~/.local/bin)
-  report                 Generate batch Markdown analysis reports
   discover [--json]      List all discovered AI agent projects
-  repo add [PATH]        Register a git repo (default: current directory)
+  backfill               Import session history outside the live window
+  sessions               List sessions with metadata (--hours, --provider, --branch, --json)
+  export SESSION_ID      Export a session transcript (--format markdown|json, --output FILE)
+  link SOURCE TARGET     Link two related sessions (--type continues|references|reviews)
+  chain SESSION_ID       Show the sessions linked to a session
+  detect-links           Detect temporal links between sessions (--auto stores them)
+  report [auto]          Generate batch Markdown analysis reports
+  repo add [PATH]        Register a git repo (default: current directory; --board, --remote, --owner)
   repo list              List registered repos with commit counts
-  repo remove [PATH]     Unregister a repo (default: current directory)
-  repo sync [PATH]       Re-ingest commit history
+  repo remove [PATH]     Unregister a repo (default: current directory; owner/repo if no clone)
+  repo sync [PATH]       Re-ingest commit history (--all, --all-registered)
   repo backfill-pr-stats Fetch +/-, files and closed issues of cached PRs
   snapshot export        Versioned JSON snapshot of a repo for a range of days
   device init|show       Opt-in device identity for the effort export
   effort export          Per-device effort (listed repos, local days) as JSON
+  workspace ...          Workspace axis: backfill, list, session, sessions, touches,
+                         rollup, classify, portfolio, delivery, root add|list|remove
+  mcp setup [TARGET]     Configure MCP server (claude-code|claude-desktop|cursor|codex|qwen|opencode|antigravity|json)
   query events           Recent events as JSON
   query sessions         Active sessions as JSON
   query tokens           Token usage by provider as JSON
   query tools            Top tools used by agents as JSON
   query search TEXT      Search events by text as JSON
   query project NAME     Project activity summary as JSON
+  query chain SESSION_ID Session chain as JSON
 
 Global options:
   --version              Show version and exit
@@ -620,12 +675,29 @@ Dashboard / daemon options:
   --host HOST            Server host (default: localhost)
   --project NAME         Filter to project name
   --providers LIST       Comma-separated: claude,codex,qwen,opencode,cursor,pi,antigravity
+  --log-level LEVEL      dashboard only: DEBUG|INFO|WARNING|ERROR (default: INFO)
+
+Backfill options:
+  --provider P           claude|codex|qwen|pi|antigravity|all (default: all file-based providers)
+  --since YYYY-MM-DD     Only files modified on/after this local date
+  --dry-run              Count what would be processed; write nothing
+  --limit N              At most N files with new data per run (re-run continues)
+  --reparse codex|opencode  Re-ingest with the current parser (simulates; --yes applies, after a backup)
 
 Report options:
   --complete             Full-content mode: no truncation
+  --daily                Only day-level reports (auto mode)
   --output DIR           Output directory
   --provider PROVIDER    Filter by provider
 ```
+
+Every subcommand has its own `--help`.
+
+**Session transcripts:** `mool export SESSION_ID` writes Markdown (default) or
+JSON (`--format json`) to stdout or `--output FILE`, with every event of the
+session. For Pi sessions, which are trees (`/tree` goes back and branches), it
+shows only the branch the user is on; abandoned branches stay in the database
+and in every other view. Other providers' sessions are shown in stored order.
 
 ### Agent-friendly CLI (`mool query`)
 
@@ -658,8 +730,11 @@ All output is valid JSON — pipe to `jq`, parse with any language, or use from 
 When the dashboard is running, `GET /health` returns:
 
 ```json
-{"status": "healthy", "version": "1.4.0", "uptime_seconds": 3600, "events_count": 45231}
+{"status": "healthy", "pid": 4242, "version": "1.36.1", "uptime_seconds": 3600, "events_count": 45231, "watchers": {"...": "..."}}
 ```
+
+`status` is `degraded` when a running watcher is dead or stalled. `GET /api/freshness`
+returns the same `freshness` block as the MCP tools.
 
 ---
 
@@ -697,9 +772,16 @@ All state is persisted in SQLite. Crash-safe, exactly-once semantics via transac
 | Database | Path | Contents |
 |----------|------|----------|
 | `events.db` | `~/.moolmesh/events.db` | AI session events, file offsets, SSE replay buffer |
-| `github.db` | `~/.moolmesh/github.db` | Repos, commits, issues, PRs, milestones, digests |
+| `github.db` | `~/.moolmesh/github.db` | Repos, commits, issues, PRs (and their stats), milestones, digests |
+| `workspace.db` | `~/.moolmesh/workspace.db` | Workspace attribution, filesystem touches, portfolio rollup, days worked |
 
-Both databases are created automatically. Schema migrates on startup.
+The databases are created automatically and migrate on startup (versioned
+migrations; a migration that rewrites rows backs up first to
+`~/.moolmesh/backups/`, newest 5 of each kind kept). Other files under
+`~/.moolmesh/`: `config.toml` (configuration), `daemon.log` (rotated to
+`daemon.log.1` past 10 MB) and `hub.log` (CLI and MCP servers), `run/` (the MCP
+server registry `mool doctor` reads), `reports/` (`mool report auto`) and, only
+after `mool device init`, `device.json` (mode 600).
 
 ---
 
@@ -741,7 +823,17 @@ MoolMesh started with coding-agent sessions, but the vision is to **observe the 
 | **Shipped** | v1.24 | **Honest portfolio (audit #36):** each project dated by its own attribution edges (per-edge activity clock) instead of the latest activity of any session that touched it; totals include nested sub-folders/materials like state does; shell-tool commands no longer become folders; install-day OpenCode rows dated by event time; temp/system folders and app bundles move to "unclassified"; automatic one-time re-derive (#56, #57, #58, #61) |
 | **Shipped** | v1.25 | **Pi provider + provider template:** MoolMesh observes the Pi coding agent (tree-aware JSONL parser, file attribution, tokens and cost, daemon/backfill/catch-up/CLI/MCP/dashboard); `docs/PROVIDERS.md` + a provider contract test make new providers cheaper; shell commands never stored as file paths; container-internal paths (`/app`…) are "unclassified"; README "Updating" with `--no-cache-dir` (#66, #64, #63) |
 | **Shipped** | v1.26 | **Team & order:** "· equipo" mark when only other people's commits keep a project hot (`[user] emails`, nothing per person exposed); registered-but-inactive repos folded and "no medido"; local-config ordering with `project_aliases` (incl. container paths), `reference_containers`, `temporary_containers`; majority-org client rung; `mool repo sync --all-registered --all` with "desde <fecha>" labels while history is partial (#36, #60, #64, #59) |
-| **Planned** | — | **Container split:** decompose shared-workspace nodes (`SHARED-WORKSPACE`) into their distinct child projects/clients — needs resolver re-anchoring (#30). **Team/org visibility** deferred to `v2.x` Org-Scale (outcome data is multi-actor; contributors carried latently today). |
+| **Shipped** | v1.27 | **Antigravity CLI provider (7th)**; OpenCode no longer loses streamed replies (`mool backfill --reparse opencode`); **`mool daemon install`** (launchd / systemd `--user` / Task Scheduler) and a stale-data flag measured from the data, with `daemon.log` rotation (1.27.2) (#74, #75, #78, #76) |
+| **Shipped** | v1.28 | **One local day** (`[user] timezone`, DST-aware) for digests, the workspace rollup and the portfolio, plus the delivery of a time window; OpenCode timestamps in UTC; observe robustness: streaming reads, a per-event full-text cap, self-pruning backups, old data stored as history on any path, provider entry ids (1.28.1) (#81, #79, #52, #54, #62, #67) |
+| **Shipped** | v1.29 | **Per-PR stats** (+/-, changed files, closed issues as `owner/repo#n`) and `mool repo backfill-pr-stats`; `daemon stop` waits for the process to exit, shutdown under a second (1.29.1) (#80, #96) |
+| **Shipped** | v1.30 | **Board repos** (issues-only backlogs, MCP `get_board_issues`), **remote-only repos** (`repo add --remote`, `--owner`) with identity by GitHub id, owner aliases, a shared client registry and excluded repos (#93, #94, #95) |
+| **Shipped** | v1.31 | **Versioned snapshot export** (`mool snapshot export`, MCP `get_snapshot`, [`docs/schema/snapshot.v1.md`](docs/schema/snapshot.v1.md)); outage days re-dated; every module logs under `hub.*` and `daemon start` waits out a slow start (1.31.1–1.31.2) (#82, #101, #107, #108, #111) |
+| **Shipped** | v1.32 | **Days worked:** the production strip counts a session on every local day it worked a project (#114) |
+| **Shipped** | v1.33 | Active branch of tree sessions in `mool export` and the MCP session events; `mool mcp setup antigravity`; `.git` reads never trigger cloud downloads; orphan workspaces pruned; Codex attribution fixes (#67, #77, #52, #46, #47, #48, #49) |
+| **Shipped** | v1.34 | Days worked next to touches in the rollup views; Qwen active branch; parallel tool results visible again (1.34.1); an outage catch-up counts on its own day and `mool export` is complete (1.34.2); migrations logged in `hub.log` (1.34.3) (#122, #123, #127, #131, #132, #130, #136) |
+| **Shipped** | v1.35 | **Per-contributor breakdown, opt-in** (`[team]`) in the portfolio and digests; **Antigravity desktop app / IDE** read too (#83, #77) |
+| **Shipped** | v1.36 | **Device identity and per-device effort export**, opt-in and deny-by-default (`mool device`, `mool effort export`, [`docs/schema/effort.v1.md`](docs/schema/effort.v1.md)); the snapshot always names its zone (1.36.1) (#140, #146) |
+| **Next** | — | **mool-ops engine**, a companion package in its own repo that reads MoolMesh only through `mool snapshot export` and `mool effort export` (#84). The container split (#30) was closed as won't-do for now. Org-scale team visibility stays deferred to `v2.x`; core offers only the opt-in `[team]` breakdown. |
 | **Future** | v2.x | Workspace Phase D (cross-machine, opt-in); autonomous agents; org-scale observability |
 
 See [ROADMAP.md](ROADMAP.md) for detailed plans, open questions, and design principles.
