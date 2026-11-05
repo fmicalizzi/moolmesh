@@ -2404,7 +2404,7 @@ def cmd_snapshot_export(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(text)
     if not snap["freshness"]["complete"]:
-        print("aviso: el período no está cubierto por el último sync "
+        print("warning: the last sync does not cover the period "
               "(freshness.complete = false)", file=sys.stderr)
     return 0
 
@@ -2446,15 +2446,15 @@ def cmd_effort_export(args: argparse.Namespace) -> int:
     base = Path.home() / ".moolmesh"
 
     def warn(msg: str) -> None:
-        print(f"aviso: {msg}", file=sys.stderr)
+        print(f"warning: {msg}", file=sys.stderr)
 
     try:
         repos = read_repo_list(args.repo, args.repos_from)
         if not repos:
             raise EffortError(
                 "no_repo_list",
-                "falta la lista de repos: pasá --repo OWNER/NAME (repetible) o "
-                "--repos-from ARCHIVO. Sin lista no se exporta nada.")
+                "missing repo list: pass --repo OWNER/NAME (repeatable) or "
+                "--repos-from FILE. Without a list nothing is exported.")
         device = load_device()
         doc = build_effort(
             events_db=base / "events.db", workspace_db=base / "workspace.db",
@@ -2470,8 +2470,8 @@ def cmd_effort_export(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(text)
     if doc["stale"]:
-        warn("los datos del daemon no cubren todo el período (stale = true); "
-             "re-exportá cuando se ponga al día")
+        warn("the daemon's data does not cover the whole period (stale = true); "
+             "export again once it catches up")
     return 0
 
 

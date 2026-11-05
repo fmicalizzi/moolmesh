@@ -363,7 +363,7 @@ class TestCrossRepoAndBots:
             with pytest.raises(SnapshotError) as exc:
                 _snap(cross_db, repo="acme/widget-services", config=cfg)
             assert exc.value.reason == "not_registered"
-            assert str(exc.value) == "repo no registrado: acme/widget-services"
+            assert str(exc.value) == "repo not registered: acme/widget-services"
 
     def test_bad_args(self, cross_db, tmp_path):
         for kw in ({"repo": "acme"}, {"since": "2026-11-05", "until": "2026-11-01"},
@@ -434,7 +434,7 @@ class TestCli:
 
     def test_unregistered_exit_1(self, home):
         r = _cli(home, "--repo", "acme/nope", "--since", "2026-11-02", "--until", "2026-11-02")
-        assert r.returncode == 1 and "no registrado" in r.stderr
+        assert r.returncode == 1 and "not registered" in r.stderr
 
 
 class TestMcp:

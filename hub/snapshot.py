@@ -75,7 +75,7 @@ def _parse_day(value: str, name: str) -> str:
         return date.fromisoformat(str(value).strip()).isoformat()
     except ValueError:
         raise SnapshotError("bad_args",
-                            f"--{name} debe ser una fecha YYYY-MM-DD (recibí {value!r})"
+                            f"--{name} must be a date YYYY-MM-DD (got {value!r})"
                             ) from None
 
 
@@ -108,14 +108,14 @@ def _load(github_db: str | Path, owner: str, name: str):
     """Repo row, its issues/PR rows and PR stats, read-only."""
     if not os.path.exists(github_db):
         raise SnapshotError("no_data",
-                            "no existe github.db — registrá un repo con mool repo add")
+                            "github.db does not exist: register a repo with mool repo add")
     from hub.sqlite_ro import connect_ro
     conn = connect_ro(github_db)
     conn.row_factory = sqlite3.Row
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(repos)")}
         if not cols:
-            raise SnapshotError("not_registered", f"repo no registrado: {owner}/{name}")
+            raise SnapshotError("not_registered", f"repo not registered: {owner}/{name}")
         kind = "kind" if "kind" in cols else "'code'"
         gid = "github_id" if "github_id" in cols else "NULL"
         sync = "last_github_sync_at" if "last_github_sync_at" in cols else "NULL"
@@ -125,7 +125,7 @@ def _load(github_db: str | Path, owner: str, name: str):
             " WHERE lower(owner) = lower(?) AND lower(repo_name) = lower(?)"
             " ORDER BY id LIMIT 1", (owner, name)).fetchone()
         if repo is None:
-            raise SnapshotError("not_registered", f"repo no registrado: {owner}/{name}")
+            raise SnapshotError("not_registered", f"repo not registered: {owner}/{name}")
         rows = conn.execute(
             """SELECT number, title, state, author, created_at, closed_at,
                       COALESCE(is_pull_request, 0) AS is_pr, pr_merged_at
@@ -146,7 +146,7 @@ def _load(github_db: str | Path, owner: str, name: str):
                 if r[0] in stats:
                     stats[r[0]]["closes"].append(f"{r[1]}#{r[2]}")
     except sqlite3.OperationalError as exc:
-        raise SnapshotError("no_data", f"github.db sin datos de GitHub todavía ({exc})") from None
+        raise SnapshotError("no_data", f"github.db has no GitHub data yet ({exc})") from None
     finally:
         conn.close()
     return dict(repo), [dict(r) for r in rows], stats
@@ -170,18 +170,18 @@ def build_snapshot(
     """
     parts = str(repo or "").strip().split("/")
     if len(parts) != 2 or not all(parts):
-        raise SnapshotError("bad_args", f"--repo debe ser OWNER/REPO (recibí {repo!r})")
+        raise SnapshotError("bad_args", f"--repo must be OWNER/REPO (got {repo!r})")
     owner, name = parts
     since = _parse_day(since, "since")
     until = _parse_day(until, "until")
     if since > until:
-        raise SnapshotError("bad_args", f"--since {since} es posterior a --until {until}")
+        raise SnapshotError("bad_args", f"--since {since} is after --until {until}")
     if config is None:
         from hub.config import load_config
         config = load_config()
     if _exclusions(config).matches(owner, name):
         # Confidential (#95): answered exactly like an unknown repo.
-        raise SnapshotError("not_registered", f"repo no registrado: {owner}/{name}")
+        raise SnapshotError("not_registered", f"repo not registered: {owner}/{name}")
 
     zone = localtime.user_timezone() if tz is localtime.CONFIGURED else tz
     row, items, stats = _load(github_db, owner, name)
@@ -196,8 +196,8 @@ def build_snapshot(
         synced = _utc_z(last_sync) if last_sync else None
         raise SnapshotError(
             "incomplete",
-            (f"el último sync de GitHub de {label} ({synced or 'nunca'}) no cubre "
-             f"el período hasta {until}: exportá un rango ya cerrado o pasá "
+            (f"the last GitHub sync of {label} ({synced or 'never'}) does not cover "
+             f"the period up to {until}: export a closed range or pass "
              "--allow-incomplete"),
             last_github_sync_at=synced, until=until)
 

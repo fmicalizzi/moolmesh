@@ -70,7 +70,7 @@ them so a reader never credits them to a person.
 ### Exclusions
 
 A repo excluded through `exclude_owners` / `exclude_repos` (#95) answers
-exactly like an unregistered repo: `repo no registrado`, exit 1.
+exactly like an unregistered repo: `repo not registered`, exit 1.
 
 ## Determinism
 

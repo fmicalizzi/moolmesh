@@ -125,8 +125,8 @@ def init_device(label: str | None = None, *, reset: bool = False,
     path = path or device_path()
     if path.exists() and not reset:
         raise DeviceError(
-            "exists", f"{path} ya existe; usá mool device init --reset para "
-            "reemplazarlo (cambia los ids exportados)")
+            "exists", f"{path} already exists; use mool device init --reset to "
+            "replace it (this changes the exported ids)")
     source, fp = machine_fingerprint()
     data = {
         "format": FORMAT_VERSION,
@@ -145,8 +145,8 @@ def load_device(path: Path | None = None, *, check: bool = True) -> dict[str, An
     path = path or device_path()
     if not path.exists():
         raise DeviceError(
-            "missing", "no hay identidad de dispositivo: corré mool device init "
-            "(opt-in; crea ~/.moolmesh/device.json)")
+            "missing", "no device identity: run mool device init "
+            "(opt-in; creates ~/.moolmesh/device.json)")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         bytes.fromhex(data["secret"])
@@ -154,12 +154,12 @@ def load_device(path: Path | None = None, *, check: bool = True) -> dict[str, An
             raise ValueError("incomplete")
     except (OSError, ValueError, KeyError, TypeError):
         raise DeviceError(
-            "invalid", f"{path} no es un archivo de dispositivo válido: "
-            "corré mool device init --reset") from None
+            "invalid", f"{path} is not a valid device file: "
+            "run mool device init --reset") from None
     if check and not fingerprint_matches(data):
         raise DeviceError(
-            "copied", "device.json no corresponde a esta máquina (¿copiado o "
-            "sincronizado desde otra?): corré mool device init --reset")
+            "copied", "device.json does not belong to this machine (copied or "
+            "synced from another one?): run mool device init --reset")
     return data
 
 

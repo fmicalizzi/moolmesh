@@ -81,7 +81,7 @@ def _parse_day(value: str, name: str) -> str:
         return date.fromisoformat(str(value).strip()).isoformat()
     except ValueError:
         raise EffortError("bad_args",
-                          f"--{name} debe ser una fecha YYYY-MM-DD (recibí {value!r})"
+                          f"--{name} must be a date YYYY-MM-DD (got {value!r})"
                           ) from None
 
 
@@ -90,7 +90,7 @@ def resolve_zone(name: str) -> tzinfo:
     name is an error, never a silent fall back to the machine zone."""
     text = str(name or "").strip()
     if not text:
-        raise EffortError("bad_args", "--timezone es obligatorio (nombre IANA)")
+        raise EffortError("bad_args", "--timezone is required (IANA name)")
     if text.upper() in ("UTC", "ETC/UTC"):
         return timezone.utc
     try:
@@ -98,8 +98,8 @@ def resolve_zone(name: str) -> tzinfo:
         return ZoneInfo(text)
     except (ZoneInfoNotFoundError, ValueError, OSError):
         raise EffortError("bad_args",
-                          f"--timezone {text!r} no es una zona IANA conocida en "
-                          "esta máquina") from None
+                          f"--timezone {text!r} is not an IANA zone known on "
+                          "this machine") from None
 
 
 def read_repo_list(repos: Iterable[str] | None, repos_from: str | None) -> list[str]:
@@ -110,7 +110,7 @@ def read_repo_list(repos: Iterable[str] | None, repos_from: str | None) -> list[
             text = Path(repos_from).read_text(encoding="utf-8")
         except OSError as exc:
             raise EffortError("bad_args",
-                              f"no pude leer --repos-from: {exc.strerror}") from None
+                              f"could not read --repos-from: {exc.strerror}") from None
         for line in text.splitlines():
             line = line.split("#", 1)[0].strip()
             if line:
@@ -124,7 +124,7 @@ def _normalize_repos(specs: list[str]) -> list[tuple[str, str]]:
     for spec in specs:
         parsed = parse_board_slug(spec)
         if parsed is None:
-            raise EffortError("bad_args", f"repo inválido {spec!r}: usá OWNER/NAME")
+            raise EffortError("bad_args", f"invalid repo {spec!r}: use OWNER/NAME")
         seen.setdefault(f"{parsed[0]}/{parsed[1]}".lower(), parsed)
     return [seen[k] for k in sorted(seen)]
 
@@ -141,8 +141,8 @@ def _resolve_repos(github_db: str | Path, listed: list[tuple[str, str]],
     """``{github_id: {repo, path}}`` for the listed repos that can be exported."""
     conn = _ro(github_db)
     if conn is None:
-        raise EffortError("no_data", "no existe github.db — registrá los repos "
-                                     "con mool repo add")
+        raise EffortError("no_data", "github.db does not exist: register the repos "
+                                     "with mool repo add")
     out: dict[int, dict[str, Any]] = {}
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(repos)")}
@@ -150,27 +150,27 @@ def _resolve_repos(github_db: str | Path, listed: list[tuple[str, str]],
         for owner, name in listed:
             spec = f"{owner}/{name}"
             if exclusions.matches(owner, name):
-                warn(f"{spec}: no registrado; se omite")  # #95: same as unknown
+                warn(f"{spec}: not registered; skipped")  # #95: same as unknown
                 continue
             row = conn.execute(
                 f"SELECT owner, repo_name, path, {gid_col} FROM repos"
                 " WHERE lower(owner) = lower(?) AND lower(repo_name) = lower(?)"
                 " ORDER BY id LIMIT 1", (owner, name)).fetchone() if cols else None
             if row is None:
-                warn(f"{spec}: no registrado; se omite")
+                warn(f"{spec}: not registered; skipped")
                 continue
             cur_owner, cur_name, path, gid = row
             if exclusions.matches(cur_owner, cur_name):
-                warn(f"{spec}: no registrado; se omite")
+                warn(f"{spec}: not registered; skipped")
                 continue
             if gid is None:
-                warn(f"{spec}: todavía sin id numérico de GitHub (esperá un sync "
-                     "del daemon o corré mool repo sync); se omite")
+                warn(f"{spec}: no numeric GitHub id yet (wait for a daemon sync "
+                     "or run mool repo sync); skipped")
                 continue
             out.setdefault(int(gid), {"repo": f"{cur_owner}/{cur_name}",
                                       "path": path})
     except sqlite3.Error as exc:
-        raise EffortError("no_data", f"no pude leer github.db ({exc})") from None
+        raise EffortError("no_data", f"could not read github.db ({exc})") from None
     finally:
         conn.close()
     return out
@@ -208,7 +208,7 @@ def _workspace_map(workspace_db: str | Path, targets: dict[int, dict[str, Any]],
             if gid is not None:
                 out[int(wid)] = gid
     except sqlite3.Error as exc:
-        raise EffortError("no_data", f"no pude leer workspace.db ({exc})") from None
+        raise EffortError("no_data", f"could not read workspace.db ({exc})") from None
     finally:
         conn.close()
     return out
@@ -235,7 +235,7 @@ def _edges(workspace_db: str | Path, ws_map: dict[int, int]):
                 target = cwds if via == "cwd" else files
                 target[(sid, prov or "", fp)] = ws_map[wid]
     except sqlite3.Error as exc:
-        raise EffortError("no_data", f"no pude leer workspace.db ({exc})") from None
+        raise EffortError("no_data", f"could not read workspace.db ({exc})") from None
     finally:
         conn.close()
     return files, cwds
@@ -294,7 +294,7 @@ def _count(events_db: str | Path, files, cwds, zone: tzinfo, since: str,
                     s.add(sid)
                     e.add(edge)
     except sqlite3.Error as exc:
-        raise EffortError("no_data", f"no pude leer events.db ({exc})") from None
+        raise EffortError("no_data", f"could not read events.db ({exc})") from None
     finally:
         conn.close()
     return cells
@@ -335,17 +335,17 @@ def build_effort(
 
     warn = warn or (lambda _msg: None)
     if not org_key(org):
-        raise EffortError("bad_args", "--org es obligatorio")
+        raise EffortError("bad_args", "--org is required")
     if not repos:
         raise EffortError(
             "no_repo_list",
-            "falta la lista de repos: pasá --repo OWNER/NAME (repetible) o "
-            "--repos-from ARCHIVO. Sin lista no se exporta nada (deny by default).")
+            "missing repo list: pass --repo OWNER/NAME (repeatable) or "
+            "--repos-from FILE. Without a list nothing is exported (deny by default).")
     zone = resolve_zone(timezone_name)
     since = _parse_day(since, "since")
     until = _parse_day(until, "until")
     if since > until:
-        raise EffortError("bad_args", f"--since {since} es posterior a --until {until}")
+        raise EffortError("bad_args", f"--since {since} is after --until {until}")
     listed = _normalize_repos(repos)
     if config is None:
         config = load_config()
@@ -353,8 +353,8 @@ def build_effort(
 
     targets = _resolve_repos(github_db, listed, exclusions, warn)
     if not targets:
-        raise EffortError("no_repos", "ninguno de los repos listados se puede "
-                                      "exportar (ver avisos)")
+        raise EffortError("no_repos", "none of the listed repos can be "
+                                      "exported (see the warnings)")
     ws_map = _workspace_map(workspace_db, targets, exclusions)
     files, cwds = _edges(workspace_db, ws_map)
     cells = _count(events_db, files, cwds, zone, since, until)
