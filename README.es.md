@@ -226,6 +226,19 @@ worktrees borrados de los que hay evidencia — la entrada del propio repo en
 nunca por el nombre de una carpeta: una carpeta borrada sin esa evidencia queda
 como está. Los conteos van a `hub.log`.
 
+**Scratchpads de agentes y repos descartables.** El scratchpad de un agente se
+pliega en el proyecto de la sesión que lo usó, en macOS
+(`/private/tmp/claude-<uid>/…`), en Linux (`/tmp/claude-<uid>/…`) o bajo otra
+raíz temporal (`$TMPDIR`): cuenta la forma
+`<tmp>/claude-<uid>/<cwd-codificado>/<uuid-de-sesión>/`. Las demás carpetas del
+harness bajo `<tmp>/claude-<uid>/` son herramientas, nunca un proyecto. Un repo
+git sin remoto que un agente creó (`git init`) en un scratchpad se pliega igual
+en el proyecto de la sesión, y uno bajo una raíz temporal del sistema (`/tmp`,
+`/private/tmp`, `/var`, `/private/var`, `/usr`) se muestra como carpeta temporal
+en vez de proyecto. Un repo con remoto se identifica por ese remoto y sigue
+siendo su proyecto donde sea que se haya clonado. No hay nada que configurar; la
+siguiente pasada de clasificación lo aplica.
+
 ---
 
 ## Actualizar

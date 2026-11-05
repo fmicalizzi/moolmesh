@@ -193,3 +193,23 @@ def sample_assistant_dict() -> dict:
         "uuid": "u002",
         "timestamp": "2026-03-15T10:00:02.500Z",
     }
+
+
+# ── Throwaway git repos under temp roots (#161) ──
+#
+# A git repo under an OS temp root is not a project (#161). The suite's own
+# fixture repos live in pytest's temp dir and the throwaway test HOME — both
+# under /tmp (or /private/var/folders on macOS) — and stand for real projects,
+# so those two directories are exempt. Every other temp path keeps the rule;
+# tests/test_portfolio_temp_git.py checks it on synthetic paths.
+@pytest.fixture(autouse=True)
+def _fixture_repos_are_not_temp(monkeypatch, tmp_path_factory):
+    from hub.cache import portfolio_classifier as pc
+
+    exempt = (str(tmp_path_factory.getbasetemp()), TEST_HOME)
+    real = pc.temp_git_root
+
+    def _temp_git_root(root: str) -> bool:
+        return real(root) and not any(pc.is_under(root, e) for e in exempt)
+
+    monkeypatch.setattr(pc, "temp_git_root", _temp_git_root)

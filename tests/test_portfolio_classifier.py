@@ -197,16 +197,20 @@ class TestTempRoots:
         c = _classify("path_hash", dir_path=f"{CLAUDE}/myproj/tmp/out")
         assert c.role == "nest" and c.project_key == f"path_hash:{_hash(f'{CLAUDE}/myproj')}"
 
-    def test_git_repo_in_temp_stays_project(self):
+    def test_git_repo_in_temp_is_temporary(self):
+        # #161 reversed #36's "a git repo is a project wherever it lives" for
+        # remote-less repos: one under an OS temp root is an agent's throwaway.
+        # A git_remote row is keyed by its remote and stays its project.
         c = _classify("git_remote", root_path="/tmp/clone",
                       remote_url="github.com/me/clone")
         assert c.category == "root" and c.role == "project"
         c = _classify("git_root", root_path="/private/tmp/scratch-repo")
-        assert c.category == "root" and c.role == "project"
+        assert (c.subtype, c.role) == ("temporary", "orphan")
 
     def test_gitless_dir_inside_git_repo_in_temp_still_nests(self, tmp_path):
-        # pytest's tmp_path is itself under an OS temp root: a repo there is a
-        # project and its gitless subdirs keep nesting under it.
+        # pytest's tmp_path stands for a real project dir here (conftest
+        # exempts it from the #161 temp rule): its gitless subdirs keep
+        # nesting under the repo.
         repo = _mkrepo(tmp_path, "proj", "git@github.com:me/proj.git")
         (repo / "src").mkdir()
         c = _classify("path_hash", dir_path=str(repo / "src"))

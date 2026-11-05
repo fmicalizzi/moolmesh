@@ -11,7 +11,8 @@ that must never be blindly rebuilt).
 The taxonomy (epic #24), one rule each:
 
   * **A. Harness that encodes a project** — Claude scratchpad
-    (``/private/tmp/claude-*/<encoded>/<uuid>/…``) and session storage
+    (``<tmp>/claude-*/<encoded>/<uuid>/…``: macOS ``/private/tmp``, Linux
+    ``/tmp``, any ``$TMPDIR`` — #161) and session storage
     (``~/.claude/projects/<encoded>/…``). Its name/uuid encodes the *real* cwd,
     so it **collapses** onto that project (its activity folds in at read time).
   * **B. Deep subdir of a real project** — nests under the nearest real
@@ -31,7 +32,8 @@ The taxonomy (epic #24), one rule each:
     ``/workspace``, ``/workspaces/<x>``, ``/usr/src/app``, ``/code``, ``/src``,
     ``/project``) that do not exist on this host — subtype ``container``,
     "contenedor (ruta interna)"; if the path DOES exist it is left alone. Only
-    gitless (``path_hash``) dirs: a git repo is a project wherever it lives.
+    gitless (``path_hash``) dirs here; a remote-less git repo under a temp root
+    or in a scratchpad is an agent's throwaway (#161, ``_throwaway_git``).
     Also D2 (decisión 4c, #36): owner-declared ``reference_containers`` — the
     folder and its children are never projects (subtype ``reference``), matched
     textually so it works even when the folder no longer exists.
@@ -54,6 +56,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 
 from hub.discovery import ProjectDiscovery
@@ -77,9 +80,13 @@ _MATERIALS = {"reportes", "reports", "snapshots", "exports", "export",
               "materials", "material", "dist", "build", "out", "assets",
               "renders", "deliverables"}
 
-# A scratchpad path: /private/tmp/claude-<uid>/<encoded>/<session-uuid>/…
+# A scratchpad path: <tmp>/claude-<uid>/<encoded>/<session-uuid>/… — macOS
+# ``/private/tmp/claude-501/…``, Linux ``/tmp/claude-1000/…``, or any other
+# temp root (``$TMPDIR``, #161). Matched on its shape, not its prefix: a
+# ``claude-<uid>`` dir, then a ``-``-led encoded cwd, then a session uuid — the
+# temp root the harness used may differ from this process's ``$TMPDIR``.
 _SCRATCH = re.compile(
-    r"^/private/tmp/claude-[^/]+/(?P<enc>-[^/]+)/"
+    r"^(?P<tmp>/(?:[^/]+/)*?)claude-[^/]+/(?P<enc>-[^/]+)/"
     r"(?P<uuid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:/|$)"
 )
@@ -124,6 +131,33 @@ def is_temp_path(abspath: str) -> bool:
     """True for a path at or below an OS temp/system root (see ``_TEMP_ROOTS``)."""
     parts = _split(abspath)
     return any(tuple(parts[: len(r)]) == r for r in _TEMP_ROOTS)
+
+
+def _harness_tmp_roots() -> tuple[str, ...]:
+    """Temp roots a harness puts its ``claude-<uid>`` dir under (#161): the
+    macOS and Linux defaults plus this process's ``$TMPDIR``."""
+    roots = {"/tmp", "/private/tmp"}
+    env = os.environ.get("TMPDIR")
+    if env and os.path.isabs(env):
+        roots.add(os.path.normpath(env))
+    roots.add(os.path.normpath(tempfile.gettempdir()))
+    return tuple(sorted(roots))
+
+
+def is_harness_tool_path(abspath: str) -> bool:
+    """True for a path in a harness's ``<tmp>/claude-<uid>`` dir (#161).
+
+    macOS ``/private/tmp/claude-501/…``, Linux ``/tmp/claude-1000/…`` or under
+    ``$TMPDIR``: bundled skills, temp scratch without a session. Never a
+    project. A scratchpad (``_SCRATCH``) is checked first and collapses.
+    """
+    p = config_path(abspath)
+    for root in _harness_tmp_roots():
+        rest = p[len(root):] if is_under(p, root) else ""
+        seg = rest.lstrip("/").split("/", 1)[0]
+        if seg.startswith("claude-") and len(seg) > len("claude-"):
+            return True
+    return False
 
 
 def is_home_library_path(abspath: str, home: str | None) -> bool:
@@ -427,7 +461,17 @@ def classify(
     if reference_paths and d and any(is_under(d, r) for r in reference_paths):
         return _orphan("reference", "reference")
 
-    # 1. Git workspaces are always real project roots.
+    # 1. Git workspaces are real project roots — unless a remote-less repo
+    #    lives in a harness scratchpad or under an OS temp root (#161): an
+    #    agent's throwaway ``git init`` collapses into its session's project,
+    #    or is shown as temporary, like the gitless dirs next to it. A
+    #    ``git_remote`` row is keyed by its remote, not its path: its
+    #    ``root_path`` is only the last checkout seen (maybe a verification
+    #    worktree under /tmp), so it stays the remote's project.
+    if kind == "git_root":
+        throwaway = _throwaway_git(d, session_cwds, enc_index, exists, home)
+        if throwaway is not None:
+            return throwaway
     if kind in ("git_remote", "git_root"):
         label = remote_url or ProjectDiscovery.extract_project_name(root_path or "")
         return Classification("root", "project", "project", _git_key(kind, remote_url, root_path),
@@ -443,9 +487,10 @@ def classify(
             m.group("enc"), m.group("uuid"), session_cwds, enc_index, exists, home
         )
 
-    # 3. Any other /private/tmp/claude-* path is harness *tooling* (bundled
-    #    skills, temp scratch without a session) → D2, never a project.
-    if d.startswith("/private/tmp/claude-"):
+    # 3. Any other <tmp>/claude-* path (macOS, Linux, $TMPDIR — #161) is
+    #    harness *tooling* (bundled skills, temp scratch without a session)
+    #    → D2, never a project.
+    if is_harness_tool_path(d):
         return _orphan("home_config", "tool")
 
     # 4. Harness A — session storage ~/.claude/projects/<encoded>/… (no uuid).
@@ -480,6 +525,12 @@ def classify(
     noise = _noise_of(anchor, d, exists, home)
     if noise:
         return noise
+    # A gitless dir inside a throwaway repo (#161) follows that repo.
+    if anchor.key.startswith("git_root:"):
+        throwaway = _throwaway_git(anchor.path, session_cwds, enc_index,
+                                   exists, home)
+        if throwaway is not None:
+            return throwaway
 
     if os.path.normpath(anchor.path) == os.path.normpath(d):
         return Classification("root", "project", "project", anchor.key,
@@ -492,6 +543,41 @@ def classify(
     if any(seg.lower() in _MATERIALS or seg.lower().endswith("-ops") for seg in rel):
         return Classification("C", "materials", "nest", anchor.key, anchor.label, "materials")
     return Classification("B", "subdir", "nest", anchor.key, anchor.label, "subdir")
+
+
+def _throwaway_git(
+    root: str,
+    session_cwds: dict[str, str],
+    enc_index: dict[str, Anchor],
+    exists=os.path.exists,
+    home: str | None = None,
+) -> Classification | None:
+    """How a remote-less git repo at ``root`` is shown when it is not a
+    project (#161).
+
+    A repo in a harness scratchpad collapses into the session's project (the
+    same resolution as the gitless scratchpad around it); one elsewhere in a
+    harness's ``<tmp>/claude-<uid>`` dir is tooling; one under an OS temp root
+    (``_TEMP_ROOTS``) is ``temporary``. ``None``: a project.
+    """
+    if not root:
+        return None
+    m = _SCRATCH.match(root.rstrip("/") + "/")
+    if m:
+        return _collapse_from_encoded(
+            m.group("enc"), m.group("uuid"), session_cwds, enc_index, exists, home)
+    if is_harness_tool_path(root):
+        return _orphan("home_config", "tool")
+    return _orphan("temporary", "noise") if temp_git_root(root) else None
+
+
+def temp_git_root(root: str) -> bool:
+    """True when a git repo at ``root`` lives under an OS temp root (#161).
+
+    Its own function so the test suite — whose fixture repos live in pytest's
+    temp dir — can exempt that one directory without hiding the rule.
+    """
+    return is_temp_path(root)
 
 
 def _git_key(kind: str, remote_url: str | None, root_path: str | None) -> str:

@@ -224,6 +224,18 @@ has evidence for — the repo's own `.git/worktrees` entry or a
 `git worktree add` a session ran from the repo — never a folder name: a deleted
 folder with no such evidence stays as it is. The counts go to `hub.log`.
 
+**Agent scratchpads and throwaway repos.** An agent's scratchpad folds into the
+project of the session that used it, on macOS (`/private/tmp/claude-<uid>/…`),
+Linux (`/tmp/claude-<uid>/…`) or any other temp root (`$TMPDIR`): the shape
+`<tmp>/claude-<uid>/<encoded-cwd>/<session-uuid>/` is what counts. Other folders
+of the harness under `<tmp>/claude-<uid>/` are tooling, never a project. A git
+repo without a remote that an agent created (`git init`) in a scratchpad folds
+into the session's project the same way, and one under an OS temp root
+(`/tmp`, `/private/tmp`, `/var`, `/private/var`, `/usr`) shows as a temporary
+folder instead of a project. A repo with a remote is keyed by that remote and
+stays its project wherever it was checked out. Nothing to configure; the next
+classification pass applies it.
+
 ---
 
 ## Updating
