@@ -222,6 +222,9 @@ commit, check each one against this list:
 - [ ] `AGENTS.md` §9 and `CLAUDE.md` — no pinned version or test count that
       goes stale (point to `pyproject.toml`, or state the baseline with the
       version it belongs to).
+- [ ] `docs/index.html` — the static fallback version (`ver-display`, shown
+      when the page cannot reach PyPI) and the agents list; CI syncs only the
+      test count there.
 - [ ] Every command the docs mention exists: `PYTHONPATH=. python -m hub.cli
       <cmd> --help` with a throwaway `HOME`.
 
