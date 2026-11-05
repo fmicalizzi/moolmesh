@@ -180,3 +180,66 @@ def format_age(seconds: int | None) -> str:
     if seconds >= 60:
         return f"{seconds // 60}m"
     return f"{seconds}s"
+
+
+def effort_data_through(events_db: str | Path, workspace_db: str | Path) -> float | None:
+    """Epoch up to which the daemon's own record says session data is complete.
+
+    Used by ``mool effort export`` (#140). Two of the daemon's records bound it:
+
+    - the watchers' heartbeat (``events.db`` ``watcher_state``, #45): the
+      newest ``last_cycle_at``. A watcher only advances it once its startup
+      catch-up is drained, so during an outage — and until the catch-up of it
+      finishes — it stays at the last cycle before the gap. Without any
+      heartbeat (only DB-tailing providers), the newest ingest is used;
+    - the attribution cursor (``workspace.db``): events not yet attributed to
+      a workspace are not in the export, so a cursor behind ``MAX(events.id)``
+      caps it at the ingest time of the first unattributed event.
+
+    ``None`` when nothing is known. Both DBs are opened ``mode=ro``.
+    """
+    heartbeat: float | None = None
+    max_id: int | None = None
+    first_pending: float | None = None
+    cursor = 0
+    try:
+        conn = _connect_ro(workspace_db)
+    except sqlite3.Error:
+        conn = None
+    if conn is not None:
+        try:
+            row = conn.execute(
+                "SELECT last_event_id FROM attribution_cursors WHERE source = 'events'"
+            ).fetchone()
+            cursor = int(row[0]) if row else 0
+        except sqlite3.Error:
+            cursor = 0
+        finally:
+            conn.close()
+    try:
+        conn = _connect_ro(events_db)
+    except sqlite3.Error:
+        return None
+    if conn is None:
+        return None
+    try:
+        try:
+            row = conn.execute("SELECT MAX(last_cycle_at) FROM watcher_state").fetchone()
+            heartbeat = float(row[0]) if row and row[0] is not None else None
+        except sqlite3.Error:
+            heartbeat = None
+        row = conn.execute("SELECT MAX(id) FROM events").fetchone()
+        max_id = row[0] if row else None
+        if max_id is not None and cursor < max_id:
+            row = conn.execute(
+                "SELECT created_at FROM events WHERE id > ? ORDER BY id LIMIT 1",
+                (cursor,)).fetchone()
+            first_pending = _parse_ts(row[0]) if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if heartbeat is None:
+        heartbeat = _last_ingest(events_db)
+    bounds = [t for t in (heartbeat, first_pending) if t is not None]
+    return min(bounds) if bounds else None

@@ -2115,6 +2115,49 @@ def main() -> None:
                              help="Export a range the last sync does not cover "
                                   "(marked freshness.complete = false)")
 
+    # device identity + effort export (#140)
+    dev_parser = subparsers.add_parser(
+        "device", help="Opt-in device identity for the effort export")
+    dev_sub = dev_parser.add_subparsers(dest="device_command")
+    dev_init = dev_sub.add_parser(
+        "init", help="Create ~/.moolmesh/device.json (random secret, mode 600)",
+        description="Creates ~/.moolmesh/device.json: a random local secret "
+                    "(never exported), an optional label and a hash of this "
+                    "machine's identifier. Exports carry HMAC(secret, org), "
+                    "a different id per organization. Keep the file out of "
+                    "dotfile sync.")
+    dev_init.add_argument("--label", metavar="TEXT",
+                          help="Optional label shown in exports (e.g. laptop)")
+    dev_init.add_argument("--reset", action="store_true",
+                          help="Replace an existing file (new secret = new ids)")
+    dev_show = dev_sub.add_parser(
+        "show", help="Show the label, per-org ids and whether the file "
+                     "belongs to this machine (never the secret)")
+    dev_show.add_argument("--org", action="append", default=[], metavar="ORG",
+                          help="Print the exported id for ORG (repeatable)")
+
+    effort_parser = subparsers.add_parser(
+        "effort", help="Per-device effort export for an organization (JSON)")
+    effort_sub = effort_parser.add_subparsers(dest="effort_command")
+    eff_export = effort_sub.add_parser(
+        "export", help="Export sessions/touches per repo, local day and provider",
+        description="One row per (repo, day, provider) for the LISTED repos "
+                    "only (docs/schema/effort.v1.md). Refuses without a repo "
+                    "list or without mool device init. Days are local days in "
+                    "--timezone. Read-only; no GitHub API calls.")
+    eff_export.add_argument("--org", required=True, metavar="ORG")
+    eff_export.add_argument("--timezone", required=True, metavar="IANA",
+                            help="Zone that defines the day (the org's, "
+                                 "not this machine's)")
+    eff_export.add_argument("--since", required=True, metavar="YYYY-MM-DD")
+    eff_export.add_argument("--until", required=True, metavar="YYYY-MM-DD")
+    eff_export.add_argument("--repo", action="append", default=[],
+                            metavar="OWNER/NAME", help="Repo to include (repeatable)")
+    eff_export.add_argument("--repos-from", dest="repos_from", metavar="FILE",
+                            help="File with one OWNER/NAME per line (# comments)")
+    eff_export.add_argument("--output", "-o", metavar="FILE",
+                            help="Write to FILE atomically instead of stdout")
+
     # query (agent-friendly JSON output)
     query_parser = subparsers.add_parser("query", help="Query data as JSON (agent-friendly)")
     query_sub = query_parser.add_subparsers(dest="query_command")
@@ -2311,6 +2354,14 @@ def main() -> None:
             if getattr(args, "snapshot_command", None) == "export":
                 sys.exit(cmd_snapshot_export(args))
             snap_parser.print_help()
+        case "device":
+            if getattr(args, "device_command", None) in ("init", "show"):
+                sys.exit(cmd_device(args))
+            dev_parser.print_help()
+        case "effort":
+            if getattr(args, "effort_command", None) == "export":
+                sys.exit(cmd_effort_export(args))
+            effort_parser.print_help()
         case "workspace":
             cmd_workspace(args)
         case "sessions":
@@ -2355,6 +2406,72 @@ def cmd_snapshot_export(args: argparse.Namespace) -> int:
     if not snap["freshness"]["complete"]:
         print("aviso: el período no está cubierto por el último sync "
               "(freshness.complete = false)", file=sys.stderr)
+    return 0
+
+
+def cmd_device(args: argparse.Namespace) -> int:
+    """``mool device init|show`` (#140). Never prints the secret."""
+    from hub.device import (DeviceError, device_id, device_path,
+                            fingerprint_matches, init_device, load_device, org_key)
+
+    path = device_path()
+    try:
+        if args.device_command == "init":
+            data = init_device(args.label, reset=args.reset)
+            print(f"identidad de dispositivo creada en {path} (permisos 600)")
+            print(f"  etiqueta: {data['label'] or '(sin etiqueta)'}")
+            print("  no la sincronices entre máquinas: una copia se detecta y "
+                  "el export la rechaza")
+            return 0
+        data = load_device(check=False)
+    except DeviceError as exc:
+        print(f"mool device: {exc}", file=sys.stderr)
+        return exc.exit_code
+    match = fingerprint_matches(data)
+    print(f"archivo:   {path}")
+    print(f"etiqueta:  {data.get('label') or '(sin etiqueta)'}")
+    print(f"creado:    {data.get('created_at') or '?'}")
+    print(f"máquina:   {'coincide' if match else 'NO coincide (corré mool device init --reset)'}")
+    for org in args.org:
+        print(f"id {org_key(org)}: {device_id(data['secret'], org)}")
+    return 0 if match else 3
+
+
+def cmd_effort_export(args: argparse.Namespace) -> int:
+    """``mool effort export`` (#140): stdout or an atomic --output file."""
+    from hub.device import DeviceError, load_device
+    from hub.effort import EffortError, build_effort, dumps, read_repo_list
+    from hub.snapshot import write_atomic
+
+    base = Path.home() / ".moolmesh"
+
+    def warn(msg: str) -> None:
+        print(f"aviso: {msg}", file=sys.stderr)
+
+    try:
+        repos = read_repo_list(args.repo, args.repos_from)
+        if not repos:
+            raise EffortError(
+                "no_repo_list",
+                "falta la lista de repos: pasá --repo OWNER/NAME (repetible) o "
+                "--repos-from ARCHIVO. Sin lista no se exporta nada.")
+        device = load_device()
+        doc = build_effort(
+            events_db=base / "events.db", workspace_db=base / "workspace.db",
+            github_db=base / "github.db", org=args.org,
+            timezone_name=args.timezone, since=args.since, until=args.until,
+            repos=repos, device=device, warn=warn)
+    except (EffortError, DeviceError) as exc:
+        print(f"mool effort export: {exc}", file=sys.stderr)
+        return exc.exit_code
+    text = dumps(doc)
+    if args.output:
+        write_atomic(args.output, text)
+    else:
+        sys.stdout.write(text)
+    if doc["stale"]:
+        warn("los datos del daemon no cubren todo el período (stale = true); "
+             "re-exportá cuando se ponga al día")
     return 0
 
 
