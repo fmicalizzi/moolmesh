@@ -6,6 +6,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.34.2] — 2026-11-05
+
+Two fixes. No new dependencies. One additive workspace.db migration that only
+schedules a one-time recalculation (with a backup first).
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- On the next attribution cycle MoolMesh backs up `workspace.db`
+  (`~/.moolmesh/backups/workspace-<date>.db`) and recalculates the edge clocks
+  and days worked once; `daemon.log` shows `atribución: días activos
+  recalculados — …`.
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Fixed
+- **The day before a restart stayed empty** (#131): after an outage, the
+  daemon catches up just after midnight and stores the previous evening's
+  events as live rows (each is under 12 h old). Live rows were dated by ingest
+  time, so that evening counted on the restart day in the production strip
+  and days worked. A live event now counts on its own time when it lies within
+  the 12 h live window before its ingest; older replays of resumed sessions
+  (#18) and future timestamps keep the ingest time. Existing data is
+  re-derived once (workspace.db migration 7).
+- **`mool export` was incomplete** (#132): `--format json` ignored `--output`
+  (it printed to stdout and wrote no file), and both formats stopped silently
+  at 500 events. The export now writes JSON to `--output` and includes every
+  event. The MCP `get_session_events` keeps its paginated 500-event page.
+
+---
+
 ## [1.34.1] — 2026-11-04
 
 One fix to the active-branch view of v1.33.0. No new dependencies, no

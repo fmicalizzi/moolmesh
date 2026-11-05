@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.34.1
+Last updated: November 2026 — v1.34.2
 
 ---
 
@@ -248,6 +248,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.34.0** ([#122](https://github.com/fmicalizzi/moolmesh/issues/122), [#123](https://github.com/fmicalizzi/moolmesh/issues/123)): explicit marker for per-directory extra events (Codex, Pi); Qwen active branch; days worked next to touches in the rollup views.
 
 - **v1.34.1** ([#127](https://github.com/fmicalizzi/moolmesh/issues/127)): the active-branch view no longer hides parallel tool results of Claude and Qwen sessions.
+
+- **v1.34.2** ([#131](https://github.com/fmicalizzi/moolmesh/issues/131), [#132](https://github.com/fmicalizzi/moolmesh/issues/132)): an outage catch-up's live rows count on their own day; `mool export` writes JSON to `--output` and never stops at 500 events.
 
 ---
 
