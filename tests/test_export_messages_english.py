@@ -1,4 +1,4 @@
-"""Messages of the snapshot and effort exports stay in English (#156).
+"""Messages of the snapshot and effort exports and of mool device stay in English (#156).
 
 Callers such as the mool-ops engine embed them in their own English output.
 This reads the source, so it also covers the paths that are hard to trigger:
@@ -17,7 +17,7 @@ SPANISH = re.compile(
     r"\b(aviso|avisos|debe|ser|fecha|recib[ií]|registrado|registr[aá]|repos? no|"
     r"todav[ií]a|sin|nunca|obligatorio|falta|lista|pas[aá]|us[aá]|corr[eé]|"
     r"esper[aá]|export[aá]|pude|ninguno|se omite|existe|esta|m[aá]quina|"
-    r"posterior|per[ií]odo|zona|archivo|ya|hay|crea|cubre[n]?|datos)\b",
+    r"posterior|per[ií]odo|zona|archivo|ya|hay|crea|cubre[n]?|datos|etiqueta|creado|identidad|coincide)\b",
     re.IGNORECASE)
 
 
@@ -45,7 +45,8 @@ def _messages(tree):
 def _cli_messages():
     tree = ast.parse((HUB / "cli.py").read_text(encoding="utf-8"))
     for fn in ast.walk(tree):
-        if isinstance(fn, ast.FunctionDef) and fn.name in ("cmd_snapshot_export", "cmd_effort_export"):
+        if isinstance(fn, ast.FunctionDef) and fn.name in ("cmd_snapshot_export", "cmd_effort_export",
+                                                         "cmd_device"):
             yield from _messages(fn)
             for n in ast.walk(fn):
                 if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "print":
@@ -64,7 +65,7 @@ class ExportMessagesAreEnglish(unittest.TestCase):
         text = " ".join(_all_messages())
         self.assertGreater(len(_all_messages()), 25)
         for known in ("repo not registered", "--timezone is required", "no device identity",
-                      "warning: ", "the last sync does not cover"):
+                      "warning: ", "the last sync does not cover", "device identity created"):
             self.assertIn(known, text)
 
     def test_ascii_and_no_spanish_words(self):
@@ -74,5 +75,5 @@ class ExportMessagesAreEnglish(unittest.TestCase):
 
     def test_the_word_list_catches_what_this_issue_fixed(self):
         for old in ("repo no registrado: x", "--org es obligatorio", "no pude leer github.db",
-                    "falta la lista de repos", "aviso: x"):
+                    "falta la lista de repos", "aviso: x", "etiqueta: x", "coincide"):
             self.assertIsNotNone(SPANISH.search(old), old)

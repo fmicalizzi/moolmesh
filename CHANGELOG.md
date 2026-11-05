@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **`mool device init` and `mool device show` print in English** (#156 follow-up), like the rest of the CLI. In `show`, the labels are now `file`, `label`, `created` and `machine`. Exit codes and the `id` lines do not change.
+
+---
+
 ## [1.36.4] — 2026-11-05
 
 One fix. No new dependencies and no migrations.

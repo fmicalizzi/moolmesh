@@ -2418,20 +2418,20 @@ def cmd_device(args: argparse.Namespace) -> int:
     try:
         if args.device_command == "init":
             data = init_device(args.label, reset=args.reset)
-            print(f"identidad de dispositivo creada en {path} (permisos 600)")
-            print(f"  etiqueta: {data['label'] or '(sin etiqueta)'}")
-            print("  no la sincronices entre máquinas: una copia se detecta y "
-                  "el export la rechaza")
+            print(f"device identity created at {path} (mode 600)")
+            print(f"  label: {data['label'] or '(no label)'}")
+            print("  do not sync it between machines: a copy is detected and "
+                  "the export refuses it")
             return 0
         data = load_device(check=False)
     except DeviceError as exc:
         print(f"mool device: {exc}", file=sys.stderr)
         return exc.exit_code
     match = fingerprint_matches(data)
-    print(f"archivo:   {path}")
-    print(f"etiqueta:  {data.get('label') or '(sin etiqueta)'}")
-    print(f"creado:    {data.get('created_at') or '?'}")
-    print(f"máquina:   {'coincide' if match else 'NO coincide (corré mool device init --reset)'}")
+    print(f"file:      {path}")
+    print(f"label:     {data.get('label') or '(no label)'}")
+    print(f"created:   {data.get('created_at') or '?'}")
+    print(f"machine:   {'matches' if match else 'does NOT match (run mool device init --reset)'}")
     for org in args.org:
         print(f"id {org_key(org)}: {device_id(data['secret'], org)}")
     return 0 if match else 3

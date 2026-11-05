@@ -440,7 +440,7 @@ def test_cli_init_show_and_export_to_file(world, monkeypatch, capsys):
     capsys.readouterr()
     assert _run_cli(monkeypatch, home, "device", "show", "--org", "acme-dev") == 0
     shown = capsys.readouterr().out
-    assert "laptop" in shown and "coincide" in shown and secret not in shown
+    assert "laptop" in shown and "matches" in shown and secret not in shown
     assert devmod.device_id(secret, "acme-dev") in shown
 
     repos = world.tmp / "repos.txt"
