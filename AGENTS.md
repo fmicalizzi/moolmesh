@@ -8,7 +8,8 @@ repository. Read it before making changes. It is the single source of truth for
 
 ## 0. Golden rule
 
-**This repository (`moolmesh`) IS the live product.** v1.27.x, published to PyPI
+**This repository (`moolmesh`) IS the live product.** v1.x (the exact version is
+in `pyproject.toml`), published to PyPI
 (`pip install moolmesh`), remote `github.com/fmicalizzi/moolmesh`, CI in
 `publish.yml`. Any older `ai_session_hub` / `live-monitor` tree elsewhere on disk
 is a historical predecessor — never analyze, verify, or plan against it. Everything
@@ -121,11 +122,14 @@ hub/
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"          # dev extra = pytest
-pytest -q                         # full suite — keep it green (1848 passed / 8 skipped at v1.27.1)
+pytest -q                         # full suite — keep it green (see the baseline below)
 mool --help                       # run the CLI
 ```
 
-- Every change keeps the suite green. New behavior ships with tests.
+- Every change keeps the suite green. New behavior ships with tests. Baseline
+  at v1.36.1: 2409 passed / 8 skipped with the privacy denylist, 2408 / 9
+  without it. The count only grows; the badge and the README line are synced
+  by CI on each release.
 - **Isolate HOME.** Tests and manual runs of the branch code use
   `HOME="<tmp>/home"`: a run against the real `~/.moolmesh` can migrate the live
   DBs. The suite is safe with the real HOME today, but anything you run by hand
@@ -182,7 +186,8 @@ that specific version.
    when possible.
 2. A release commit on top: bump `version` in `pyproject.toml` (single source;
    `hub/__init__.py` reads it via `importlib.metadata`), add the `CHANGELOG.md`
-   entry (with upgrade notes) and update `ROADMAP.md`.
+   entry (with upgrade notes) and update `ROADMAP.md`. Run the
+   documentation checklist below first.
 3. With the authorization: fast-forward `main` to that commit and push **only**
    `main` (no `--tags`, no `--force`), then **one** `gh release create vX.Y.Z
    --target <sha>`. CI publishes to PyPI and pushes the asset-sync commit.
@@ -194,6 +199,31 @@ that specific version.
 6. Users upgrade with `pipx upgrade moolmesh --pip-args=--no-cache-dir` (pip's
    HTTP cache can serve a stale index), then `mool daemon restart`, then restart
    open agent sessions so their MCP servers load the new code.
+
+### Documentation checklist (every release)
+
+**A user-visible change without its documentation does not ship.** A
+user-visible change is any new or changed command, flag, config key, endpoint,
+MCP tool, output field, exit code, default, or upgrade step. Before the release
+commit, check each one against this list:
+
+- [ ] `README.md` — the feature where a user looks for it, the **CLI Reference**
+      block (checked against the real `mool <cmd> --help`), the MCP tools table,
+      the **Updating** section if the upgrade needs an action, and a row in the
+      **Roadmap** table for a new minor.
+- [ ] `README.es.md` — the same change, in the same section. Same structure as
+      `README.md`, section by section (parity, not a summary).
+- [ ] `CHANGELOG.md` — the entry, with upgrade notes.
+- [ ] `ROADMAP.md` — the version line under Delivered; `Last updated`.
+- [ ] `docs/PROVIDERS.md` — if a provider's paths, format or limits changed.
+- [ ] `docs/schema/` — if an export contract changed (and its `schema_version`).
+- [ ] `VISION_ROADMAP.md` / `.es.md` — only if a rung, phase or owner decision
+      changed state.
+- [ ] `AGENTS.md` §9 and `CLAUDE.md` — no pinned version or test count that
+      goes stale (point to `pyproject.toml`, or state the baseline with the
+      version it belongs to).
+- [ ] Every command the docs mention exists: `PYTHONPATH=. python -m hub.cli
+      <cmd> --help` with a throwaway `HOME`.
 
 ---
 
@@ -237,24 +267,24 @@ real data stay outside the repo (`~/.moolmesh/reports/`, chmod 600).
 
 ---
 
-## 9. Current priorities (snapshot, 2026-11-04 — v1.27.1)
+## 9. Current priorities (snapshot, 2026-11-05 — v1.36.x)
 
-1. **v1.27.2 — [#76](https://github.com/fmicalizzi/moolmesh/issues/76):**
-   `mool daemon install` (launchd / systemd `--user` / Task Scheduler), a
-   stale-data flag measured from the data, and `daemon.log` growth. Two real
-   outages so far went unnoticed for days.
-2. **Operations tracking — [#84](https://github.com/fmicalizzi/moolmesh/issues/84)**
-   (design kit in [`docs/proposals/mool-ops/`](docs/proposals/mool-ops/DECISIONS.md)):
-   core gaps [#81](https://github.com/fmicalizzi/moolmesh/issues/81) (local day,
-   with #79), [#80](https://github.com/fmicalizzi/moolmesh/issues/80) (PR stats),
-   [#82](https://github.com/fmicalizzi/moolmesh/issues/82) (versioned export);
-   decision [#83](https://github.com/fmicalizzi/moolmesh/issues/83); the engine
-   is a companion package.
-3. **Robustness:** [#52](https://github.com/fmicalizzi/moolmesh/issues/52),
-   [#54](https://github.com/fmicalizzi/moolmesh/issues/54),
-   [#62](https://github.com/fmicalizzi/moolmesh/issues/62),
-   [#67](https://github.com/fmicalizzi/moolmesh/issues/67).
-4. Lower: #77 (Antigravity follow-ups), #79, #46–#49.
+This section is a dated snapshot; `gh issue list` is the live source.
+
+1. **Operations tracking — [#84](https://github.com/fmicalizzi/moolmesh/issues/84):
+   the core is complete.** Every core gap of the design kit
+   ([`docs/proposals/mool-ops/`](docs/proposals/mool-ops/DECISIONS.md)) shipped
+   between v1.27.2 and v1.36.1: stale-data flag + autostart (#76), local day
+   (#81, #79), per-PR stats (#80), board / remote-only repos and clients across
+   owners (#93, #94, #95), versioned snapshot export (#82, #146), per-contributor
+   breakdown (#83) and per-device effort export (#140).
+2. **The engine lives outside core**, in `fmicalizzi/mool-ops` (a separate repo,
+   private until its first release). It reads MoolMesh only through
+   `mool snapshot export` and `mool effort export` (contracts in
+   `docs/schema/`), never its SQLite files. Changes it needs from core arrive
+   here as issues; a contract change bumps the schema version.
+3. **Open in GitHub:** only the #84 tracking issue at this snapshot. New work
+   starts from an issue (see `CONTRIBUTING.md`).
 
 Provider expansion and synchronous-coordination direction are owner decisions
-tracked in `VISION_ROADMAP.md` §8.
+tracked in `VISION_ROADMAP.md` §9.
