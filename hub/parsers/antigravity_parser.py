@@ -1,7 +1,10 @@
-"""Parser for Antigravity CLI (``agy``) conversations.
+"""Parser for Antigravity conversations (CLI ``agy``, desktop app / IDE).
 
 The CLI keeps its data under ``~/.gemini/antigravity-cli`` (``$ANTIGRAVITY_APP_DATA_DIR``
-when set). Two files are read, both strictly read-only:
+when set); the desktop app (Antigravity 2.0) and the IDE keep the same layout
+under ``~/.gemini/antigravity`` (#77). Every base that exists is read
+(``default_antigravity_bases``). Two files per base are read, both strictly
+read-only:
 
 * ``brain/<conversation-uuid>/.system_generated/logs/transcript.jsonl`` — one
   JSON step per line (``step_index``, ``type``, ``source``, ``status``,
@@ -10,7 +13,8 @@ when set). Two files are read, both strictly read-only:
   and a resumed conversation keeps appending to the same file.
 * ``conversation_summaries.db`` — a SQLite index (``PRAGMA user_version = 3``)
   shared by every Antigravity surface. Only session metadata is read from it
-  (title, workspace, parent conversation), filtered to the CLI's own rows.
+  (title, workspace, parent conversation), filtered to the rows of the base
+  being read (its ``app_data_dir``).
 
 The per-conversation ``conversations/<uuid>.db`` files (SQLite WAL + protobuf)
 are never opened.
@@ -79,6 +83,27 @@ def default_antigravity_base() -> Path:
     if env:
         return Path(os.path.expanduser(env))
     return Path.home() / ".gemini" / "antigravity-cli"
+
+
+def default_desktop_base() -> Path:
+    """The desktop app's (Antigravity 2.0) and the IDE's data dir: ``~/.gemini/antigravity``."""
+    return Path.home() / ".gemini" / "antigravity"
+
+
+def default_antigravity_bases() -> list[Path]:
+    """Every Antigravity data dir to read, in precedence order (#77).
+
+    The CLI's (``default_antigravity_base``, which ``$ANTIGRAVITY_APP_DATA_DIR``
+    replaces) first, then the desktop app / IDE one. A conversation found in
+    two bases is ingested once, from the first. Bases that do not exist are
+    returned too: callers skip them without noise, and one created later is
+    picked up on the next rescan.
+    """
+    bases = [default_antigravity_base()]
+    desktop = default_desktop_base()
+    if desktop not in bases:
+        bases.append(desktop)
+    return bases
 
 
 def conversation_id_from_path(path: Path) -> str:
@@ -169,7 +194,7 @@ def workspace_uri_to_path(uri: Any) -> str:
 
 
 def _same_app_dir(value: Any, base: Path) -> bool:
-    """Is a summaries ``app_data_dir`` this CLI's own data dir?
+    """Is a summaries ``app_data_dir`` the data dir of ``base``?
 
     The index is shared by every Antigravity surface and stores the app dir as
     a *name* relative to ``~/.gemini`` (``antigravity-cli`` for the CLI,
@@ -286,7 +311,7 @@ class AntigravityParser(BaseParser):
     # ── session metadata (conversation_summaries.db) ─────────────
 
     def read_summaries(self, base: Path) -> dict[str, AntigravitySummary] | None:
-        """The CLI's rows of ``conversation_summaries.db`` keyed by conversation id.
+        """``base``'s own rows of ``conversation_summaries.db`` keyed by conversation id.
 
         None when the index is absent, unreadable (locked, corrupt, another
         schema) or of an unknown ``user_version``: the caller keeps its last
@@ -336,7 +361,7 @@ class AntigravityParser(BaseParser):
             if not isinstance(cid, str) or not cid:
                 continue
             if not _same_app_dir(app_dir, base):
-                continue  # another Antigravity surface (desktop app, IDE)
+                continue  # another Antigravity surface (read from its own base)
             out[cid] = AntigravitySummary(
                 conversation_id=cid,
                 title=_s(title).strip(),

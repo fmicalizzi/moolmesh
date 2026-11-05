@@ -1,4 +1,4 @@
-"""Antigravity CLI harvester — reads ``transcript.jsonl`` files and stores events atomically."""
+"""Antigravity harvester (CLI, desktop app / IDE) — reads ``transcript.jsonl`` files and stores events atomically."""
 
 from __future__ import annotations
 
@@ -10,22 +10,28 @@ from hub.adapters.antigravity_adapter import AntigravityAdapter
 from hub.cache.event_store import EventStore
 from hub.discovery import ProjectDiscovery
 from hub.models.antigravity import AntigravityEntry, AntigravitySummary
-from hub.parsers.antigravity_parser import AntigravityParser, default_antigravity_base
+from hub.parsers.antigravity_parser import AntigravityParser, default_antigravity_bases
 from hub.watchers.base import BaseHarvester
 
 
 class AntigravityWatcher(BaseHarvester):
-    """Harvests Antigravity CLI conversations into EventStore.
+    """Harvests Antigravity conversations into EventStore.
+
+    Every surface's data dir is read (#77): the CLI's and the desktop app /
+    IDE one (``default_antigravity_bases``), each with the same layout. A
+    conversation found in two of them is ingested once, from the first.
 
     One file per conversation (``brain/<uuid>/.system_generated/logs/transcript.jsonl``),
     all named alike, so the offset is keyed by ``antigravity:<path>``
     (``STABLE_KEY``): the path is stable per conversation, a content
     fingerprint of the first KB is not needed.
 
-    Session metadata (title, workspace, parent conversation) comes from
-    ``conversation_summaries.db``. It is read once per rescan, not per poll,
-    and the last good answer is kept: a locked, absent or unknown-version
-    index never stops the transcripts from being ingested (#52).
+    Session metadata (title, workspace, parent conversation) comes from each
+    base's ``conversation_summaries.db``, filtered to that base's rows. It is
+    read once per rescan, not per poll, and the last good answer is kept per
+    base: a locked, absent or unknown-version index never stops the
+    transcripts from being ingested (#52). The session metadata records which
+    surface (data dir name) a conversation came from.
     """
 
     CATCHUP = True  # startup catch-up after a daemon outage (#45)
@@ -37,31 +43,41 @@ class AntigravityWatcher(BaseHarvester):
         sse_buffer: collections.deque | None = None,
         project_filter: str | None = None,
         antigravity_base: Path | None = None,
+        antigravity_bases: list[Path] | None = None,
     ):
         super().__init__(store, sse_buffer)
         self._project_filter = project_filter
-        self._antigravity_base = antigravity_base
+        self._antigravity_bases = list(antigravity_bases or []) or (
+            [antigravity_base] if antigravity_base else [])
         self._parser = AntigravityParser()
         self._adapter = AntigravityAdapter()
         self._file_projects: dict[Path, str] = {}
+        self._file_surfaces: dict[Path, str] = {}
         self._summaries: dict[str, AntigravitySummary] = {}
+        # Last good index per base (one unreadable index keeps its old rows).
+        self._base_summaries: dict[Path, dict[str, AntigravitySummary]] = {}
 
     @property
     def provider_name(self) -> str:
         return "antigravity"
 
-    def _base(self) -> Path:
+    def _bases(self) -> list[Path]:
         # Resolved per call so ANTIGRAVITY_APP_DATA_DIR changes are honored.
-        return self._antigravity_base or default_antigravity_base()
+        return self._antigravity_bases or default_antigravity_bases()
 
     def discover_files(
         self, since: float | None = None, skip_dir: Callable[[Path], bool] | None = None
     ) -> list[Path]:
-        base = self._base()
-        fresh = self._parser.read_summaries(base)
-        if fresh is not None:
-            self._summaries = fresh  # unreadable this time: keep the last good one
-        discovery = ProjectDiscovery(antigravity_base=base, skip_dir=skip_dir)
+        bases = self._bases()
+        merged: dict[str, AntigravitySummary] = {}
+        for base in bases:
+            fresh = self._parser.read_summaries(base)
+            if fresh is not None:
+                self._base_summaries[base] = fresh  # unreadable: keep the last good one
+            for cid, summary in self._base_summaries.get(base, {}).items():
+                merged.setdefault(cid, summary)  # the first base wins, as for transcripts
+        self._summaries = merged
+        discovery = ProjectDiscovery(antigravity_bases=bases, skip_dir=skip_dir)
         projects = discovery.discover_antigravity(summaries=self._summaries)
         files: list[Path] = []
         cutoff = self._default_cutoff() if since is None else since
@@ -74,9 +90,18 @@ class AntigravityWatcher(BaseHarvester):
                     if f.stat().st_mtime >= cutoff:
                         files.append(f)
                         self._file_projects[f] = label or proj.name
+                        self._file_surfaces[f] = self._surface_of(f, bases)
                 except OSError:
                     continue
         return files
+
+    @staticmethod
+    def _surface_of(path: Path, bases: list[Path]) -> str:
+        """The data dir name (``antigravity-cli``, ``antigravity``) ``path`` lives in."""
+        for base in bases:
+            if path.is_relative_to(base):
+                return base.name
+        return ""
 
     def _project_for(self, path: Path, entry: AntigravityEntry) -> str:
         """Project label: the workspace, else the first Cwd, else what discovery found."""
@@ -115,6 +140,9 @@ class AntigravityWatcher(BaseHarvester):
             meta = self._adapter.to_session_meta(entry, self._project_for(path, entry))
             if not meta:
                 continue
+            surface = self._file_surfaces.get(path)
+            if surface:
+                meta.metadata["surface"] = surface
             # Steps can arrive out of order, in this chunk or in a later poll, so
             # the last line is not the latest event: write the conversation's
             # earliest and latest created_at (kept by the parser, rebuilt after a

@@ -16,7 +16,7 @@ from hub.parsers.antigravity_parser import (
     TRANSCRIPT_NAME,
     AntigravityParser,
     conversation_id_from_path,
-    default_antigravity_base,
+    default_antigravity_bases,
 )
 from hub.parsers.pi_parser import default_pi_base
 from hub.log import get as get_logger
@@ -63,6 +63,7 @@ class ProjectDiscovery:
         pi_base: Path | None = None,
         antigravity_base: Path | None = None,
         skip_dir: Callable[[Path], bool] | None = None,
+        antigravity_bases: list[Path] | None = None,
     ):
         home = Path.home()
         # Asked before listing any directory; True = don't list it. Used by the
@@ -77,7 +78,15 @@ class ProjectDiscovery:
         )
         self.cursor_base = cursor_base or default_cursor_base()
         self.pi_base = pi_base or default_pi_base()
-        self.antigravity_base = antigravity_base or default_antigravity_base()
+        # Antigravity data dirs in precedence order (#77): explicit list, else
+        # the one explicit base alone, else every surface's default dir.
+        if antigravity_bases:
+            self.antigravity_bases = list(antigravity_bases)
+        elif antigravity_base:
+            self.antigravity_bases = [antigravity_base]
+        else:
+            self.antigravity_bases = default_antigravity_bases()
+        self.antigravity_base = self.antigravity_bases[0]
 
     def _skip(self, path: Path) -> bool:
         return self._skip_dir is not None and self._skip_dir(path)
@@ -422,49 +431,61 @@ class ProjectDiscovery:
     def discover_antigravity(
         self, summaries: dict[str, AntigravitySummary] | None = None
     ) -> list[DiscoveredProject]:
-        """Discover Antigravity CLI conversations under ``<app dir>/brain/<uuid>/``.
+        """Discover Antigravity conversations under ``<app dir>/brain/<uuid>/``.
 
-        Every conversation keeps ``.system_generated/logs/transcript.jsonl``
-        (subagents are conversations of their own, so they are found too).
-        Conversations are grouped by their workspace: the first
-        ``workspace_uris`` entry of ``conversation_summaries.db``, else the
-        first ``run_command`` Cwd of the transcript; the ones with neither land
-        in one ``antigravity-sessions`` bucket, never dropped. ``summaries`` is
-        the caller's already-read index (the watcher reads it once per rescan);
-        None reads it here. ``brain/`` is walked with ``skip_dir`` applied
-        before any directory is listed (cloud-only dirs, #45).
+        Every base of ``antigravity_bases`` is walked in order (the CLI's, the
+        desktop app / IDE one, #77); a base that does not exist is skipped. A
+        conversation id found in two bases is taken from the first only, so it
+        is never ingested twice. Every conversation keeps
+        ``.system_generated/logs/transcript.jsonl`` (subagents are
+        conversations of their own, so they are found too). Conversations are
+        grouped by their workspace across bases: the first ``workspace_uris``
+        entry of ``conversation_summaries.db``, else the first ``run_command``
+        Cwd of the transcript; the ones with neither land in one
+        ``antigravity-sessions`` bucket, never dropped. ``summaries`` is the
+        caller's already-read index of every base (the watcher reads it once
+        per rescan); None reads each base's own here. Each ``brain/`` is walked
+        with ``skip_dir`` applied before any directory is listed (cloud-only
+        dirs, #45).
         """
         from collections import defaultdict
 
-        projects: list[DiscoveredProject] = []
-        brain = self.antigravity_base / "brain"
-        if not brain.is_dir() or self._skip(brain):
-            return projects
-
         parser = AntigravityParser()
-        if summaries is None:
-            summaries = parser.read_summaries(self.antigravity_base) or {}
-
-        try:
-            conversation_dirs = sorted(brain.iterdir())
-        except OSError:
-            return projects
-
+        seen: set[str] = set()
         by_cwd: dict[str, list[Path]] = defaultdict(list)
-        for conv_dir in conversation_dirs:
-            logs = conv_dir / ".system_generated" / "logs"
-            if self._skip(conv_dir) or self._skip(logs):
+        cwd_brain: dict[str, Path] = {}
+        for base in self.antigravity_bases:
+            brain = base / "brain"
+            if not brain.is_dir() or self._skip(brain):
                 continue
-            transcript = logs / TRANSCRIPT_NAME
-            if not transcript.is_file():
+            base_summaries = summaries
+            if base_summaries is None:
+                base_summaries = parser.read_summaries(base) or {}
+            try:
+                conversation_dirs = sorted(brain.iterdir())
+            except OSError:
                 continue
-            summary = summaries.get(conv_dir.name)
-            cwd = summary.cwd if summary else ""
-            if not cwd:
-                cwd = parser.scan_cwd(transcript)
-            by_cwd[cwd or "antigravity-sessions"].append(transcript)
+            for conv_dir in conversation_dirs:
+                if conv_dir.name in seen:
+                    continue  # already found in an earlier base: that one wins
+                logs = conv_dir / ".system_generated" / "logs"
+                if self._skip(conv_dir) or self._skip(logs):
+                    continue
+                transcript = logs / TRANSCRIPT_NAME
+                if not transcript.is_file():
+                    continue
+                seen.add(conv_dir.name)
+                summary = base_summaries.get(conv_dir.name)
+                cwd = summary.cwd if summary else ""
+                if not cwd:
+                    cwd = parser.scan_cwd(transcript)
+                key = cwd or "antigravity-sessions"
+                by_cwd[key].append(transcript)
+                cwd_brain.setdefault(key, brain)
 
+        projects: list[DiscoveredProject] = []
         for cwd, files in sorted(by_cwd.items()):
+            brain = cwd_brain[cwd]
             if cwd == "antigravity-sessions":
                 name, path = "antigravity-sessions", str(brain)
             else:
