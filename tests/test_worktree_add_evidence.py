@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 import sqlite3
 
 import pytest
@@ -452,3 +453,54 @@ class TestTranscriptBackfill:
         res = self._upgrade(tmp_path, events, caplog)
         assert next(iter(_keys_of(tmp_path, "worker"))).startswith("path_hash:")
         assert res["worktree_evidence"]["worktree_add"] == 0
+
+
+class TestScanNeverBreaks:
+    """#165: the transcript scan is best-effort and never blocks attribution."""
+
+    SUBAGENT = Path(__file__).parent / "fixtures" / "codex_subagent_sample.jsonl"
+
+    def test_codex_subagent_session_goes_through_the_scan(self, tmp_path):
+        day = tmp_path / "codex" / "sessions" / "2026" / "10" / "07"
+        day.mkdir(parents=True)
+        add = ("git worktree add /home/dev/project-alpha-wt-12 -b feature/module-a-wt "
+               "origin/main && echo done-with-the-worktree")
+        call = {"timestamp": "2026-10-07T07:30:20.000Z", "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command",
+                            "call_id": "call-wt",
+                            "arguments": json.dumps({"cmd": add,
+                                                     "workdir": "/home/dev/project-alpha"})}}
+        text = self.SUBAGENT.read_text() + json.dumps(call) + "\n"
+        (day / "rollout-2026-10-07T07-30-06-cccccccc.jsonl").write_text(text)
+        bases = {p: tmp_path / f"none-{p}" for p in
+                 ("claude", "qwen", "pi", "antigravity", "opencode")}
+        bases["codex"] = tmp_path / "codex"
+        scan = scan_worktree_adds(bases)           # used to raise AttributeError
+        assert scan.files_parsed == 1 and scan.files_failed == 0
+        assert [c for c in scan.commands if c[2] == "codex"]
+
+    def test_a_failing_file_is_counted_and_the_others_still_count(
+            self, env, monkeypatch, caplog):
+        tmp_path, _events, repo, _wt, claude = env
+        proj = claude / repo.as_posix().replace("/", "-")
+        proj.mkdir(parents=True)
+        cmd = _long_add(repo)
+        (proj / "good.jsonl").write_text(_claude_line(
+            "g", str(repo), cmd, f"{D}T08:00:00Z", "u1") + "\n")
+        (proj / "bad.jsonl").write_text(_claude_line(
+            "b", str(repo), cmd, f"{D}T08:00:00Z", "u2") + "\n")
+        from hub.watchers.claude_watcher import ClaudeWatcher
+        real = ClaudeWatcher._parse_and_adapt
+
+        def flaky(self, path, offset):
+            if Path(path).name == "bad.jsonl":
+                raise RuntimeError("a parser bug")
+            return real(self, path, offset)
+        monkeypatch.setattr(ClaudeWatcher, "_parse_and_adapt", flaky)
+        with caplog.at_level(logging.WARNING, logger="hub"):
+            scan = scan_worktree_adds(WorkspaceStore.transcript_bases)
+        assert scan.files_failed == 1 and scan.files_parsed == 2
+        assert len(scan.commands) == 1
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("RuntimeError" in m for m in msgs)
+        assert not any("bad.jsonl" in m for m in msgs)   # no path in the log

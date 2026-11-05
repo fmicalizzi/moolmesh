@@ -3830,8 +3830,13 @@ class WorkspaceStore:
 
     def _scan_transcripts(self):
         """The ``git worktree add`` commands in the raw transcripts (#161)."""
-        from hub.worktree_evidence import scan_worktree_adds
-        return scan_worktree_adds(self.transcript_bases)
+        from hub.worktree_evidence import TranscriptScan, scan_worktree_adds
+        try:
+            return scan_worktree_adds(self.transcript_bases)
+        except Exception as exc:  # noqa: BLE001 — evidence is best-effort (#165)
+            _log.warning("identidad de worktrees: el escaneo de transcripciones "
+                         "falló (%s); sigo sin esa evidencia", type(exc).__name__)
+            return TranscriptScan()
 
     def _recover_worktree_roots(self, events_db_path: str | Path,
                                 transcripts: bool = False) -> dict[str, int]:

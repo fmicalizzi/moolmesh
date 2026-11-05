@@ -36,13 +36,22 @@ _CHUNK = 1 << 20
 
 
 class _NullSessionSink:
-    """Stands in for EventStore while parsing: nothing is written."""
+    """Stands in for EventStore while parsing: nothing is written.
 
-    def upsert_session(self, *a, **kw) -> None:
-        pass
+    Every public method a watcher may call on its store is a no-op that
+    returns None (#165): ``upsert_session``, ``mark_session_ended``,
+    ``link_sessions`` for a Codex sub-agent (#65), and whatever a watcher
+    starts calling later, so a new store call can never break the scan.
+    """
 
-    def mark_session_ended(self, *a, **kw) -> None:
-        pass
+    def __getattr__(self, name: str):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _noop
+
+
+def _noop(*_a, **_kw) -> None:
+    return None
 
 
 @dataclass
@@ -106,7 +115,7 @@ def scan_worktree_adds(
                 files = watcher.discover_files()
             else:
                 files = watcher.discover_files(since=0.0, skip_dir=PlaceholderSkipper())
-        except (OSError, ValueError, sqlite3.Error) as exc:
+        except Exception as exc:  # noqa: BLE001 — best-effort, never blocks (#165)
             _log.warning("worktree add: no pude listar las sesiones de %s (%s)",
                          provider, type(exc).__name__)
             continue
@@ -120,7 +129,7 @@ def scan_worktree_adds(
                     continue
                 scan.files_parsed += 1
                 events, _offset = watcher._parse_and_adapt(path, 0)
-            except (OSError, ValueError, UnicodeDecodeError, sqlite3.Error) as exc:
+            except Exception as exc:  # noqa: BLE001 — one bad file never stops the scan (#165)
                 # Only the error type: a session file's path names a project.
                 scan.files_failed += 1
                 _log.warning("worktree add: no pude leer un archivo de sesión "
