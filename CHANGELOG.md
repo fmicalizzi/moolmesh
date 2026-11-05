@@ -6,6 +6,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.36.0] — 2026-11-05
+
+Per-device effort for mool-ops. No new dependencies, no migrations, no new
+GitHub API calls. Nothing changes unless you run `mool device init`.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+
+### Added
+- **Device identity, opt-in** (#140): `mool device init [--label TEXT]`
+  creates `~/.moolmesh/device.json` (permissions 600), which holds:
+  - a random local secret;
+  - your label;
+  - a hash of the machine id.
+
+  It is never created on its own. Keep it out of dotfile sync: a copy found on
+  another machine is detected and refused until `mool device init --reset`.
+  `mool device show [--org ORG]` prints the label and the per-organization
+  ids, never the secret.
+- **Effort export** (#140): `mool effort export --org ORG --timezone IANA
+  --since … --until … --repo OWNER/NAME … | --repos-from FILE [--output FILE]`.
+  - **One row per** repo, local day (in the organization's zone) and provider,
+    with `sessions` and `touches`, for the listed repos only.
+  - **Refusals:** with no list it refuses to export.
+  - **Exclusions:** unlisted repos, excluded repos and folders with no remote
+    do not appear in any form.
+  - **Ids:** the repo key is its GitHub id. The device id differs per
+    organization (an HMAC of the secret).
+  - **Header:** carries `generated_at`, `data_through` and `stale`.
+    Re-exporting a period replaces it.
+  - **Contract:** `docs/schema/effort.v1.md`.
+  - It is read-only.
+
+---
+
 ## [1.35.0] — 2026-11-05
 
 Two additions. No new dependencies, no migrations, no new GitHub API calls.
