@@ -283,15 +283,19 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     # Obtener versiones ya aplicadas
     applied = {r[0] for r in conn.execute("SELECT version FROM schema_migrations")}
 
-    for version, name, fn in _MIGRATIONS:
-        if version not in applied:
-            fn(conn)
-            conn.execute(
-                "INSERT INTO schema_migrations VALUES (?, ?, ?)",
-                (version, name, datetime.now(timezone.utc).isoformat())
-            )
-            conn.commit()
-            _log.info("Migration %d aplicada: %s", version, name)
+    if all(version in applied for version, _n, _f in _MIGRATIONS):
+        return
+    from hub.log import migration_logging
+    with migration_logging(conn):
+        for version, name, fn in _MIGRATIONS:
+            if version not in applied:
+                fn(conn)
+                conn.execute(
+                    "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+                    (version, name, datetime.now(timezone.utc).isoformat())
+                )
+                conn.commit()
+                _log.info("Migration %d aplicada: %s", version, name)
 
 
 _SCHEMA = """

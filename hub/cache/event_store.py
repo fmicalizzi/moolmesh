@@ -847,18 +847,22 @@ class EventStore:
         applied = {
             r[0] for r in self._conn.execute("SELECT version FROM schema_migrations")
         }
-        for version, name, fn in _EVENT_STORE_MIGRATIONS:
-            if version in applied:
-                continue
-            if fn(self._conn) is _MIGRATION_DEFERRED:
-                self._conn.rollback()
-                continue
-            import time
-            self._conn.execute(
-                "INSERT INTO schema_migrations VALUES (?, ?, ?)",
-                (version, name, time.time()),
-            )
-            self._conn.commit()
+        pending = [m for m in _EVENT_STORE_MIGRATIONS if m[0] not in applied]
+        if not pending:
+            return
+        import time
+        from hub.log import migration_logging
+        with migration_logging(self._conn):
+            for version, name, fn in pending:
+                if fn(self._conn) is _MIGRATION_DEFERRED:
+                    self._conn.rollback()
+                    continue
+                self._conn.execute(
+                    "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+                    (version, name, time.time()),
+                )
+                self._conn.commit()
+                _log.info("Migration %d applied: %s", version, name)
 
     @contextlib.contextmanager
     def _write(self) -> Iterator[sqlite3.Connection]:
