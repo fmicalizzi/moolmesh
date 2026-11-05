@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.36.1
+Last updated: November 2026 — v1.36.2
 
 ---
 
@@ -258,6 +258,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.36.0** ([#140](https://github.com/fmicalizzi/moolmesh/issues/140)): opt-in device identity (`mool device init`) and per-device effort export (`mool effort export`) for mool-ops, deny-by-default.
 
 - **v1.36.1** ([#146](https://github.com/fmicalizzi/moolmesh/issues/146)): the snapshot always names its zone (system IANA name when `[user] timezone` is unset).
+
+- **v1.36.2** (docs only): README / README.es parity, one Updating section, roadmap through v1.36, CLI and MCP reference checked against the real commands; a per-release documentation checklist in `AGENTS.md`.
 
 ---
 

@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.36.2] — 2026-11-05
+
+Documentation only. No code changes, no new dependencies, no migrations.
+
+### Upgrade notes
+- Nothing to do: the package is unchanged apart from its version and the README shown on PyPI. As always: `pipx upgrade moolmesh --pip-args=--no-cache-dir` (or `uv tool upgrade moolmesh --no-cache`).
+
+### Changed
+- **README:** one "Updating" section (a generic command plus a short "coming from an older version" list with only what still needs an action), the roadmap table through v1.36, a CLI reference checked against `mool --help` (adds `backfill`, `sessions`, `export`, `link`, `chain`, `detect-links`, `workspace`, `query chain`), all 24 MCP tools, the real `/health` payload and every file under `~/.moolmesh/`.
+- **README.es:** section-by-section parity with the English README.
+- **VISION_ROADMAP (EN/ES), ROADMAP, mool-ops DECISIONS:** state matches what shipped; the mool-ops engine lives in its own repository and reads MoolMesh only through `mool snapshot export` and `mool effort export`.
+- **AGENTS.md:** a per-release documentation checklist — a user-visible change without its documentation does not ship.
+- **Landing page:** fallback version and shipped agents (Pi, Antigravity). **docs/PROVIDERS.md:** `mool mcp setup antigravity` shipped in 1.33.0.
+
+---
+
 ## [1.36.1] — 2026-11-05
 
 One fix. No new dependencies, no migrations.
