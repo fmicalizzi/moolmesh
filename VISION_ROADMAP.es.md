@@ -5,6 +5,14 @@
 > documento es el *hacia dónde* y *en qué orden*. [`ROADMAP.md`](ROADMAP.md) es el
 > log táctico de releases; este documento es la capa por encima.
 >
+> **Dónde está (2026-11-05, v1.36.x):** la base Observe está endurecida (§4
+> terminado en v1.9), hay 7 providers publicados (§5), las fases A–C de
+> Workspace salieron en v1.10–v1.12 (§6), y el peldaño Correlate ya llega a la
+> entrega: stats por PR, un solo día local, días trabajados y exports versionados
+> (`mool snapshot export`, `mool effort export`) que herramientas complementarias
+> como el motor `mool-ops` leen en lugar de los archivos SQLite. Coordinate sigue
+> siendo el próximo horizonte.
+>
 > *(English version: [`VISION_ROADMAP.md`](VISION_ROADMAP.md).)*
 
 ---
@@ -49,8 +57,8 @@ reemplaza la base de observación.
 
 | Peldaño | Estado hoy | Qué significa |
 |---------|-----------|---------------|
-| **Observe** | **Construido.** 5 providers, dashboard SSE en vivo, superficie MCP de consulta, analytics, Project Pulse, Code Timeline. | El punto ciego está cerrado: eventos unificados entre agentes, persistidos en SQLite, consultables por humano y máquina. |
-| **Correlate** | **Parcial y vivo.** Metadata de sesión, storage/búsqueda full-text, cross-session linking (`link`, `detect-links`, `chain`, `get_session_chain`), correlación de branch. | La coordinación asíncrona ya funciona vía MCP. Las señales que la alimentan son todavía mayormente heurísticas (ver §4). |
+| **Observe** | **Construido.** 7 providers (Claude Code, Codex, Qwen, OpenCode, Cursor, Pi, Antigravity), dashboard SSE en vivo, superficie MCP de consulta, analytics, Project Pulse, Code Timeline. | El punto ciego está cerrado: eventos unificados entre agentes, persistidos en SQLite, consultables por humano y máquina. |
+| **Correlate** | **Parcial y vivo.** Metadata de sesión, storage/búsqueda full-text, cross-session linking (`link`, `detect-links`, `chain`, `get_session_chain`), correlación de branch; el portafolio de Workspace (§6) correlaciona actividad con entrega (PRs mergeadas y sus stats, issues cerradas, días trabajados en un solo día local) y la exporta como contratos versionados (`docs/schema/`). | La coordinación asíncrona ya funciona vía MCP. El linking de sesiones sigue siendo mayormente heurístico; la correlación con la entrega se apoya en hechos de GitHub. |
 | **Coordinate** | **Próximo horizonte.** | Convertir la correlación pasiva en supervisión activa: detectar conflictos entre agentes concurrentes, mostrar "quién tocó esto último", hacer el mesh legible en tiempo real. |
 
 El objetivo estratégico no es "más dashboards". Es subir esta escalera manteniendo
@@ -96,6 +104,9 @@ Tres brechas de correctness en la base Observe/Correlate son la prioridad más
 alta, porque todo lo de arriba hereda sus errores. Corresponden a las issues
 abiertas.
 
+> **Estado: terminado.** #16, #17 y #18 salieron en v1.9; los seguimientos de
+> robustez (#52, #54, #62, #67) salieron en v1.28.1 y v1.33.0.
+
 ### 4.1 Ciclo de vida de sesión — inicio, activa, cierre (issue #16)
 Hoy "activa" se infiere de dos maneras que no coinciden:
 - `sessions.is_active` se pone en `1` al upsert y **nunca vuelve a `0`** — así toda
@@ -138,10 +149,14 @@ Un único pipeline hacia adelante. El orden favorece providers que sean (a) de b
 esfuerzo y (b) que desbloqueen casos de uso reales de coordinación, por encima de
 los exóticos.
 
+Publicados hasta ahora: Claude Code, Codex, Qwen, OpenCode (v1.0–v1.4), Cursor
+(v1.7), **Pi** (v1.25) y **Antigravity** (CLI en v1.27, app de escritorio / IDE
+en v1.35).
+
 | Provider | Storage / discovery | Esfuerzo | Notas |
 |----------|--------------------|----------|-------|
 | **Aider** | `~/.aider/history/` (text + SQLite metadata) | Bajo | El formato mejor documentado; el próximo provider de menor fricción. |
-| **Pi** | JSONL tree (`~/.pi/agent/sessions/`) | Bajo–Med | Las sesiones-árbol necesitan linearización leaf-to-root en el parser. |
+| **Pi** | JSONL tree (`~/.pi/agent/sessions/`) | Bajo–Med | **Publicado en v1.25** (parser consciente del árbol; vista de rama activa en v1.33). |
 | **Goose** | SQLite (`sessions.db`) + legacy JSONL | Med | Paths cross-platform; `ccusage` es referencia de mapeo. |
 | **Copilot CLI** | Logs locales | Med | Formato por confirmar. |
 | **Hermes** | SQLite WAL + FTS5 (`~/.hermes/`) | Med–Alto | Agente autónomo; hay que stitchear la parent-session chain. |
@@ -158,7 +173,9 @@ bloquear el resto del pipeline.
 contribución + auto-detección, para que un provider se agregue escribiendo solo su
 quartet — nunca editando el core, el dashboard o el MCP server. Esto vuelve
 verificable la "agnosticidad radical" (PHILOSOPHY §2) en vez de aspiracional, y se
-paga solo en el próximo provider.
+paga solo en el próximo provider. **Publicado en v1.25:** `docs/PROVIDERS.md` más
+un test de contrato de provider; Antigravity (v1.27) fue el primer provider
+agregado sobre esa base.
 
 ---
 
@@ -199,6 +216,10 @@ jamás visto obtiene visibilidad de salida gratis; el quartet completo se invier
 cuando se quieren métricas ricas.
 
 **Plan por fases** (arco multi-release, no un solo release):
+
+Estado: **A, B y C publicadas** (v1.10, v1.11, v1.12) y crecieron hasta el
+portafolio (estado del proyecto, jerarquía de clientes, días trabajados,
+outcome); **D sigue diferida**.
 
 | Fase | Qué | Costo / alcance honesto |
 |------|-----|-------------------------|
@@ -269,6 +290,10 @@ Sostienen todo lo anterior:
 ---
 
 ## 9. Qué necesita decisión del owner
+
+Estado al 2026-11-05: A, C, E y F están resueltas y publicadas (§4, §5, §6);
+B está hecha en parte (Pi publicado; el resto de la ola sigue abierto); D y G
+siguen abiertas.
 
 | # | Decisión | Recomendación |
 |---|----------|---------------|
