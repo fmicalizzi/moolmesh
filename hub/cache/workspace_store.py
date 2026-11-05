@@ -29,7 +29,7 @@ from typing import Any, Callable
 from hub.cloudfiles import is_cloud_placeholder
 from hub.localtime import CONFIGURED, local_day, resolve_timezone, user_timezone, zone_key
 from hub.log import get as get_logger
-from hub.models.base import SHELL_TOOLS
+from hub.models.base import SHELL_EVIDENCE_MARKER, SHELL_TOOLS, shell_evidence_command
 from hub.correlation.workspace_resolver import (
     SQL_PORTABLE_ABS,
     WorkspaceIdentity,
@@ -530,6 +530,39 @@ def _mig_8_worktree_identity(conn: sqlite3.Connection) -> int:
     return 1
 
 
+# rollup_meta key set while the #161 backfill of ``git worktree add`` evidence
+# from the full commands (the raw transcripts and ``event_content``) is
+# pending (``pending`` / ``running``). It rides the #149 recovery pass.
+_WORKTREE_ADD_KEY = "worktree_add_recover"
+
+
+def _mig_9_worktree_add_evidence(conn: sqlite3.Connection) -> int:
+    """Schedule the one-time #161 backfill of ``git worktree add`` evidence.
+
+    #149 read only the capped summary of a shell call (``"Bash: " +
+    command[:80]``), which cuts the worktree path, so worktrees removed before
+    it stayed repo-less projects. The full command is still in the agents'
+    raw transcripts. This sets the ``worktree_add_recover`` marker plus the
+    #114 days marker: the next ``attribute_incremental`` runs ONE full
+    re-derivation (``_rederive_full``: backup first, resumable) that first
+    reads those commands (``hub.worktree_evidence``) and records the removed
+    worktrees they name, then moves their edges back to the repo. Nothing is
+    rewritten here; a DB with no edges has nothing to recover. Also runs on a
+    DB that already went through the #149 recovery.
+    """
+    if not conn.execute("SELECT 1 FROM path_attributions LIMIT 1").fetchone():
+        return 0
+    conn.execute(
+        "INSERT OR REPLACE INTO rollup_meta (key, value) VALUES (?, 'pending')",
+        (_WORKTREE_ADD_KEY,),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO rollup_meta (key, value) VALUES (?, 'pending')",
+        (_ACTIVE_DAYS_REDERIVE_KEY,),
+    )
+    return 1
+
+
 # Versioned, additive migrations — each runs exactly once (mirrors git_store).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
     (1, "attribution_via", _mig_1_attribution_via),
@@ -540,6 +573,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
     (6, "edge_active_days", _mig_6_edge_active_days),
     (7, "live_catchup_day", _mig_7_live_catchup_day),
     (8, "worktree_identity", _mig_8_worktree_identity),
+    (9, "worktree_add_evidence", _mig_9_worktree_add_evidence),
 ]
 
 
@@ -1237,6 +1271,40 @@ _WT_ADD_VALUE_OPTS = frozenset({"-b", "-B", "--orphan", "--reason"})
 _GIT_GLOBAL_VALUE_OPTS = frozenset({"-c", "--git-dir", "--work-tree", "--namespace"})
 # Claude stores a Bash command as ``"Bash: " + command[:80]`` in ``summary``.
 _CLAUDE_BASH_SUMMARY_CAP = 80
+# What ``event_store.cap_full_text`` leaves in a text it cut (#52): a command
+# carrying it is not complete.
+_FULL_TEXT_CUT_MARK = "caracteres omitidos por MoolMesh"
+
+
+def stored_worktree_commands(
+    src: sqlite3.Connection, lo: int | None = None, hi: int | None = None,
+) -> list[tuple[str, str | None, bool]]:
+    """``(command, cwd, complete)`` of every ``git worktree add`` whose full
+    command an adapter kept in ``event_content`` (#161), optionally only for
+    ``lo < events.id <= hi``. ``complete`` is False when the stored text was
+    cut by the ``full_text`` cap. ``src`` is a read-only events.db."""
+    try:
+        src.execute("SELECT 1 FROM event_content LIMIT 0")
+    except sqlite3.OperationalError:
+        return []
+    shell = sorted(SHELL_TOOLS)
+    where = f"e.tool_name IN ({','.join('?' * len(shell))})"
+    params: list[Any] = list(shell)
+    if lo is not None and hi is not None:
+        where += " AND e.id > ? AND e.id <= ?"
+        params += [lo, hi]
+    out = []
+    for text, cwd in src.execute(
+        f"""SELECT c.full_text, e.cwd FROM events e
+            JOIN event_content c ON c.event_id = e.id
+            WHERE {where} AND instr(c.full_text, ?) > 0
+              AND c.full_text LIKE '%worktree%add%'""",
+        params + [SHELL_EVIDENCE_MARKER],
+    ):
+        cmd = shell_evidence_command(text)
+        if cmd:
+            out.append((cmd, cwd, _FULL_TEXT_CUT_MARK not in cmd))
+    return out
 
 
 def _expand_arg(token: str, home: str) -> str | None:
@@ -1259,7 +1327,8 @@ def parse_worktree_adds(command: str, cwd: str | None, complete: bool,
 
     Conservative by construction — anything it cannot read literally yields
     nothing: only ``&&`` / ``;`` chains are followed (``cd`` updates the base
-    directory, ``git -C`` too); any other shell operator stops the scan; a
+    directory, ``git -C`` too); any other shell operator stops the scan, and a
+    pipe also drops the command that feeds it (#161); a
     path with a variable or glob is skipped. ``complete=False`` means the text
     may be cut (a capped summary): its last token is dropped, so a truncated
     path never counts. ``cwd`` must be absolute (the event's own cwd).
@@ -1284,6 +1353,10 @@ def parse_worktree_adds(command: str, cwd: str | None, complete: bool,
         if tok in ("&&", ";"):
             segments.append([])
         elif tok and all(c in "();<>|&" for c in tok):
+            if "|" in tok:
+                # A pipeline (#161): the command feeding it does not count
+                # either — what ran is no longer a plain ``git worktree add``.
+                segments[-1] = []
             break  # pipes, subshells, redirections: stop reading
         else:
             segments[-1].append(tok)
@@ -3187,6 +3260,8 @@ class WorkspaceStore:
                     cell[1] = _max_ts(cell[1], ats)
                 if day:
                     cell[2].add(day)
+            # ``git worktree add`` evidence of this range (#161).
+            worktree_adds = stored_worktree_commands(src, lo, hi)
         finally:
             src.close()
 
@@ -3203,6 +3278,9 @@ class WorkspaceStore:
         # An absolute file_path ignores cwd in _containing_dir, so keeping the
         # first row's cwd per edge changes nothing.
         # The identity memory (#149) keeps a removed worktree on its repo.
+        # The worktrees this range's sessions added are registered first
+        # (#161), so one created and removed within one poll window folds too.
+        added = self._record_worktree_adds(worktree_adds)
         memory = self._identity_memory()
         dir_cache: dict[str, WorkspaceIdentity] = {}
         resolved: list[tuple[str, str, str, WorkspaceIdentity, str | None,
@@ -3299,7 +3377,85 @@ class WorkspaceStore:
             "directories": len(dir_cache),
             "skipped_non_absolute": skipped,
             "shell_edges_removed": shell_removed,
+            "worktree_adds": added,
         }
+
+    def _record_worktree_adds(
+        self, commands: list[tuple[str, str | None, bool]],
+    ) -> dict[str, int]:
+        """Register the worktrees named by full ``git worktree add`` commands
+        (#161) in ``known_git_roots`` — the normal-flow half of the evidence.
+
+        For each worktree ``W`` a command adds, run from a directory that
+        resolves to a repo (:func:`parse_worktree_adds`; a variable, pipe or
+        truncated path yields nothing): if ``W`` is on disk, its own identity
+        is noted (``resolved``), as a pass would; if it is already gone — the
+        worktree was created and removed within one poll window — the
+        identity of the repo it was added from is recorded
+        (``worktree_add``), the same rule as the #149 recovery. Evidence that
+        disagrees (two repos for one ``W``, or a ``W`` already registered to
+        another repo) is counted and left alone. Never a folder name.
+        """
+        counts = {"recorded": 0, "conflicting": 0}
+        if not commands:
+            return counts
+        memory = self._identity_memory()
+        with self._lock:
+            known = dict(self._conn.execute(
+                "SELECT root_path, workspace_key FROM known_git_roots").fetchall())
+        claims: dict[str, set[tuple]] = {}
+        mains: dict[str, str | None] = {}
+        for text, cwd, complete in commands:
+            for repo_dir, wt in parse_worktree_adds(text, cwd, complete):
+                if os.path.lexists(wt):
+                    memory.resolve(wt)  # on disk: what git says wins
+                    continue
+                ident = memory.resolve(repo_dir)
+                if ident.kind == "path_hash":
+                    continue  # not run from a repo: no evidence
+                if ident.kind == "git_root":
+                    # A worktree of a remote-less repo is its own git root.
+                    ident_t = (f"git_root:{wt}", "git_root", None)
+                else:
+                    ident_t = (ident.key, ident.kind, ident.remote_url)
+                root = ident.root_path
+                mains.setdefault(wt, (worktree_main_root(root) or root)
+                                 if root else None)
+                claims.setdefault(wt, set()).add(ident_t)
+        self._flush_known_roots(memory)
+        now = _now()
+        rows = []
+        for wt, idents in sorted(claims.items()):
+            if len(idents) != 1:
+                counts["conflicting"] += 1
+                continue
+            key, kind, remote = next(iter(idents))
+            if wt in known:
+                if known[wt] != key:
+                    counts["conflicting"] += 1
+                continue
+            rows.append((wt, key, kind, remote, mains.get(wt), "worktree_add",
+                         now, now))
+        if rows:
+            with self._lock:
+                try:
+                    cur = self._conn.executemany(
+                        """INSERT OR IGNORE INTO known_git_roots
+                               (root_path, workspace_key, kind, remote_url,
+                                main_root, source, first_seen, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        rows,
+                    )
+                    counts["recorded"] = cur.rowcount
+                    self._conn.commit()
+                except BaseException:
+                    self._conn.rollback()
+                    raise
+        if counts["recorded"] or counts["conflicting"]:
+            _log.info("atribución: %d worktrees registrados por su 'git worktree "
+                      "add', %d con evidencia contradictoria quedan igual (#161)",
+                      counts["recorded"], counts["conflicting"])
+        return counts
 
     def _attribute_cwd_fallback(
         self,
@@ -3459,6 +3615,7 @@ class WorkspaceStore:
             "directories": result["directories"],
             "skipped_non_absolute": result["skipped_non_absolute"],
             "shell_edges_removed": result["shell_edges_removed"],
+            "worktree_adds": result["worktree_adds"],
             "cursor_from": cursor,
             "cursor_to": hi,
             "reset": reset,
@@ -3517,6 +3674,12 @@ class WorkspaceStore:
             # #149: the worktree-identity recovery rides this pass (and its
             # backup); ``running`` = a cut pass being resumed.
             recover = bool(rec) and rec[0] in ("pending", _REDERIVE_RUNNING)
+            # #161: the same recovery, also reading the raw transcripts.
+            tra = self._conn.execute(
+                "SELECT value FROM rollup_meta WHERE key = ?",
+                (_WORKTREE_ADD_KEY,)).fetchone()
+            transcripts = bool(tra) and tra[0] in ("pending", _REDERIVE_RUNNING)
+            recover = recover or transcripts
             try:
                 # A resumed pass (#130): the first attempt already backed up
                 # the state before anything was cleared; a new backup now would
@@ -3540,6 +3703,10 @@ class WorkspaceStore:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO rollup_meta (key, value)"
                     " VALUES (?, ?)", (_ACTIVE_DAYS_ZONE_KEY, zone))
+                if transcripts:
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO rollup_meta (key, value)"
+                        " VALUES (?, ?)", (_WORKTREE_ADD_KEY, _REDERIVE_RUNNING))
                 if recover:
                     self._conn.execute(
                         "INSERT OR REPLACE INTO rollup_meta (key, value)"
@@ -3556,7 +3723,10 @@ class WorkspaceStore:
         what = ("relojes y días activos (#101, #114)" if replace_activity
                 else "los días activos (#114)")
         if recover:
-            what += " y la identidad de los worktrees borrados (#149)"
+            what += (" y la identidad de los worktrees borrados (#149, con los "
+                     "comandos completos de las transcripciones #161)"
+                     if transcripts else
+                     " y la identidad de los worktrees borrados (#149)")
         if resumed:
             _log.info("atribución: retomo el recálculo de %s de las aristas sin "
                       "un respaldo nuevo; el del primer intento sigue vigente "
@@ -3564,8 +3734,15 @@ class WorkspaceStore:
         else:
             _log.info("atribución: respaldo de workspace.db en %s antes de "
                       "recalcular %s de las aristas (zona %r)", backup, what, zone)
-        evidence = (self._recover_worktree_roots(events_db_path)
+        evidence = (self._recover_worktree_roots(events_db_path, transcripts)
                     if recover else None)
+        if evidence is not None and transcripts:
+            self._log_recovery("identidad de worktrees: %d archivos de sesión "
+                      "leídos, %d comandos 'git worktree add' completos, %d "
+                      "archivos ilegibles (#161)",
+                      evidence.get("transcript_files", 0),
+                      evidence.get("transcript_commands", 0),
+                      evidence.get("transcript_failed", 0))
         if evidence is not None:
             self._log_recovery("identidad de worktrees: %d carpetas borradas ya "
                       "atribuidas a un repo se conservan; %d carpetas borradas "
@@ -3588,8 +3765,9 @@ class WorkspaceStore:
                 before_ph = int(brow[0]) if brow else 0
                 after_ph = self._path_hash_edge_count_locked()
                 self._conn.execute(
-                    "DELETE FROM rollup_meta WHERE key IN (?, ?)",
-                    (_WORKTREE_RECOVER_KEY, _WORKTREE_RECOVER_BEFORE_KEY))
+                    "DELETE FROM rollup_meta WHERE key IN (?, ?, ?)",
+                    (_WORKTREE_RECOVER_KEY, _WORKTREE_RECOVER_BEFORE_KEY,
+                     _WORKTREE_ADD_KEY))
             self._conn.execute(
                 "DELETE FROM rollup_meta WHERE key = ?", (_ACTIVE_DAYS_REDERIVE_KEY,))
             if replace_activity:
@@ -3646,7 +3824,17 @@ class WorkspaceStore:
                JOIN workspaces w ON w.id = a.workspace_id
                WHERE w.kind = 'path_hash'""").fetchone()[0]
 
-    def _recover_worktree_roots(self, events_db_path: str | Path) -> dict[str, int]:
+    # Data roots for the #161 transcript scan (``None`` → each provider's
+    # default); tests point it at fixtures.
+    transcript_bases: dict[str, Path | None] | None = None
+
+    def _scan_transcripts(self):
+        """The ``git worktree add`` commands in the raw transcripts (#161)."""
+        from hub.worktree_evidence import scan_worktree_adds
+        return scan_worktree_adds(self.transcript_bases)
+
+    def _recover_worktree_roots(self, events_db_path: str | Path,
+                                transcripts: bool = False) -> dict[str, int]:
         """Record removed worktrees that STORED evidence ties to a repo (#149).
 
         First, every directory this DB already attributed to a repo (an edge
@@ -3668,8 +3856,16 @@ class WorkspaceStore:
         * ``W`` is still absent from disk and is not already registered;
         * some candidate directory is ``W`` or lies under it.
 
+        The ``git worktree add`` commands come from the capped summaries
+        (#149, only when short enough to be whole), from the full commands the
+        adapters keep in ``event_content`` (#161) and, with ``transcripts``
+        (the one-time #161 backfill), from the providers' raw transcripts
+        (``hub.worktree_evidence``) — the only place a command older than
+        #161 survives whole.
+
         Never a name pattern: a folder called like a worktree with no evidence
-        stays as it is. Read-only on events.db and on every repo.
+        stays as it is. Read-only on events.db, on every repo and on the
+        transcripts.
         """
         with self._lock:
             known = self._conn.execute(
@@ -3686,6 +3882,9 @@ class WorkspaceStore:
         registered = {r for r, _m in known}
         counts = {"candidates": 0, "git_worktrees": 0, "worktree_add": 0,
                   "conflicting": 0, "attributed": 0}
+        if transcripts:
+            counts.update(transcript_files=0, transcript_commands=0,
+                          transcript_failed=0)
         now = _now()
 
         # 0. What this DB already attributed to a repo IS stored evidence:
@@ -3734,6 +3933,11 @@ class WorkspaceStore:
         counts["candidates"] = len(gone)
         if not gone:
             return counts
+        scan = self._scan_transcripts() if transcripts else None
+        if scan is not None:
+            counts["transcript_files"] = scan.files_parsed
+            counts["transcript_commands"] = len(scan.commands)
+            counts["transcript_failed"] = scan.files_failed
         memory = self._identity_memory()
         # W -> {identity tuple}, W -> {source}
         claims: dict[str, set[tuple]] = {}
@@ -3813,8 +4017,12 @@ class WorkspaceStore:
                           AND (file_path LIKE '%worktree%add%'
                                OR summary LIKE '%worktree%add%')""",
                     shell).fetchall()
+                full = stored_worktree_commands(src)
             finally:
                 src.close()
+            for text, cwd, complete in full:
+                for repo_dir, wt in parse_worktree_adds(text, cwd, complete):
+                    _claim(repo_dir, wt, "worktree_add")
             for provider, tool, file_path, summary, cwd in rows:
                 if file_path and "worktree" in file_path:
                     # The command itself — but some adapters cap it.
@@ -3827,6 +4035,11 @@ class WorkspaceStore:
                     complete = (provider == "claude" and tool == "Bash"
                                 and len(text) < _CLAUDE_BASH_SUMMARY_CAP)
                 for repo_dir, wt in parse_worktree_adds(text, cwd, complete):
+                    _claim(repo_dir, wt, "worktree_add")
+        # 3. The raw transcripts (#161): the full command, whole by source.
+        if scan is not None:
+            for text, cwd, _provider in scan.commands:
+                for repo_dir, wt in parse_worktree_adds(text, cwd, True):
                     _claim(repo_dir, wt, "worktree_add")
 
         rows_out = []
@@ -4110,10 +4323,22 @@ class WorkspaceStore:
                 ).fetchall()
             ]
 
+        # A session's cwd resolves through the identity memory (#149), so a
+        # harness of a session that ran in a removed worktree anchors at its
+        # repo (#161). Read-only: nothing it learns is written here.
+        memory = self._identity_memory()
+        resolved: dict[str, WorkspaceIdentity] = {}
+
+        def _resolve(d: str) -> WorkspaceIdentity:
+            ident = resolved.get(d)
+            if ident is None:
+                ident = resolved[d] = memory.resolve(d)
+            return ident
+
         # Build the encode-match index outside the lock (disk-only, no DB).
         enc_index: dict[str, Any] = {}
         for cwd in set(session_cwds.values()):
-            index_real_dir(cwd, enc_index)
+            index_real_dir(cwd, enc_index, _resolve)
         for rp in git_roots:
             index_real_dir(rp, enc_index)
 
@@ -4125,7 +4350,7 @@ class WorkspaceStore:
             c = classify(
                 kind, remote_url, root_path, dir_path,
                 session_cwds=session_cwds, enc_index=enc_index, home=home,
-                reference_paths=ref_paths,
+                reference_paths=ref_paths, resolve=_resolve,
             )
             classified.append((wid, c))
 

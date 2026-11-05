@@ -225,6 +225,19 @@ worktrees borrados de los que hay evidencia — la entrada del propio repo en
 `.git/worktrees` o un `git worktree add` que una sesión corrió desde el repo —,
 nunca por el nombre de una carpeta: una carpeta borrada sin esa evidencia queda
 como está. Los conteos van a `hub.log`.
+Un `git worktree add` cuenta solo por su comando completo: cada proveedor cuya
+llamada de herramienta trae el comando (Claude, Codex, Qwen, OpenCode, Pi,
+Antigravity) lo guarda entero en `events.db` cuando la llamada de shell agrega
+un worktree, así que un worktree creado y borrado entre dos pasadas igual se
+pliega en su repo. Para la historia anterior, una pasada más después de
+actualizar —también tras un respaldo de `workspace.db`, y reanudable— lee los
+comandos de los propios archivos de sesión de los agentes (solo lectura; solo se
+procesan los archivos que mencionan `worktree`). Un comando cuya ruta usa una
+variable, o que va con un pipe, no cuenta, y una evidencia que nombra dos repos
+para la misma ruta no pliega nada. No hace falta tocar la configuración;
+`project_aliases` sigue siendo el respaldo manual para la historia sin
+evidencia. El scratchpad de una sesión que corrió dentro de un worktree borrado
+también se pliega en el repo del worktree.
 
 **Scratchpads de agentes y repos descartables.** El scratchpad de un agente se
 pliega en el proyecto de la sesión que lo usó, en macOS

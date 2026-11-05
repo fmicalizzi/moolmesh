@@ -7,6 +7,7 @@ from datetime import datetime
 from hub.adapters.base import BaseAdapter
 from hub.models.base import (
     SHELL_TOOLS,
+    with_shell_evidence,
     MessageRole,
     Provider,
     SessionMeta,
@@ -86,6 +87,7 @@ class ClaudeAdapter(BaseAdapter):
 
         tool_name = None
         file_path = None
+        command = None
         for block in entry.content_blocks:
             if block.type == "tool_use" and block.tool_name:
                 tool_name = block.tool_name
@@ -95,9 +97,12 @@ class ClaudeAdapter(BaseAdapter):
                         block.tool_input.get("file_path")
                         or block.tool_input.get("path")
                     )
+                elif block.tool_input:
+                    command = block.tool_input.get("command")
                 break
 
-        full_text = self._extract_full_text(entry)
+        # A ``git worktree add`` keeps its full command (#161).
+        full_text = with_shell_evidence(self._extract_full_text(entry), command)
 
         return UnifiedEvent(
             provider=Provider.CLAUDE,

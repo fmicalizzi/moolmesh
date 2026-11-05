@@ -127,7 +127,11 @@ reads `PI_CODING_AGENT_DIR`), a `discover_<name>()` returning
 - [ ] CLI `--provider` choices for `report`, `discover`, `sessions`.
 - [ ] MCP: provider filters are free-form (no code change needed) — update the
       docstring examples that enumerate providers.
-- [ ] `SHELL_TOOLS` (`hub/models/base.py`) if the provider has shell tools.
+- [ ] `SHELL_TOOLS` (`hub/models/base.py`) if the provider has shell tools,
+      and the adapter passes each shell call's full command through
+      `with_shell_evidence` (#161) so a `git worktree add` keeps its whole
+      command in `full_text`; add the provider to `hub/worktree_evidence.py`
+      so the one-time transcript backfill reads it too.
 - [ ] UI: dashboard `dashboard.html` (status dot, token bar, feed filter,
       timeline, CSS class with a distinct color), `portfolio.html`
       (`PROV_COLOR`, `provClass`, legend) and `analytics.html` (`PCOLORS`,

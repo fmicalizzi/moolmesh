@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from hub.adapters.base import BaseAdapter
 from hub.localtime import utc_iso_from_epoch
 from hub.models.base import (
+    SHELL_TOOLS, with_shell_evidence,
     MessageRole, Provider, SessionMeta, TokenUsage, ToolCall, UnifiedEvent, UnifiedMessage,
 )
 from hub.models.opencode import OpenCodeEntry
@@ -45,6 +46,7 @@ class OpenCodeAdapter(BaseAdapter):
 
         tool_name = None
         file_path = None
+        command = None
         if entry.tool_call:
             tool_name = entry.tool_call.name
             # OpenCode's read/edit/write tools name their file ``filePath``
@@ -57,11 +59,14 @@ class OpenCodeAdapter(BaseAdapter):
             else:
                 command = data.get("command", "")
                 file_path = command[:80] if isinstance(command, str) else ""
+            if tool_name not in SHELL_TOOLS:
+                command = None
 
         raw_text = entry.text.strip()
         text = raw_text.replace("\n", " ")
         summary = text[:120] if text else f"[{entry.part_type}]"
-        full_text = raw_text if raw_text else None
+        # A ``git worktree add`` keeps its full command (#161).
+        full_text = with_shell_evidence(raw_text or None, command)
 
         ts_str = self.iso_timestamp(entry.timestamp) or str(entry.timestamp)
 

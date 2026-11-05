@@ -12,6 +12,8 @@ from typing import Any
 
 from hub.adapters.base import BaseAdapter
 from hub.models.base import (
+    SHELL_TOOLS,
+    with_shell_evidence,
     MessageRole,
     Provider,
     SessionMeta,
@@ -236,6 +238,18 @@ def is_codex_dir_extra(event: dict) -> bool:
     )
 
 
+
+def _shell_command(raw_args: str) -> object:
+    """The command of a ``shell`` / ``exec_command`` call (#161): ``cmd`` or
+    ``command`` of its JSON arguments (a string or an argv list)."""
+    try:
+        args = json.loads(raw_args)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(args, dict):
+        return None
+    return args.get("cmd") or args.get("command")
+
 class CodexAdapter(BaseAdapter):
 
     def to_unified(self, entry: CodexEntry, project: str) -> UnifiedMessage | None:
@@ -342,6 +356,10 @@ class CodexAdapter(BaseAdapter):
             }
 
         full_text = self._extract_full_text(entry)
+        if entry.function_call and entry.function_call.name in SHELL_TOOLS:
+            # A ``git worktree add`` keeps its full command (#161).
+            full_text = with_shell_evidence(
+                full_text, _shell_command(entry.function_call.arguments))
 
         event = UnifiedEvent(
             provider=Provider.CODEX,

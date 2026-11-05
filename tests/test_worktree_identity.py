@@ -413,6 +413,7 @@ class TestParseWorktreeAdds:
         "git worktree add ../$NAME",
         "git worktree add ../wt-*",
         "echo x | git worktree add ../wt-5",
+        "git worktree add ../wt-5 | tee log",
         "cd - && git worktree add ../wt-6",
         "git worktree list",
         "git worktree add -b only-a-branch",

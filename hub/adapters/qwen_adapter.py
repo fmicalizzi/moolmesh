@@ -7,6 +7,7 @@ from datetime import datetime
 from hub.adapters.base import BaseAdapter
 from hub.models.base import (
     SHELL_TOOLS,
+    with_shell_evidence,
     MessageRole,
     Provider,
     SessionMeta,
@@ -60,14 +61,18 @@ class QwenAdapter(BaseAdapter):
 
         tool_name = None
         file_path = None
+        command = None
         if entry.function_calls:
             fc = entry.function_calls[0]
             tool_name = fc.name
             # A shell tool's command is NEVER a path (#58, SHELL_TOOLS).
             if fc.name not in SHELL_TOOLS:
                 file_path = fc.args.get("file_path") or fc.args.get("path")
+            else:
+                command = fc.args.get("command")
 
-        full_text = self._extract_full_text(entry)
+        # A ``git worktree add`` keeps its full command (#161).
+        full_text = with_shell_evidence(self._extract_full_text(entry), command)
 
         return UnifiedEvent(
             provider=Provider.QWEN,

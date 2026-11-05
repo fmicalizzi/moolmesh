@@ -50,7 +50,7 @@ def project_cwd(monkeypatch):
     """The session's real cwd resolves to the acme repo (no disk access)."""
     from hub.cache import portfolio_classifier as pc
 
-    def _anchor(realpath):
+    def _anchor(realpath, resolve=None):
         if realpath == PROJ or realpath.startswith(PROJ + "/"):
             return pc.Anchor(PROJ_KEY, "github.com/acme/widget-services", PROJ)
         return None
@@ -187,3 +187,57 @@ def test_macos_paths_classify_as_before():
     # The pre-#161 macOS shapes keep their exact classification.
     c = _classify("path_hash", f"/private/tmp/claude-501/-some-encoded-name/{UUID}/scratchpad")
     assert (c.category, c.role, c.resolved_via) == ("A", "collapse", "unresolved")
+
+
+# ── Harness of a session whose cwd is gone or throwaway (#161) ──────────
+
+UUID2 = "1b2c3d4e-5f60-4a7b-8c9d-0e1f2a3b4c5d"
+
+
+def _resolver(table):
+    """A ``resolve`` stand-in: path → identity, else path_hash."""
+    def _resolve(path):
+        for root, ident in table.items():
+            if path == root or path.startswith(root + "/"):
+                return ident
+        return WorkspaceIdentity(key=f"path_hash:{path}", kind="path_hash",
+                                 dir_path=path)
+    return _resolve
+
+
+def test_harness_of_a_session_in_a_removed_worktree_folds_into_its_repo():
+    # The worktree is gone from disk; the store's identity memory (#149)
+    # still knows it — the classifier uses it for the session's cwd.
+    wt = f"{HOME}/work/widget-services-wt-12"
+    resolve = _resolver({wt: WorkspaceIdentity(
+        key=PROJ_KEY, kind="git_remote",
+        remote_url="github.com/acme/widget-services", root_path=PROJ)})
+    c = classify("path_hash", None, None, LINUX_PAD + "/x",
+                 session_cwds={UUID: wt}, enc_index={}, home=HOME,
+                 exists=lambda _p: False, resolve=resolve)
+    assert (c.role, c.project_key) == ("collapse", PROJ_KEY)
+
+
+def test_harness_of_a_session_run_inside_a_throwaway_repo():
+    # Session 2 ran inside a repo session 1 created in its scratchpad: its
+    # harness follows that repo's rule (into session 1's project), never
+    # minting the throwaway repo as a project.
+    repo = f"{LINUX_PAD}/case/c3-before"
+    pad2 = f"/tmp/claude-1000/-tmp-claude-1000-x/{UUID2}/scratchpad"
+    resolve = _resolver({
+        repo: WorkspaceIdentity(key=f"git_root:{repo}", kind="git_root",
+                                root_path=repo),
+        PROJ: WorkspaceIdentity(key=PROJ_KEY, kind="git_remote",
+                                remote_url="github.com/acme/widget-services",
+                                root_path=PROJ),
+    })
+    c = classify("path_hash", None, None, pad2 + "/y",
+                 session_cwds={UUID2: repo, UUID: PROJ}, enc_index={},
+                 home=HOME, exists=lambda _p: False, resolve=resolve)
+    assert (c.role, c.project_key) == ("collapse", PROJ_KEY)
+    # Without session 1's cwd it still never lands on the throwaway repo: it
+    # falls back to session 1's encoded name, as any unresolved harness does.
+    c = classify("path_hash", None, None, pad2 + "/y",
+                 session_cwds={UUID2: repo}, enc_index={}, home=HOME,
+                 exists=lambda _p: False, resolve=resolve)
+    assert (c.role, c.project_key) == ("collapse", f"encoded:{ENC}")

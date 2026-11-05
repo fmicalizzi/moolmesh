@@ -12,6 +12,7 @@ from datetime import datetime
 from hub.adapters.base import BaseAdapter
 from hub.models.base import (
     SHELL_TOOLS,
+    with_shell_evidence,
     MessageRole,
     Provider,
     SessionMeta,
@@ -75,6 +76,14 @@ def extract_pi_paths(tool_calls: list[PiToolCall], cwd: str = "") -> list[str]:
             paths.append(p)
     return paths
 
+
+
+def _shell_command(entry: PiEntry) -> object:
+    """The command of the entry's first shell tool call (#161), if any."""
+    for call in entry.tool_calls:
+        if call.name in SHELL_TOOLS and isinstance(call.arguments, dict):
+            return call.arguments.get("command")
+    return None
 
 class PiAdapter(BaseAdapter):
 
@@ -171,7 +180,9 @@ class PiAdapter(BaseAdapter):
             file_path=file_path if file_path else None,
             model=entry.model or None,
             cwd=entry.cwd or None,
-            full_text=self._extract_full_text(entry),
+            # A ``git worktree add`` keeps its full command (#161).
+            full_text=with_shell_evidence(
+                self._extract_full_text(entry), _shell_command(entry)),
             entry_id=entry.entry_id or None,  # native tree id (#67)
             parent_id=entry.parent_id or None,  # native tree parent (#67)
         )

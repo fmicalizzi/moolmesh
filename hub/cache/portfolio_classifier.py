@@ -313,13 +313,16 @@ class Anchor:
     path: str
 
 
-def anchor_of_realpath(realpath: str) -> Anchor | None:
+def anchor_of_realpath(realpath: str, resolve=None) -> Anchor | None:
     """Resolve a real directory to its project anchor (key + display label).
 
     Git-backed dirs anchor at the git root (finer, correct granularity); non-git
     trees anchor at the first meaningful component. ``None`` for degenerate roots.
+    ``resolve`` replaces ``resolve_dir`` — the store passes its identity memory
+    (#149), so a session that ran in a removed worktree anchors at its repo
+    (#161).
     """
-    ident = resolve_dir(realpath)
+    ident = (resolve or resolve_dir)(realpath)
     if ident.kind == "git_remote":
         label = ident.remote_url or os.path.basename(ident.root_path or realpath)
         return Anchor(ident.key, label, ident.root_path or realpath)
@@ -369,7 +372,8 @@ def fs_decode(encoded: str) -> str | None:
     return cur
 
 
-def index_real_dir(realdir: str, enc_index: dict[str, Anchor]) -> None:
+def index_real_dir(realdir: str, enc_index: dict[str, Anchor],
+                   resolve=None) -> None:
     """Register a real directory (and every ancestor down to its anchor) in the
     encode-match index, mapping ``path_encode(dir)`` → its :class:`Anchor`.
 
@@ -380,7 +384,7 @@ def index_real_dir(realdir: str, enc_index: dict[str, Anchor]) -> None:
     """
     if not realdir or realdir == "/":
         return
-    anchor = anchor_of_realpath(realdir)
+    anchor = anchor_of_realpath(realdir, resolve)
     if anchor is None:
         return
     ap = len(_split(anchor.path))
@@ -440,6 +444,7 @@ def classify(
     home: str,
     exists=os.path.exists,
     reference_paths: tuple[str, ...] = (),
+    resolve=None,
 ) -> Classification:
     """Classify one workspace into the #24 taxonomy.
 
@@ -452,6 +457,10 @@ def classify(
     containers: the folder AND its children are never projects — they surface in
     the "contenedores / referencia" section. The match is textual over stored
     paths, so it works even when the folder no longer exists on disk.
+
+    ``resolve`` (#161) replaces ``resolve_dir`` for a harness's session cwd:
+    the store passes its identity memory, so the scratchpad of a session that
+    ran in a since-removed worktree collapses into the worktree's repo.
     """
     d = _workspace_path(kind, root_path, dir_path)
 
@@ -469,7 +478,8 @@ def classify(
     #    ``root_path`` is only the last checkout seen (maybe a verification
     #    worktree under /tmp), so it stays the remote's project.
     if kind == "git_root":
-        throwaway = _throwaway_git(d, session_cwds, enc_index, exists, home)
+        throwaway = _throwaway_git(d, session_cwds, enc_index, exists, home,
+                                   resolve)
         if throwaway is not None:
             return throwaway
     if kind in ("git_remote", "git_root"):
@@ -484,7 +494,8 @@ def classify(
     m = _SCRATCH.match(d + "/")
     if m:
         return _collapse_from_encoded(
-            m.group("enc"), m.group("uuid"), session_cwds, enc_index, exists, home
+            m.group("enc"), m.group("uuid"), session_cwds, enc_index, exists, home,
+            resolve,
         )
 
     # 3. Any other <tmp>/claude-* path (macOS, Linux, $TMPDIR — #161) is
@@ -498,7 +509,8 @@ def classify(
     if d.startswith(proj_root):
         seg = d[len(proj_root):].split("/", 1)[0]
         if seg.startswith("-"):
-            return _collapse_from_encoded(seg, None, session_cwds, enc_index, exists, home)
+            return _collapse_from_encoded(seg, None, session_cwds, enc_index,
+                                          exists, home, resolve)
 
     # 5. D2 — home-level dotfolders and tooling (~/.config, ~/.claude/plugins…).
     if d.startswith(home + "/."):
@@ -528,7 +540,7 @@ def classify(
     # A gitless dir inside a throwaway repo (#161) follows that repo.
     if anchor.key.startswith("git_root:"):
         throwaway = _throwaway_git(anchor.path, session_cwds, enc_index,
-                                   exists, home)
+                                   exists, home, resolve)
         if throwaway is not None:
             return throwaway
 
@@ -551,6 +563,8 @@ def _throwaway_git(
     enc_index: dict[str, Anchor],
     exists=os.path.exists,
     home: str | None = None,
+    resolve=None,
+    _depth: int = 0,
 ) -> Classification | None:
     """How a remote-less git repo at ``root`` is shown when it is not a
     project (#161).
@@ -565,7 +579,8 @@ def _throwaway_git(
     m = _SCRATCH.match(root.rstrip("/") + "/")
     if m:
         return _collapse_from_encoded(
-            m.group("enc"), m.group("uuid"), session_cwds, enc_index, exists, home)
+            m.group("enc"), m.group("uuid"), session_cwds, enc_index, exists, home,
+            resolve, _depth)
     if is_harness_tool_path(root):
         return _orphan("home_config", "tool")
     return _orphan("temporary", "noise") if temp_git_root(root) else None
@@ -592,6 +607,8 @@ def _collapse_from_encoded(
     enc_index: dict[str, Anchor],
     exists=os.path.exists,
     home: str | None = None,
+    resolve=None,
+    _depth: int = 0,
 ) -> Classification:
     """Resolve a harness folder to the real project it collapses onto.
 
@@ -599,28 +616,41 @@ def _collapse_from_encoded(
     the encoded segment against known real dirs, then a filesystem-validated
     decode. An unresolvable harness folder still collapses — into a synthetic
     project keyed by the encoded name — so its activity is never orphaned.
+
+    A session that ran inside an agent's throwaway repo (#161) does not mint
+    that repo as a project: it follows the repo's own rule (``_throwaway_git``,
+    one level deep — a deeper chain is shown as temporary).
     """
+    def _target(anchor: Anchor, path: str, via: str) -> Classification:
+        if anchor.key.startswith("git_root:"):
+            if _depth >= 1 and (_SCRATCH.match(anchor.path.rstrip("/") + "/")
+                                or temp_git_root(anchor.path)):
+                return _orphan("temporary", "noise")
+            throwaway = _throwaway_git(anchor.path, session_cwds, enc_index,
+                                       exists, home, resolve, _depth + 1)
+            if throwaway is not None:
+                return throwaway
+        # A harness whose real project is itself noise (a session run from
+        # /tmp/x) must not re-mint that noise as a project (#36).
+        return _noise_of(anchor, path, exists, home) or Classification(
+            "A", "harness", "collapse", anchor.key, anchor.label, via)
+
     if uuid:
         cwd = session_cwds.get(uuid)
         if cwd:
-            anchor = anchor_of_realpath(cwd)
+            anchor = anchor_of_realpath(cwd, resolve)
             if anchor is not None:
-                # A harness whose real project is itself noise (a session run
-                # from /tmp/x) must not re-mint that noise as a project (#36).
-                return _noise_of(anchor, cwd, exists, home) or Classification(
-                    "A", "harness", "collapse", anchor.key, anchor.label, "session_cwd")
+                return _target(anchor, cwd, "session_cwd")
 
     anchor = enc_index.get(enc)
     if anchor is not None:
-        return _noise_of(anchor, anchor.path, exists, home) or Classification(
-            "A", "harness", "collapse", anchor.key, anchor.label, "encode_match")
+        return _target(anchor, anchor.path, "encode_match")
 
     decoded = fs_decode(enc)
     if decoded is not None:
         anchor = anchor_of_realpath(decoded)
         if anchor is not None:
-            return _noise_of(anchor, decoded, exists, home) or Classification(
-                "A", "harness", "collapse", anchor.key, anchor.label, "fs_decode")
+            return _target(anchor, decoded, "fs_decode")
 
     # Last resort: keep the harness folder collapsed onto a synthetic project
     # from its encoded name (never orphaned — its work still belongs to a

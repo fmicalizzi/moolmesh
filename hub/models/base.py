@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shlex
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -26,6 +28,49 @@ SHELL_TOOLS = frozenset({
     "Bash", "bash", "run_shell_command", "shell", "exec_command",
     "run_command",  # Antigravity CLI
 })
+
+
+# ``git worktree add`` evidence (#161). Removed worktrees fold back into their
+# repo only from the FULL command a session ran (#149 read a capped summary,
+# which cuts the path). Every adapter keeps that command in the event's
+# ``full_text`` — after this marker line, appended to any text the event
+# already had — but ONLY for a shell call that mentions a worktree add, so
+# nothing else about stored content changes. The workspace layer reads it
+# back with :func:`shell_evidence_command`.
+SHELL_EVIDENCE_MARKER = "[shell command]\n"
+_WORKTREE_ADD_RE = re.compile(r"\bworktree\b.*\badd\b", re.S)
+
+
+def shell_command_text(command: Any) -> str | None:
+    """A shell call's command as one string: a ``["bash", "-lc", cmd]`` argv
+    yields ``cmd``; any other argv is joined with shell quoting."""
+    if isinstance(command, str):
+        return command or None
+    if isinstance(command, (list, tuple)) and all(isinstance(a, str) for a in command):
+        if len(command) == 3 and command[1] in ("-c", "-lc", "-ic"):
+            return command[2] or None
+        return shlex.join(command) or None
+    return None
+
+
+def with_shell_evidence(full_text: str | None, command: Any) -> str | None:
+    """``full_text`` plus the full shell ``command`` when it runs a
+    ``git worktree add`` (#161); ``full_text`` unchanged otherwise."""
+    cmd = shell_command_text(command)
+    if not cmd or not _WORKTREE_ADD_RE.search(cmd):
+        return full_text
+    block = SHELL_EVIDENCE_MARKER + cmd
+    return f"{full_text}\n\n{block}" if full_text else block
+
+
+def shell_evidence_command(full_text: str | None) -> str | None:
+    """The command :func:`with_shell_evidence` stored in ``full_text``."""
+    if not full_text:
+        return None
+    i = full_text.rfind(SHELL_EVIDENCE_MARKER)
+    if i < 0 or (i and full_text[i - 2:i] != "\n\n"):
+        return None
+    return full_text[i + len(SHELL_EVIDENCE_MARKER):] or None
 
 
 class MessageRole(str, Enum):

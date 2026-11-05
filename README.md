@@ -223,6 +223,18 @@ what was already attributed to a repo and folds back the removed worktrees it
 has evidence for — the repo's own `.git/worktrees` entry or a
 `git worktree add` a session ran from the repo — never a folder name: a deleted
 folder with no such evidence stays as it is. The counts go to `hub.log`.
+A `git worktree add` counts only from its full command: every provider whose
+tool call carries the command (Claude, Codex, Qwen, OpenCode, Pi, Antigravity)
+keeps it whole in `events.db` for a shell call that adds a worktree, so a
+worktree created and removed between two polls still folds into its repo. For
+history older than that, one more pass after the upgrade — again after a backup
+of `workspace.db`, and resumable — reads the commands from the agents' own
+session files (read only; only files that mention `worktree` are parsed). A
+command whose path uses a variable or that is piped does not count, and
+evidence that names two repos for one path folds nothing. No config change is
+needed; `project_aliases` stays the manual fallback for history with no
+evidence. The scratchpad of a session that ran inside a removed worktree folds
+into the worktree's repo too.
 
 **Agent scratchpads and throwaway repos.** An agent's scratchpad folds into the
 project of the session that used it, on macOS (`/private/tmp/claude-<uid>/…`),

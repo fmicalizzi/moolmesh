@@ -32,6 +32,8 @@ Pi's do today.
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import ntpath
 import posixpath
 import re
@@ -44,6 +46,7 @@ from hub.log import get as get_logger
 from hub.models.antigravity import AntigravityEntry, AntigravityToolCall
 from hub.models.base import (
     SHELL_TOOLS,
+    with_shell_evidence,
     MessageRole,
     Provider,
     SessionMeta,
@@ -266,9 +269,17 @@ class AntigravityAdapter(BaseAdapter):
             brief = _tool_brief(call, path)
             name = call.name or "tool"
             summary = f"{name}: {brief}" if brief else name
+            # A ``git worktree add`` keeps its full command (#161), run from
+            # the call's own ``Cwd`` when it names one.
+            command = (_str_arg(call.args, "CommandLine")
+                       if call.name in SHELL_TOOLS else None)
+            cwd = _str_arg(call.args, "Cwd")
+            if command and cwd and cwd != entry.cwd and os.path.isabs(cwd):
+                command = f"cd {shlex.quote(cwd)} && {command}"
             events.append(self._event(
                 entry, project, MessageRole.TOOL_USE, summary[:_TOOL_SUMMARY_MAX],
                 tool_name=call.name or None, file_path=path,
+                full_text=with_shell_evidence(None, command),
             ))
         return events
 
