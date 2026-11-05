@@ -189,8 +189,8 @@ shows what changes when a format is less friendly.
 (`~/.gemini/antigravity-cli`) and the desktop app (Antigravity 2.0) / IDE
 (`~/.gemini/antigravity`). Same provider (`antigravity`); the session
 `metadata` records the surface as `surface` (the data dir name).
-`mool mcp setup --target antigravity` is a separate unit (its server entry
-must be named `moolmesh`).
+`mool mcp setup antigravity` (v1.33.0) registers the MCP server; its entry
+is named `moolmesh`.
 
 **Data dirs.** Read in this order, each one that exists (a missing one is
 skipped silently): the CLI's — `$ANTIGRAVITY_APP_DATA_DIR` when set (a

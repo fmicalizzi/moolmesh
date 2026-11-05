@@ -286,8 +286,10 @@ This section is a dated snapshot; `gh issue list` is the live source.
    `mool snapshot export` and `mool effort export` (contracts in
    `docs/schema/`), never its SQLite files. Changes it needs from core arrive
    here as issues; a contract change bumps the schema version.
-3. **Open in GitHub:** only the #84 tracking issue at this snapshot. New work
-   starts from an issue (see `CONTRIBUTING.md`).
+3. **Open in GitHub:** the #84 tracking issue and the bug
+   [#149](https://github.com/fmicalizzi/moolmesh/issues/149) (removed git
+   worktrees shown as repo-less projects). New work starts from an issue (see
+   `CONTRIBUTING.md`).
 
 Provider expansion and synchronous-coordination direction are owner decisions
 tracked in `VISION_ROADMAP.md` §9.
