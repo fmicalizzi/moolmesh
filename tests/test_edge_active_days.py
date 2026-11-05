@@ -257,14 +257,38 @@ class TestInitialDerivation:
         def _boom(self, *a, **kw):
             raise sqlite3.OperationalError("database is locked")
         monkeypatch.setattr(WorkspaceStore, "_attribute_event_range", _boom)
-        with pytest.raises(sqlite3.OperationalError):
-            _attribute(tmp_path, events)
-        assert _meta(tmp_path)["active_days_rederive"] == "pending"
+        backups = len(_backups(tmp_path))
+        for _ in range(3):                  # keeps failing: one backup only (#130)
+            with pytest.raises(sqlite3.OperationalError):
+                _attribute(tmp_path, events)
+            assert _meta(tmp_path)["active_days_rederive"] == "running"
+        assert len(_backups(tmp_path)) == backups + 1
 
         monkeypatch.setattr(WorkspaceStore, "_attribute_event_range", real)
         res = _attribute(tmp_path, events)
         assert res["active_days"] == 3
         assert "active_days_rederive" not in _meta(tmp_path)
+        assert len(_backups(tmp_path)) == backups + 1
+
+    def test_resumed_pass_logs_without_a_new_backup(self, env, monkeypatch, caplog):
+        tmp_path, events, repo = env
+        _two_day_session(events, repo)
+        _attribute(tmp_path, events)
+        _make_pre_114(tmp_path)
+        WorkspaceStore(tmp_path / "workspace.db").close()
+        c = sqlite3.connect(tmp_path / "workspace.db")   # an attempt died midway
+        c.execute("UPDATE rollup_meta SET value = 'running'"
+                  " WHERE key = 'active_days_rederive'")
+        c.commit()
+        c.close()
+
+        def _fail(*a, **kw):
+            raise AssertionError("no backup on a resumed pass")
+        monkeypatch.setattr(ws, "backup_workspace_db", _fail)
+        with caplog.at_level(logging.INFO, logger="hub"):
+            res = _attribute(tmp_path, events)
+        assert res["active_days"] == 3
+        assert any("sin un respaldo nuevo" in r.getMessage() for r in caplog.records)
 
 
 class TestZoneChange:

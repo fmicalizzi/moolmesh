@@ -389,6 +389,10 @@ def _mig_5_activity_rederive(conn: sqlite3.Connection) -> int:
 # ``edge_active_days.day`` is bucketed in, and the pending (re-)derivation.
 _ACTIVE_DAYS_ZONE_KEY = "active_days_zone"
 _ACTIVE_DAYS_REDERIVE_KEY = "active_days_rederive"
+# Its value while a full pass is under way (#130): set, with the day table
+# cleared, right after the backup; a retry that finds it resumes without a new
+# backup. ``pending`` means "not started yet".
+_REDERIVE_RUNNING = "running"
 
 
 def _mig_6_edge_active_days(conn: sqlite3.Connection) -> int:
@@ -3088,7 +3092,7 @@ class WorkspaceStore:
                 "SELECT key, value FROM rollup_meta WHERE key IN (?, ?)",
                 (_ACTIVE_DAYS_REDERIVE_KEY, _ACTIVE_DAYS_ZONE_KEY),
             ).fetchall())
-        if rows.get(_ACTIVE_DAYS_REDERIVE_KEY) == "pending":
+        if rows.get(_ACTIVE_DAYS_REDERIVE_KEY) in ("pending", _REDERIVE_RUNNING):
             return True
         stored = rows.get(_ACTIVE_DAYS_ZONE_KEY)
         return stored is not None and stored != zone_key(user_timezone())
@@ -3109,17 +3113,26 @@ class WorkspaceStore:
         if it fails nothing is touched and ``None`` is returned: the caller
         runs its normal pass (days keep the recorded zone) and this is retried
         next cycle. Otherwise the old days are cleared and the #114 marker set
-        to ``pending`` in ONE transaction, so a pass that fails midway is re-run
-        from scratch next cycle (resumable; every insert is idempotent). Until
-        it completes, readers fall back to ``activity_ts`` for edges with no day
-        rows. An edge none of whose events is still in events.db keeps its
+        to ``running`` in ONE transaction, so a pass that fails midway is re-run
+        from scratch next cycle without a new backup (#130; every insert is
+        idempotent). Until it completes, readers fall back to ``activity_ts``
+        for edges with no day rows. An edge none of whose events is still in events.db keeps its
         clock and gets no days (readers then date it by ``activity_ts``).
         """
         tz = user_timezone()
         zone = zone_key(tz)
         with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM rollup_meta WHERE key = ?",
+                (_ACTIVE_DAYS_REDERIVE_KEY,)).fetchone()
+            resumed = bool(row) and row[0] == _REDERIVE_RUNNING
             try:
-                backup = backup_workspace_db(self._conn, self.db_path)
+                # A resumed pass (#130): the first attempt already backed up
+                # the state before anything was cleared; a new backup now would
+                # only copy the cleared table and, retried enough, rotate the
+                # useful one out.
+                backup = None if resumed else backup_workspace_db(
+                    self._conn, self.db_path)
             except (OSError, sqlite3.Error):
                 _log.warning("atribución: no pude respaldar workspace.db; no "
                              "recalculo relojes ni días activos de las aristas "
@@ -3132,7 +3145,7 @@ class WorkspaceStore:
                 self._conn.execute("DELETE FROM edge_active_days")
                 self._conn.execute(
                     "INSERT OR REPLACE INTO rollup_meta (key, value)"
-                    " VALUES (?, 'pending')", (_ACTIVE_DAYS_REDERIVE_KEY,))
+                    " VALUES (?, ?)", (_ACTIVE_DAYS_REDERIVE_KEY, _REDERIVE_RUNNING))
                 self._conn.execute(
                     "INSERT OR REPLACE INTO rollup_meta (key, value)"
                     " VALUES (?, ?)", (_ACTIVE_DAYS_ZONE_KEY, zone))
@@ -3140,10 +3153,15 @@ class WorkspaceStore:
             except BaseException:
                 self._conn.rollback()
                 raise
-        _log.info("atribución: respaldo de workspace.db en %s antes de "
-                  "recalcular %s de las aristas (zona %r)", backup,
-                  "relojes y días activos (#101, #114)" if replace_activity
-                  else "los días activos (#114)", zone)
+        what = ("relojes y días activos (#101, #114)" if replace_activity
+                else "los días activos (#114)")
+        if resumed:
+            _log.info("atribución: retomo el recálculo de %s de las aristas sin "
+                      "un respaldo nuevo; el del primer intento sigue vigente "
+                      "(zona %r) (#130)", what, zone)
+        else:
+            _log.info("atribución: respaldo de workspace.db en %s antes de "
+                      "recalcular %s de las aristas (zona %r)", backup, what, zone)
         result = self._attribute_event_range(events_db_path, 0, hi,
                                              replace_activity=replace_activity,
                                              day_tz=tz)
