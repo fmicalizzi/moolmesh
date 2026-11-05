@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.36.6] — 2026-11-05
+
+One urgent fix for 1.36.5. No new dependencies and no migrations.
+
+### Upgrade notes
+- `pipx upgrade moolmesh --pip-args=--no-cache-dir` (or `uv tool upgrade moolmesh --no-cache`), then `mool daemon restart`, then restart open agent sessions so their MCP servers load the new code.
+- **If 1.36.5 stopped attributing** (the log shows `'_NullSessionSink' object has no attribute 'link_sessions'` on every pass), the re-derivation that 1.36.5 started resumes on the first pass after the upgrade. It reuses the backup it already took. Nothing to do by hand, and no data was lost: events kept being ingested meanwhile.
+
+### Fixed
+- **The attribution cycle failed on every pass on a machine with Codex sub-agent sessions (#165).**
+  - The #161 scan of the agents' session files parsed them with a stand-in store that lacked `link_sessions`, which Codex calls for a sub-agent session (#65).
+  - As a result, the 1.36.5 re-derivation never finished and the portfolio stayed frozen.
+  - The stand-in now absorbs every store call. Each session file is guarded on its own: a file that fails is counted as unreadable and the scan goes on. A failing scan falls back to no transcript evidence instead of stopping the attribution.
+
+---
+
 ## [1.36.5] — 2026-11-05
 
 Portfolio fixes for removed worktrees and agent scratchpads, and `mool device` in English. No new dependencies. One additive `workspace.db` migration (9), followed by one automatic re-derivation that backs the database up first.

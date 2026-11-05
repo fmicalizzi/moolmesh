@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.36.5
+Last updated: November 2026 — v1.36.6
 
 ---
 
@@ -264,6 +264,7 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.36.3** ([#149](https://github.com/fmicalizzi/moolmesh/issues/149), [#152](https://github.com/fmicalizzi/moolmesh/issues/152), [#153](https://github.com/fmicalizzi/moolmesh/issues/153)): removed git worktrees keep counting toward their repo; the README reaches PyPI; `mool query` / `mool sessions` answer with JSON instead of a traceback on a clean install.
 - **v1.36.4** ([#156](https://github.com/fmicalizzi/moolmesh/issues/156)): `mool snapshot export` and `mool effort export` messages in English; reasons and exit codes unchanged.
 - **v1.36.5** ([#161](https://github.com/fmicalizzi/moolmesh/issues/161)): removed worktrees fold into their repo from the full `git worktree add`; Linux scratchpads and agents' throwaway repos are no longer projects; `mool device` output in English.
+- **v1.36.6** ([#165](https://github.com/fmicalizzi/moolmesh/issues/165)): the #161 evidence scan no longer breaks the attribution cycle on machines with Codex sub-agent sessions.
 
 ---
 
