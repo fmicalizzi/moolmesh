@@ -747,6 +747,14 @@ mool query project moolmesh
 
 Toda la salida es JSON válido — compatible con `jq`, parseable en cualquier lenguaje, o usable desde llamadas subprocess de agentes. También: `mool status --json` y `mool discover --json` para salida parseable por máquinas.
 
+**Antes del primer arranque del daemon** todavía no existe `~/.moolmesh/events.db`. `mool query …` y `mool sessions --json` imprimen entonces un objeto JSON de error en stdout y salen con **1** (la misma salida `no_data` que `mool snapshot export` y `mool effort export`), sin crear la base:
+
+```json
+{"error": "no_data", "message": "...", "hint": "mool daemon start"}
+```
+
+Una base que existe pero no se puede leer responde igual con `"error": "db_unreadable"`. `mool sessions` sin `--json` muestra la sugerencia en stderr y sale con 1. (`mool status --json` mantiene la salida 0 con `"running": false`: "no corre" es un estado válido, mientras que una consulta sin datos no es una respuesta.) El SDK `mcp` es opcional: sin él `mool query` y `mool sessions` funcionan y no imprimen nada en stderr; sólo el arranque del servidor MCP avisa que falta.
+
 ### Endpoint de salud
 
 Cuando el dashboard está corriendo, `GET /health` retorna:

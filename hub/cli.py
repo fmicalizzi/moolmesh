@@ -2580,15 +2580,56 @@ def _write_export(text: str, output: str | None) -> None:
         print(text)
 
 
+# Read commands over events.db (#153): with no database yet (the daemon never
+# ran) or one that cannot be read they answer with this JSON object on stdout
+# and exit 1 — the ``no_data`` exit of ``snapshot``/``effort`` — never a
+# traceback, and never create the file (every read is ``mode=ro``).
+NO_DATA_EXIT = 1
+_NO_DATA_HINT = "mool daemon start"
+
+
+def _events_db_error(events_db: str) -> dict | None:
+    """``None`` when events.db exists; else the #153 error object."""
+    if os.path.isfile(events_db):
+        return None
+    return {"error": "no_data",
+            "message": "no hay base de eventos todavía (el daemon nunca corrió)",
+            "hint": _NO_DATA_HINT}
+
+
+def _read_failed(exc: Exception) -> dict:
+    return {"error": "db_unreadable",
+            "message": f"no pude leer events.db ({exc.__class__.__name__}: {exc})",
+            "hint": _NO_DATA_HINT}
+
+
+def _no_data_exit(err: dict, json_output: bool) -> None:
+    """Print the #153 error (JSON on stdout, or a human line) and exit 1."""
+    import json as _json
+    if json_output:
+        print(_json.dumps(err))
+    else:
+        print(yellow(f"{err['message']} — probá: {err['hint']}"), file=sys.stderr)
+    raise SystemExit(NO_DATA_EXIT)
+
+
 def cmd_sessions(args: argparse.Namespace) -> None:
+    import sqlite3 as _sqlite3
     from hub.mcp_server import EVENTS_DB, _get_sessions
 
-    data = _get_sessions(
-        EVENTS_DB,
-        hours=args.hours,
-        provider=args.provider,
-        branch=args.branch,
-    )
+    json_output = getattr(args, "json_output", False)
+    err = _events_db_error(EVENTS_DB)
+    if err is not None:
+        _no_data_exit(err, json_output)
+    try:
+        data = _get_sessions(
+            EVENTS_DB,
+            hours=args.hours,
+            provider=args.provider,
+            branch=args.branch,
+        )
+    except _sqlite3.Error as exc:
+        _no_data_exit(_read_failed(exc), json_output)
 
     if getattr(args, "json_output", False):
         import json as _json
@@ -2755,6 +2796,24 @@ def cmd_detect_links(args: argparse.Namespace) -> None:
 
 def cmd_query(args: argparse.Namespace) -> None:
     import json as _json
+    import sqlite3 as _sqlite3
+    from hub.mcp_server import EVENTS_DB
+
+    if args.query_command in _QUERY_COMMANDS:
+        err = _events_db_error(EVENTS_DB)
+        if err is not None:
+            _no_data_exit(err, True)
+    try:
+        _run_query(args, _json)
+    except _sqlite3.Error as exc:
+        _no_data_exit(_read_failed(exc), True)
+
+
+_QUERY_COMMANDS = ("events", "sessions", "tokens", "tools", "search", "project",
+                   "chain")
+
+
+def _run_query(args: argparse.Namespace, _json) -> None:
     from hub.mcp_server import (
         EVENTS_DB,
         _get_recent_events,

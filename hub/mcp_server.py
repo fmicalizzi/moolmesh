@@ -1968,9 +1968,21 @@ except ImportError as exc:
     # No tragamos el error: lo guardamos con contexto para distinguir
     # "mcp no instalado" de "mcp versión incompatible" (2.x movió/renombró
     # FastMCP → MCPServer). Ver issue #33 y AGENTS.md §4.
+    # Importar este módulo NO es arrancar el servidor: la CLI (`mool query`,
+    # `mool sessions`) lo importa por sus helpers de lectura, y el SDK es
+    # opcional — sin él no se imprime nada (#153). La advertencia completa,
+    # con traceback, la da el arranque del servidor (`_warn_mcp_unavailable`).
     _mcp = None
     _mcp_import_error = exc
-    _log.warning("No se pudo cargar el SDK mcp: %s", exc, exc_info=True)
+    _log.debug("SDK mcp no disponible: %s", exc)
+
+
+def _warn_mcp_unavailable() -> None:
+    """Al arrancar el servidor sin SDK: advertencia con contexto en el log y
+    el mensaje claro en stderr (no instalado vs. versión incompatible)."""
+    _log.warning("No se pudo cargar el SDK mcp: %s", _mcp_import_error,
+                 exc_info=_mcp_import_error)
+    print(_mcp_unavailable_message(_mcp_import_error), file=sys.stderr)
 
 
 def _mcp_unavailable_message(exc: ImportError | None) -> str:
@@ -2473,7 +2485,7 @@ if _mcp is not None:
 
 if __name__ == "__main__":
     if _mcp is None:
-        print(_mcp_unavailable_message(_mcp_import_error), file=sys.stderr)
+        _warn_mcp_unavailable()
         sys.exit(1)
     _register_run_file()
     print("MoolMesh MCP Server starting...", file=sys.stderr)
