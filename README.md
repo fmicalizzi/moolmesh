@@ -312,7 +312,7 @@ systemctl --user status moolmesh
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | SQLite (session → message → part) |
 | **Cursor** | `~/Library/Application Support/Cursor/User/` (macOS) | SQLite (`state.vscdb` key-value: composer bubbles) |
 | **Pi** | `~/.pi/agent/sessions/` (`$PI_CODING_AGENT_DIR`) | JSONL session tree per session |
-| **Antigravity CLI** | `~/.gemini/antigravity-cli/` (`$ANTIGRAVITY_APP_DATA_DIR`) | JSONL transcript per conversation + SQLite session index (read-only) |
+| **Antigravity** (CLI, desktop app / IDE) | `~/.gemini/antigravity-cli/` (`$ANTIGRAVITY_APP_DATA_DIR`) and `~/.gemini/antigravity/` | JSONL transcript per conversation + SQLite session index (read-only) |
 
 Sessions are auto-discovered on startup. No configuration, no API keys, no cloud services.
 
@@ -741,7 +741,7 @@ See [ROADMAP.md](ROADMAP.md) for detailed plans, open questions, and design prin
 - **Python 3.11+** — uses `tomllib` from stdlib
 - **GitHub Projects v2 only** — classic Projects (v1) not supported
 - **Cursor caveats** — Cursor stores no per-message timestamps locally (MoolMesh approximates them from composer metadata) and its on-disk schema is reverse-engineered, so a Cursor update may temporarily reduce ingestion until the parser is adjusted
-- **Antigravity caveats** — only the CLI (`agy`) is observed, not the desktop app or IDE; model, tokens, cost and git branch are not read (the transcript does not carry them reliably), and the on-disk layout is not a documented API and the CLI ships several releases a week, so an update may temporarily reduce ingestion until the parser is adjusted (details in `docs/PROVIDERS.md`)
+- **Antigravity caveats** — the CLI (`agy`) and the desktop app / IDE data dir (`~/.gemini/antigravity`) are both read, a conversation present in both is ingested once (from the CLI dir); model, tokens, cost and git branch are not read (the transcript does not carry them reliably), and the on-disk layout is not a documented API and the CLI ships several releases a week, so an update may temporarily reduce ingestion until the parser is adjusted (details in `docs/PROVIDERS.md`)
 
 ---
 

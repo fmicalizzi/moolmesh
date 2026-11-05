@@ -288,7 +288,7 @@ systemctl --user status moolmesh
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | SQLite (sesion → mensaje → parte) |
 | **Cursor** | `~/Library/Application Support/Cursor/User/` (macOS) | SQLite (`state.vscdb` clave-valor: bubbles del composer) |
 | **Pi** | `~/.pi/agent/sessions/` (`$PI_CODING_AGENT_DIR`) | Árbol de sesión JSONL por sesión |
-| **Antigravity CLI** | `~/.gemini/antigravity-cli/` (`$ANTIGRAVITY_APP_DATA_DIR`) | JSONL de transcript por conversación + índice SQLite de sesiones (solo lectura) |
+| **Antigravity** (CLI, app de escritorio / IDE) | `~/.gemini/antigravity-cli/` (`$ANTIGRAVITY_APP_DATA_DIR`) y `~/.gemini/antigravity/` | JSONL de transcript por conversación + índice SQLite de sesiones (solo lectura) |
 
 Las sesiones se auto-descubren al iniciar. Sin configuración, sin claves API, sin servicios en la nube.
 
@@ -654,7 +654,7 @@ Consulta [ROADMAP.md](ROADMAP.md) para planes detallados, preguntas abiertas y p
 - **Python 3.11+** — utiliza `tomllib` de la biblioteca estandar
 - **Solo GitHub Projects v2** — Projects clasicos (v1) no estan soportados
 - **Limitaciones de Cursor** — Cursor no guarda timestamps por mensaje localmente (MoolMesh los aproxima desde la metadata del composer) y su esquema en disco es reverse-engineered, por lo que una actualización de Cursor puede reducir temporalmente la ingesta hasta ajustar el parser
-- **Limitaciones de Antigravity** — solo se observa el CLI (`agy`), no la app de escritorio ni el IDE; no se leen modelo, tokens, costo ni branch de git (el transcript no los trae de forma confiable), y el formato en disco no es una API documentada y el CLI publica varias versiones por semana, por lo que una actualización puede reducir temporalmente la ingesta hasta ajustar el parser (detalles en `docs/PROVIDERS.md`)
+- **Limitaciones de Antigravity** — se leen el CLI (`agy`) y el directorio de la app de escritorio / IDE (`~/.gemini/antigravity`), y una conversación presente en los dos se ingiere una sola vez (desde el del CLI); no se leen modelo, tokens, costo ni branch de git (el transcript no los trae de forma confiable), y el formato en disco no es una API documentada y el CLI publica varias versiones por semana, por lo que una actualización puede reducir temporalmente la ingesta hasta ajustar el parser (detalles en `docs/PROVIDERS.md`)
 
 ---
 

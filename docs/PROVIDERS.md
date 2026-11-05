@@ -183,17 +183,22 @@ Per-provider facts a maintainer needs when the format moves. The Pi section is
 the worked example above; Antigravity is the second file-based provider and
 shows what changes when a format is less friendly.
 
-### Antigravity CLI (`agy`, v1.27.0, #74)
+### Antigravity (`agy` CLI v1.27.0, #74; desktop app / IDE, #77)
 
-**Scope.** The CLI only (`~/.gemini/antigravity-cli`). The desktop app
-(`~/.gemini/antigravity`) and the IDE (`~/.gemini/antigravity-ide`) keep
-other data dirs and are out of scope. `mool mcp setup --target antigravity`
-is a separate unit (its server entry must be named `moolmesh`).
+**Scope.** Every Antigravity surface with the same on-disk layout: the CLI
+(`~/.gemini/antigravity-cli`) and the desktop app (Antigravity 2.0) / IDE
+(`~/.gemini/antigravity`). Same provider (`antigravity`); the session
+`metadata` records the surface as `surface` (the data dir name).
+`mool mcp setup --target antigravity` is a separate unit (its server entry
+must be named `moolmesh`).
 
-**Data dir.** `$ANTIGRAVITY_APP_DATA_DIR` when set (a variable seen in the
-binary, not documented by the vendor), else `~/.gemini/antigravity-cli` on
-every platform. The vendor documents no Windows data dir: `%USERPROFILE%` plus
-the same relative path is used — unverified there.
+**Data dirs.** Read in this order, each one that exists (a missing one is
+skipped silently): the CLI's — `$ANTIGRAVITY_APP_DATA_DIR` when set (a
+variable seen in the binary, not documented by the vendor), else
+`~/.gemini/antigravity-cli` — then `~/.gemini/antigravity` (the variable
+replaces only the CLI's). A conversation id found in two dirs is ingested once,
+from the first. The vendor documents no Windows data dir: `%USERPROFILE%` plus
+the same relative paths are used — unverified there.
 
 **What is read** (strictly read-only, never written):
 
@@ -232,7 +237,8 @@ or credentials.
   `DONE | RUNNING | ERROR` and informational.
 - `conversation_summaries.db` indexes **every** Antigravity surface. Rows are
   kept only when `app_data_dir` (stored as a name relative to `~/.gemini`, e.g.
-  `antigravity-cli`) is this CLI's own. A subagent is an ordinary conversation
+  `antigravity-cli` or `antigravity`) is the data dir being read: each dir
+  keeps its own surface's rows. A subagent is an ordinary conversation
   with its own transcript and a `parent_conversation_id`.
 
 **Mapping.** `USER_INPUT` → `user`; `PLANNER_RESPONSE` → `assistant` (content),
