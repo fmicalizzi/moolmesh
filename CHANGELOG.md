@@ -6,6 +6,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.36.1] — 2026-11-05
+
+One fix. No new dependencies, no migrations.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+
+### Fixed
+- **Snapshot without a zone** (#146): with `[user] timezone` unset,
+  `mool snapshot export` wrote `"timezone": ""`, so a consumer such as the
+  mool-ops engine could not check which local day the numbers used. It now
+  writes the system zone's IANA name, or `"UTC±HH:MM"` if the system zone
+  cannot be named. The numbers do not change: they were already bucketed in
+  the system zone.
+
+---
+
 ## [1.36.0] — 2026-11-05
 
 Per-device effort for mool-ops. No new dependencies, no migrations, no new

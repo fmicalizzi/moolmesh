@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.36.0
+Last updated: November 2026 — v1.36.1
 
 ---
 
@@ -256,6 +256,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.35.0** ([#83](https://github.com/fmicalizzi/moolmesh/issues/83), [#77](https://github.com/fmicalizzi/moolmesh/issues/77)): opt-in per-contributor breakdown in the portfolio and digests (`[team]`); Antigravity desktop app / IDE read too. Per-device effort for mool-ops: design in [#140](https://github.com/fmicalizzi/moolmesh/issues/140).
 
 - **v1.36.0** ([#140](https://github.com/fmicalizzi/moolmesh/issues/140)): opt-in device identity (`mool device init`) and per-device effort export (`mool effort export`) for mool-ops, deny-by-default.
+
+- **v1.36.1** ([#146](https://github.com/fmicalizzi/moolmesh/issues/146)): the snapshot always names its zone (system IANA name when `[user] timezone` is unset).
 
 ---
 
