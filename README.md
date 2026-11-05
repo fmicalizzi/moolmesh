@@ -212,6 +212,18 @@ once. `days_worked_basis` says where they came from: `edge_active_days`, or
 `session_touches` and `active_days` keep their meaning. The CLI shows
 `Nd (Nd/Mses worked)`.
 
+**Removed worktrees.** Work done in a git worktree counts toward its repo after
+the worktree is removed. MoolMesh records each git root it sees on disk
+(`known_git_roots` in `workspace.db`; a linked worktree also records its main
+checkout), and a directory under a recorded root that no longer exists keeps
+that identity instead of showing up as a separate repo-less project. A session
+that touched both the checkout and a worktree counts once for the project. The
+first daemon pass after the upgrade, after a backup of `workspace.db`, keeps
+what was already attributed to a repo and folds back the removed worktrees it
+has evidence for — the repo's own `.git/worktrees` entry or a
+`git worktree add` a session ran from the repo — never a folder name: a deleted
+folder with no such evidence stays as it is. The counts go to `hub.log`.
+
 ---
 
 ## Updating

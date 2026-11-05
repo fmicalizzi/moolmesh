@@ -213,6 +213,19 @@ proyectos cuenta una vez. `days_worked_basis` dice de dónde salen:
 `session_touches` y `active_days` no cambian de significado. La CLI muestra
 `Nd (Nd/Mses worked)`.
 
+**Worktrees borrados.** El trabajo hecho en un worktree de git sigue contando
+para su repo después de borrar el worktree. MoolMesh registra cada raíz git que
+ve en disco (`known_git_roots` en `workspace.db`; un worktree vinculado registra
+también su checkout principal), y un directorio bajo una raíz registrada que ya
+no existe conserva esa identidad en vez de aparecer como un proyecto suelto sin
+repo. Una sesión que tocó el checkout y un worktree cuenta una vez para el
+proyecto. La primera pasada del daemon después de actualizar, tras un respaldo
+de `workspace.db`, conserva lo que ya estaba atribuido a un repo y repliega los
+worktrees borrados de los que hay evidencia — la entrada del propio repo en
+`.git/worktrees` o un `git worktree add` que una sesión corrió desde el repo —,
+nunca por el nombre de una carpeta: una carpeta borrada sin esa evidencia queda
+como está. Los conteos van a `hub.log`.
+
 ---
 
 ## Actualizar

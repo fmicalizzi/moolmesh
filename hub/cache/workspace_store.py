@@ -19,12 +19,14 @@ run-once migrations via ``schema_migrations`` (additive only, AGENTS.md §4).
 from __future__ import annotations
 
 import os
+import shlex
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from hub.cloudfiles import is_cloud_placeholder
 from hub.localtime import CONFIGURED, local_day, resolve_timezone, user_timezone, zone_key
 from hub.log import get as get_logger
 from hub.models.base import SHELL_TOOLS
@@ -34,6 +36,7 @@ from hub.correlation.workspace_resolver import (
     is_portable_abs,
     path_module,
     resolve_dir,
+    worktree_main_root,
     _containing_dir,
 )
 
@@ -250,6 +253,30 @@ CREATE TABLE IF NOT EXISTS workspace_classification (
 );
 CREATE INDEX IF NOT EXISTS idx_classification_project ON workspace_classification(project_key);
 CREATE INDEX IF NOT EXISTS idx_classification_role ON workspace_classification(role);
+
+-- Git identities seen on disk, by root (issue #149). ``resolve_dir`` answers
+-- from what exists NOW, so a removed worktree would fall to ``path_hash`` on
+-- the next pass and its sessions would leave the repo. Every git root (a
+-- checkout or a linked worktree) a pass resolves is recorded here while it
+-- exists; a directory under a recorded root that is gone from disk resolves to
+-- the recorded identity (``_IdentityMemory``). ``main_root``: the main checkout
+-- of a linked worktree (``.git`` file → ``commondir``), NULL otherwise.
+-- ``source`` says how the row was learned: 'resolved' (seen on disk) or, for
+-- directories already gone when this table arrived, the stored evidence that
+-- tied them to a repo — 'attributed' (an edge this DB had already attributed
+-- to the repo; the row is that edge's directory), 'git_worktrees' (the repo's
+-- own ``.git/worktrees`` entry) or 'worktree_add' (a ``git worktree add`` a
+-- session ran from the repo). Never a name pattern. Additive; small.
+CREATE TABLE IF NOT EXISTS known_git_roots (
+    root_path TEXT PRIMARY KEY,
+    workspace_key TEXT NOT NULL,
+    kind TEXT NOT NULL,                    -- git_remote | git_root
+    remote_url TEXT,
+    main_root TEXT,
+    source TEXT NOT NULL,                  -- resolved | attributed | git_worktrees | worktree_add
+    first_seen TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -458,6 +485,51 @@ def _mig_7_live_catchup_day(conn: sqlite3.Connection) -> int:
     return 1
 
 
+# rollup_meta key set while the #149 worktree-identity recovery is pending
+# (``pending`` / ``running``, like the #114 marker it rides with).
+_WORKTREE_RECOVER_KEY = "worktree_recover"
+# Edges on ``path_hash`` workspaces when that recovery first started (#149):
+# kept so a resumed pass still logs the whole before/after.
+_WORKTREE_RECOVER_BEFORE_KEY = "worktree_recover_before"
+
+
+def _mig_8_worktree_identity(conn: sqlite3.Connection) -> int:
+    """Create ``known_git_roots`` (#149) and schedule the recovery pass.
+
+    Additive: a new table (also in ``_SCHEMA``). A DB with edges gets the
+    ``worktree_recover`` marker plus the #114 days marker, so
+    ``attribute_incremental`` runs ONE full re-derivation (``_rederive_full``:
+    backup first, resumable) that first records the stored evidence for
+    worktrees already removed, then re-attributes every edge with the
+    registry — moving the sessions of a removed worktree back to its repo —
+    and rebuilds the days worked. Nothing is rewritten here. The days marker
+    is ``INSERT OR IGNORE`` so a pass already ``running`` resumes as one.
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS known_git_roots (
+               root_path TEXT PRIMARY KEY,
+               workspace_key TEXT NOT NULL,
+               kind TEXT NOT NULL,
+               remote_url TEXT,
+               main_root TEXT,
+               source TEXT NOT NULL,
+               first_seen TEXT NOT NULL,
+               updated_at TEXT NOT NULL
+           )"""
+    )
+    if not conn.execute("SELECT 1 FROM path_attributions LIMIT 1").fetchone():
+        return 0
+    conn.execute(
+        "INSERT OR REPLACE INTO rollup_meta (key, value) VALUES (?, 'pending')",
+        (_WORKTREE_RECOVER_KEY,),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO rollup_meta (key, value) VALUES (?, 'pending')",
+        (_ACTIVE_DAYS_REDERIVE_KEY,),
+    )
+    return 1
+
+
 # Versioned, additive migrations — each runs exactly once (mirrors git_store).
 _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
     (1, "attribution_via", _mig_1_attribution_via),
@@ -467,6 +539,7 @@ _MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], int]]] = [
     (5, "activity_rederive", _mig_5_activity_rederive),
     (6, "edge_active_days", _mig_6_edge_active_days),
     (7, "live_catchup_day", _mig_7_live_catchup_day),
+    (8, "worktree_identity", _mig_8_worktree_identity),
 ]
 
 
@@ -1089,6 +1162,179 @@ def _merge_contributors(cell: dict[str, Any],
             target[k] += v
 
 
+class _IdentityMemory:
+    """``resolve_dir`` that never forgets a git identity it saw (#149).
+
+    ``resolve_dir`` answers from what is on disk NOW: a worktree that was
+    removed resolves to ``path_hash`` (or to some unrelated repo further up),
+    so a later pass — or a full re-derivation — would move its sessions out of
+    the repo. This wraps it with the ``known_git_roots`` registry:
+
+    * every git root a pass resolves while it exists is noted (``new``) so the
+      caller persists it — a live worktree also records its main checkout;
+    * a directory under a known root that is GONE from disk resolves to the
+      identity recorded for that root, when nothing closer answers from disk.
+
+    A known root that still exists answers from disk as usual (a folder that
+    is no longer a repo is no longer one). One instance per pass; the caller
+    memoizes per directory.
+    """
+
+    def __init__(self, rows: list[tuple]):
+        # root_path -> (workspace_key, kind, remote_url, main_root)
+        self._known: dict[str, tuple] = {r[0]: tuple(r[1:5]) for r in rows}
+        self._noted: set[str] = set()
+        self.new: dict[str, tuple[WorkspaceIdentity, str | None]] = {}
+        self.recalled = 0
+
+    def _deepest_known(self, container: str) -> tuple[str, tuple] | None:
+        mod = path_module(container)
+        cur = container
+        while True:
+            hit = self._known.get(cur)
+            if hit is not None:
+                return cur, hit
+            parent = mod.dirname(cur)
+            if not parent or parent == cur:
+                return None
+            cur = parent
+
+    def note(self, ident: WorkspaceIdentity) -> None:
+        """Remember a git root resolved from disk (written by the caller)."""
+        root = ident.root_path
+        if ident.kind == "path_hash" or not root or root in self._noted:
+            return
+        self._noted.add(root)
+        prev = self._known.get(root)
+        if prev is not None and prev[0] == ident.key:
+            return
+        main = worktree_main_root(root)
+        self.new[root] = (ident, main)
+        self._known[root] = (ident.key, ident.kind, ident.remote_url, main)
+
+    def resolve(self, container: str) -> WorkspaceIdentity:
+        ident = resolve_dir(container)
+        self.note(ident)
+        found = self._deepest_known(container)
+        if found is None:
+            return ident
+        kroot, (key, kind, remote, main) = found
+        closer = ident.kind == "path_hash" or len(kroot) > len(ident.root_path or "")
+        if not closer or os.path.lexists(kroot):
+            return ident
+        self.recalled += 1
+        # A recalled git_remote points its evidence at the main checkout when
+        # known; otherwise it carries none, and the upsert keeps the row's
+        # root_path — a workspace row never takes a vanished one from here.
+        root = kroot if kind != "git_remote" else main
+        return WorkspaceIdentity(key=key, kind=kind, remote_url=remote,
+                                 root_path=root)
+
+
+# ``git worktree add`` evidence (#149): options of ``git worktree add`` that
+# take a separate value, and the global ``git`` options that do.
+_WT_ADD_VALUE_OPTS = frozenset({"-b", "-B", "--orphan", "--reason"})
+_GIT_GLOBAL_VALUE_OPTS = frozenset({"-c", "--git-dir", "--work-tree", "--namespace"})
+# Claude stores a Bash command as ``"Bash: " + command[:80]`` in ``summary``.
+_CLAUDE_BASH_SUMMARY_CAP = 80
+
+
+def _expand_arg(token: str, home: str) -> str | None:
+    """A literal path token: ``~`` / ``$HOME`` expanded, anything else that
+    the shell would rewrite (another variable, a glob, a substitution) → None."""
+    for pref in ("$HOME", "${HOME}"):
+        if token == pref or token.startswith(pref + "/"):
+            token = home + token[len(pref):]
+    if token == "~" or token.startswith("~/"):
+        token = home + token[1:]
+    if not token or any(c in token for c in "$`*?[]{}~"):
+        return None
+    return token
+
+
+def parse_worktree_adds(command: str, cwd: str | None, complete: bool,
+                        home: str | None = None) -> list[tuple[str, str]]:
+    """``(repo_dir, worktree_path)`` for each ``git worktree add`` in a shell
+    command, both absolute and normalized (#149).
+
+    Conservative by construction — anything it cannot read literally yields
+    nothing: only ``&&`` / ``;`` chains are followed (``cd`` updates the base
+    directory, ``git -C`` too); any other shell operator stops the scan; a
+    path with a variable or glob is skipped. ``complete=False`` means the text
+    may be cut (a capped summary): its last token is dropped, so a truncated
+    path never counts. ``cwd`` must be absolute (the event's own cwd).
+    """
+    if not cwd or not os.path.isabs(cwd):
+        return []
+    home = home or os.path.expanduser("~")
+    text = command
+    if not complete:
+        cut = max(text.rfind(" "), text.rfind("\t"))
+        text = text[:cut] if cut > 0 else ""
+    # A newline ends a command like ``;`` does.
+    text = text.replace("\r", "\n").replace("\n", " ; ")
+    lex = shlex.shlex(text, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        tokens = list(lex)
+    except ValueError:  # unclosed quote (cut text) → unreadable
+        return []
+    segments: list[list[str]] = [[]]
+    for tok in tokens:
+        if tok in ("&&", ";"):
+            segments.append([])
+        elif tok and all(c in "();<>|&" for c in tok):
+            break  # pipes, subshells, redirections: stop reading
+        else:
+            segments[-1].append(tok)
+    out: list[tuple[str, str]] = []
+    base: str | None = os.path.normpath(cwd)
+    for seg in segments:
+        if not seg or base is None:
+            continue
+        if seg[0] == "cd":
+            arg = _expand_arg(seg[1], home) if len(seg) == 2 else (
+                home if len(seg) == 1 else None)
+            base = (os.path.normpath(os.path.join(base, arg))
+                    if arg and arg != "-" else None)
+            continue
+        if seg[0] != "git":
+            continue
+        repo = base
+        i = 1
+        while i < len(seg) and seg[i].startswith("-"):
+            if seg[i] == "-C" and i + 1 < len(seg):
+                arg = _expand_arg(seg[i + 1], home)
+                repo = os.path.normpath(os.path.join(repo, arg)) if arg else None
+                i += 2
+            elif seg[i] in _GIT_GLOBAL_VALUE_OPTS:
+                i += 2
+            else:
+                i += 1
+            if repo is None:
+                break
+        if repo is None or seg[i:i + 2] != ["worktree", "add"]:
+            continue
+        j = i + 2
+        path = None
+        while j < len(seg):
+            a = seg[j]
+            if a == "--":
+                path = seg[j + 1] if j + 1 < len(seg) else None
+                break
+            if a in _WT_ADD_VALUE_OPTS:
+                j += 2
+            elif a.startswith("-"):
+                j += 1
+            else:
+                path = a
+                break
+        arg = _expand_arg(path, home) if path else None
+        if arg:
+            out.append((repo, os.path.normpath(os.path.join(repo, arg))))
+    return out
+
+
 class WorkspaceStore:
     """Thread-safe SQLite persistence for workspace attribution."""
 
@@ -1135,7 +1381,10 @@ class WorkspaceStore:
                ON CONFLICT(workspace_key) DO UPDATE SET
                    kind = excluded.kind,
                    remote_url = excluded.remote_url,
-                   root_path = excluded.root_path,
+                   root_path = CASE WHEN excluded.kind = 'path_hash'
+                                    THEN excluded.root_path
+                                    ELSE COALESCE(excluded.root_path,
+                                                  workspaces.root_path) END,
                    dir_path = excluded.dir_path""",
             (ident.key, ident.kind, ident.remote_url, ident.root_path, ident.dir_path, now),
         )
@@ -2763,6 +3012,46 @@ class WorkspaceStore:
         norm = mod.normpath(cwd)
         return norm != home and mod.dirname(norm) != norm
 
+    def _identity_memory(self) -> _IdentityMemory:
+        """A per-pass ``_IdentityMemory`` over ``known_git_roots`` (#149)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT root_path, workspace_key, kind, remote_url, main_root"
+                " FROM known_git_roots").fetchall()
+        return _IdentityMemory(rows)
+
+    def _flush_known_roots(self, memory: _IdentityMemory,
+                           source: str = "resolved") -> int:
+        """Persist the git roots a pass resolved on disk (#149). Idempotent:
+        a root keeps its ``first_seen``; a changed identity is updated."""
+        if not memory.new:
+            return 0
+        now = _now()
+        rows = [(root, ident.key, ident.kind, ident.remote_url, main, source,
+                 now, now) for root, (ident, main) in memory.new.items()]
+        with self._lock:
+            try:
+                self._conn.executemany(
+                    """INSERT INTO known_git_roots
+                           (root_path, workspace_key, kind, remote_url,
+                            main_root, source, first_seen, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(root_path) DO UPDATE SET
+                           workspace_key = excluded.workspace_key,
+                           kind = excluded.kind,
+                           remote_url = excluded.remote_url,
+                           main_root = excluded.main_root,
+                           source = excluded.source,
+                           updated_at = excluded.updated_at""",
+                    rows,
+                )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        memory.new.clear()
+        return len(rows)
+
     def _attribute_event_range(
         self, events_db_path: str | Path, lo: int, hi: int,
         replace_activity: bool = False,
@@ -2913,6 +3202,8 @@ class WorkspaceStore:
         # Resolve identities with NO lock held and no open transaction.
         # An absolute file_path ignores cwd in _containing_dir, so keeping the
         # first row's cwd per edge changes nothing.
+        # The identity memory (#149) keeps a removed worktree on its repo.
+        memory = self._identity_memory()
         dir_cache: dict[str, WorkspaceIdentity] = {}
         resolved: list[tuple[str, str, str, WorkspaceIdentity, str | None,
                              str | None, set[str]]] = []
@@ -2920,10 +3211,13 @@ class WorkspaceStore:
             container = _containing_dir(file_path, cwd)
             ident = dir_cache.get(container)
             if ident is None:
-                ident = resolve_dir(container)
+                ident = memory.resolve(container)
                 dir_cache[container] = ident
             resolved.append((session_id, provider, file_path, ident, ets, ats,
                              edays))
+        # Record the roots seen on disk BEFORE any edge write: if the pass
+        # fails, what it learned while the directories existed is kept.
+        self._flush_known_roots(memory)
 
         now = _now()
         if file_edges or cwd_rows:
@@ -2969,7 +3263,7 @@ class WorkspaceStore:
 
         cwd_attributed = self._attribute_cwd_fallback(
             cwd_rows, {(r[0], r[1]) for r in resolved}, dir_cache, now,
-            replace_activity=replace_activity,
+            replace_activity=replace_activity, memory=memory,
         )
 
         # #58 cleanup: drop the stale edges a full pass proved shell-only. Same
@@ -3014,6 +3308,7 @@ class WorkspaceStore:
         dir_cache: dict[str, WorkspaceIdentity],
         now: str,
         replace_activity: bool = False,
+        memory: _IdentityMemory | None = None,
     ) -> int:
         """Pass 2 of :meth:`_attribute_event_range` — the ``via='cwd'`` edges.
 
@@ -3054,15 +3349,20 @@ class WorkspaceStore:
                 ).fetchone():
                     del wanted[key]
 
+        if memory is None:
+            memory = self._identity_memory()
         edges: list[tuple[str, str, str, WorkspaceIdentity, str | None, str | None,
                           set[str]]] = []
         for (session_id, provider), cwds in wanted.items():
             for cwd, (ets, ats, edays) in cwds.items():
                 ident = dir_cache.get(cwd)
                 if ident is None:
-                    ident = resolve_dir(cwd)  # the directory itself, not its parent
+                    # The directory itself, not its parent (#40); a removed
+                    # worktree keeps its repo (#149).
+                    ident = memory.resolve(cwd)
                     dir_cache[cwd] = ident
                 edges.append((session_id, provider, cwd, ident, ets, ats, edays))
+        self._flush_known_roots(memory)
 
         edge_sql = (self._CWD_EDGE_SQL_REPLACE if replace_activity
                     else self._CWD_EDGE_SQL)
@@ -3188,6 +3488,10 @@ class WorkspaceStore:
           derivation, or a changed ``[user] timezone``).
         * #101 (``replace_activity``): each seen edge's ``activity_ts`` is
           REPLACED by the clock folded from all its events.
+        * #149 (``worktree_recover`` marker): before the pass, the stored
+          evidence for worktrees already removed is recorded in
+          ``known_git_roots`` (``_recover_worktree_roots``), so the pass moves
+          their edges back to the repo; before/after counts go to ``hub.log``.
 
         The days are always rebuilt — a #101 re-derivation moves clocks, and
         the days are bucketed on the same clocks. Backup of workspace.db first;
@@ -3207,6 +3511,12 @@ class WorkspaceStore:
                 "SELECT value FROM rollup_meta WHERE key = ?",
                 (_ACTIVE_DAYS_REDERIVE_KEY,)).fetchone()
             resumed = bool(row) and row[0] == _REDERIVE_RUNNING
+            rec = self._conn.execute(
+                "SELECT value FROM rollup_meta WHERE key = ?",
+                (_WORKTREE_RECOVER_KEY,)).fetchone()
+            # #149: the worktree-identity recovery rides this pass (and its
+            # backup); ``running`` = a cut pass being resumed.
+            recover = bool(rec) and rec[0] in ("pending", _REDERIVE_RUNNING)
             try:
                 # A resumed pass (#130): the first attempt already backed up
                 # the state before anything was cleared; a new backup now would
@@ -3230,12 +3540,23 @@ class WorkspaceStore:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO rollup_meta (key, value)"
                     " VALUES (?, ?)", (_ACTIVE_DAYS_ZONE_KEY, zone))
+                if recover:
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO rollup_meta (key, value)"
+                        " VALUES (?, ?)", (_WORKTREE_RECOVER_KEY, _REDERIVE_RUNNING))
+                    # The first attempt's count survives a resume (#149).
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO rollup_meta (key, value)"
+                        " VALUES (?, ?)", (_WORKTREE_RECOVER_BEFORE_KEY,
+                                           str(self._path_hash_edge_count_locked())))
                 self._conn.commit()
             except BaseException:
                 self._conn.rollback()
                 raise
         what = ("relojes y días activos (#101, #114)" if replace_activity
                 else "los días activos (#114)")
+        if recover:
+            what += " y la identidad de los worktrees borrados (#149)"
         if resumed:
             _log.info("atribución: retomo el recálculo de %s de las aristas sin "
                       "un respaldo nuevo; el del primer intento sigue vigente "
@@ -3243,11 +3564,32 @@ class WorkspaceStore:
         else:
             _log.info("atribución: respaldo de workspace.db en %s antes de "
                       "recalcular %s de las aristas (zona %r)", backup, what, zone)
+        evidence = (self._recover_worktree_roots(events_db_path)
+                    if recover else None)
+        if evidence is not None:
+            self._log_recovery("identidad de worktrees: %d carpetas borradas ya "
+                      "atribuidas a un repo se conservan; %d carpetas borradas "
+                      "sin repo, evidencia para %d (%d por .git/worktrees, %d "
+                      "por 'git worktree add'), %d con evidencia contradictoria "
+                      "quedan igual (#149)", evidence["attributed"],
+                      evidence["candidates"],
+                      evidence["git_worktrees"] + evidence["worktree_add"],
+                      evidence["git_worktrees"], evidence["worktree_add"],
+                      evidence["conflicting"])
         result = self._attribute_event_range(events_db_path, 0, hi,
                                              replace_activity=replace_activity,
                                              day_tz=tz)
         self.set_attribution_cursor(hi)  # only reached if every commit succeeded
         with self._lock:
+            if recover:
+                brow = self._conn.execute(
+                    "SELECT value FROM rollup_meta WHERE key = ?",
+                    (_WORKTREE_RECOVER_BEFORE_KEY,)).fetchone()
+                before_ph = int(brow[0]) if brow else 0
+                after_ph = self._path_hash_edge_count_locked()
+                self._conn.execute(
+                    "DELETE FROM rollup_meta WHERE key IN (?, ?)",
+                    (_WORKTREE_RECOVER_KEY, _WORKTREE_RECOVER_BEFORE_KEY))
             self._conn.execute(
                 "DELETE FROM rollup_meta WHERE key = ?", (_ACTIVE_DAYS_REDERIVE_KEY,))
             if replace_activity:
@@ -3281,7 +3623,243 @@ class WorkspaceStore:
             out["rederived"] = redated
         _log.info("atribución: días activos recalculados — %d aristas, %d días "
                   "(zona %r) (#114)", edges, day_rows, zone)
+        if recover:
+            moved = max(before_ph - after_ph, 0)
+            self._log_recovery("identidad de worktrees: %d aristas volvieron a su repo; "
+                      "aristas sin repo: %d antes, %d después (#149)",
+                      moved, before_ph, after_ph)
+            out["worktree_edges_recovered"] = moved
+            if evidence is not None:
+                out["worktree_evidence"] = evidence
         return out
+
+    def _log_recovery(self, msg: str, *args: Any) -> None:
+        """An INFO line of the #149 recovery that reaches ``hub.log`` from any
+        process, like a migration line (#136)."""
+        from hub.log import migration_logging
+        with migration_logging(self._conn):
+            _log.info(msg, *args)
+
+    def _path_hash_edge_count_locked(self) -> int:
+        return self._conn.execute(
+            """SELECT COUNT(*) FROM path_attributions a
+               JOIN workspaces w ON w.id = a.workspace_id
+               WHERE w.kind = 'path_hash'""").fetchone()[0]
+
+    def _recover_worktree_roots(self, events_db_path: str | Path) -> dict[str, int]:
+        """Record removed worktrees that STORED evidence ties to a repo (#149).
+
+        First, every directory this DB already attributed to a repo (an edge
+        on a git workspace) that is gone from disk is registered with that
+        identity (``attributed``): it was resolved from disk while it existed,
+        and without the row the full pass that follows would downgrade it.
+
+        Then the candidates are the ``path_hash`` workspaces with edges whose directory
+        is gone from disk. A removed directory ``W`` is registered in
+        ``known_git_roots`` (so the full pass that follows re-attributes its
+        edges to the repo) only when:
+
+        * evidence names ``W`` exactly as a worktree of one repo — git's own
+          ``<repo>/.git/worktrees/<n>/gitdir`` entry (``git_worktrees``) of a
+          repo this DB knows, or a ``git worktree add <W>`` a session ran from
+          a directory that resolves to a repo (``worktree_add``, parsed
+          literally by :func:`parse_worktree_adds`);
+        * every piece of evidence for ``W`` agrees on the identity;
+        * ``W`` is still absent from disk and is not already registered;
+        * some candidate directory is ``W`` or lies under it.
+
+        Never a name pattern: a folder called like a worktree with no evidence
+        stays as it is. Read-only on events.db and on every repo.
+        """
+        with self._lock:
+            known = self._conn.execute(
+                "SELECT root_path, main_root FROM known_git_roots").fetchall()
+            git_roots = [r for (r,) in self._conn.execute(
+                "SELECT DISTINCT root_path FROM workspaces"
+                " WHERE kind IN ('git_remote', 'git_root')"
+                " AND root_path IS NOT NULL")]
+            dirs = [d for (d,) in self._conn.execute(
+                """SELECT DISTINCT w.dir_path FROM workspaces w
+                   WHERE w.kind = 'path_hash' AND w.dir_path IS NOT NULL
+                     AND EXISTS (SELECT 1 FROM path_attributions a
+                                 WHERE a.workspace_id = w.id)""")]
+        registered = {r for r, _m in known}
+        counts = {"candidates": 0, "git_worktrees": 0, "worktree_add": 0,
+                  "conflicting": 0, "attributed": 0}
+        now = _now()
+
+        # 0. What this DB already attributed to a repo IS stored evidence:
+        # an edge on a git workspace was resolved from disk while its
+        # directory existed. A directory of such an edge that is gone now is
+        # registered with that identity, so this very pass does not downgrade
+        # it (the first re-derivation would otherwise re-resolve it from disk).
+        with self._lock:
+            git_edges = self._conn.execute(
+                """SELECT DISTINCT a.file_path, a.via, w.workspace_key, w.kind,
+                          w.remote_url
+                   FROM path_attributions a JOIN workspaces w
+                     ON w.id = a.workspace_id
+                   WHERE w.kind IN ('git_remote', 'git_root')""").fetchall()
+        seen_dirs: dict[str, set[tuple]] = {}
+        for file_path, via, key, kind, remote in git_edges:
+            if not is_portable_abs(file_path) or not os.path.isabs(file_path):
+                continue
+            d = os.path.normpath(file_path) if via == "cwd" else \
+                os.path.dirname(os.path.normpath(file_path))
+            seen_dirs.setdefault(d, set()).add((key, kind, remote))
+        seeded = []
+        for d, idents in sorted(seen_dirs.items()):
+            if d in registered or len(idents) != 1 or os.path.lexists(d):
+                continue
+            key, kind, remote = next(iter(idents))
+            seeded.append((d, key, kind, remote, None, "attributed", now, now))
+        if seeded:
+            with self._lock:
+                try:
+                    self._conn.executemany(
+                        """INSERT OR IGNORE INTO known_git_roots
+                               (root_path, workspace_key, kind, remote_url,
+                                main_root, source, first_seen, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        seeded,
+                    )
+                    self._conn.commit()
+                except BaseException:
+                    self._conn.rollback()
+                    raise
+            registered |= {r[0] for r in seeded}
+        counts["attributed"] = len(seeded)
+
+        gone = [d for d in dirs if os.path.isabs(d) and not os.path.lexists(d)]
+        counts["candidates"] = len(gone)
+        if not gone:
+            return counts
+        memory = self._identity_memory()
+        # W -> {identity tuple}, W -> {source}
+        claims: dict[str, set[tuple]] = {}
+        sources: dict[str, set[str]] = {}
+        mains: dict[str, str | None] = {}
+
+        def _claim(repo_dir: str, wt: str, source: str) -> None:
+            ident = memory.resolve(repo_dir)
+            if ident.kind == "path_hash":
+                return  # the command did not run from a repo: no evidence
+            if ident.kind == "git_root":
+                # A worktree of a remote-less repo is its own git root (what
+                # resolve_dir answered while it existed).
+                ident_t = (f"git_root:{wt}", "git_root", None)
+            else:
+                ident_t = (ident.key, ident.kind, ident.remote_url)
+            root = ident.root_path
+            mains.setdefault(wt, (worktree_main_root(root) or root) if root else None)
+            claims.setdefault(wt, set()).add(ident_t)
+            sources.setdefault(wt, set()).add(source)
+
+        # Repos to look in: the registry, the git workspaces, and every repo a
+        # session ran in (its cwd) — a workspace's root_path may name the
+        # removed worktree itself, not its checkout.
+        cwds: list[str] = []
+        if os.path.exists(str(events_db_path)):
+            src = sqlite3.connect(f"file:{events_db_path}?mode=ro", uri=True,
+                                  timeout=5)
+            try:
+                cwds = [c for (c,) in src.execute(
+                    "SELECT DISTINCT cwd FROM events WHERE cwd IS NOT NULL")
+                    if c and os.path.isabs(c)]
+            finally:
+                src.close()
+        repos: set[str] = {m or r for r, m in known} | set(git_roots)
+        dir_seen: dict[str, str | None] = {}
+        for cwd in cwds:
+            cwd = os.path.normpath(cwd)
+            if cwd in dir_seen or not os.path.isdir(cwd):
+                continue
+            ident = resolve_dir(cwd)
+            root = ident.root_path if ident.kind != "path_hash" else None
+            dir_seen[cwd] = root
+            if root:
+                memory.note(ident)
+                repos.add(worktree_main_root(root) or root)
+
+        # 1. git's own record: <repo>/.git/worktrees/<name>/gitdir → <W>/.git
+        for repo in sorted(repos):
+            admin = Path(repo) / ".git" / "worktrees"
+            try:
+                entries = sorted(admin.iterdir()) if admin.is_dir() else []
+            except OSError:
+                continue
+            for entry in entries:
+                raw = None
+                if not is_cloud_placeholder(entry / "gitdir"):
+                    try:
+                        raw = (entry / "gitdir").read_text(
+                            encoding="utf-8", errors="replace").strip()
+                    except OSError:
+                        raw = None
+                if raw and os.path.isabs(raw):
+                    wt = os.path.dirname(os.path.normpath(raw))
+                    _claim(repo, wt, "git_worktrees")
+
+        # 2. ``git worktree add`` run by a session (read-only on events.db).
+        if os.path.exists(str(events_db_path)):
+            shell = sorted(self._SHELL_TOOLS)
+            marks = ",".join("?" * len(shell))
+            src = sqlite3.connect(f"file:{events_db_path}?mode=ro", uri=True,
+                                  timeout=5)
+            try:
+                rows = src.execute(
+                    f"""SELECT provider, tool_name, file_path, summary, cwd
+                        FROM events WHERE tool_name IN ({marks})
+                          AND (file_path LIKE '%worktree%add%'
+                               OR summary LIKE '%worktree%add%')""",
+                    shell).fetchall()
+            finally:
+                src.close()
+            for provider, tool, file_path, summary, cwd in rows:
+                if file_path and "worktree" in file_path:
+                    # The command itself — but some adapters cap it.
+                    text, complete = file_path, False
+                else:
+                    text = summary or ""
+                    prefix = f"{tool}: "
+                    if text.startswith(prefix):
+                        text = text[len(prefix):]
+                    complete = (provider == "claude" and tool == "Bash"
+                                and len(text) < _CLAUDE_BASH_SUMMARY_CAP)
+                for repo_dir, wt in parse_worktree_adds(text, cwd, complete):
+                    _claim(repo_dir, wt, "worktree_add")
+
+        rows_out = []
+        for wt, idents in sorted(claims.items()):
+            if wt in registered or os.path.lexists(wt):
+                continue
+            if not any(d == wt or d.startswith(wt.rstrip(os.sep) + os.sep)
+                       for d in gone):
+                continue
+            if len(idents) != 1:
+                counts["conflicting"] += 1
+                continue
+            key, kind, remote = next(iter(idents))
+            main = mains.get(wt)
+            source = ("git_worktrees" if "git_worktrees" in sources[wt]
+                      else "worktree_add")
+            counts[source] += 1
+            rows_out.append((wt, key, kind, remote, main, source, now, now))
+        with self._lock:
+            try:
+                self._conn.executemany(
+                    """INSERT OR IGNORE INTO known_git_roots
+                           (root_path, workspace_key, kind, remote_url,
+                            main_root, source, first_seen, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rows_out,
+                )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        self._flush_known_roots(memory)
+        return counts
 
     def _activity_rederive_ready(self, events_db_path: str | Path) -> bool:
         """True when the #101 re-derivation is pending AND events.db already

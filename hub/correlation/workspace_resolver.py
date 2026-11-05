@@ -211,6 +211,39 @@ def _locate_git_config(marker: Path) -> Path | None:
     return None
 
 
+def worktree_main_root(owner_dir: str) -> str | None:
+    """The main checkout of a linked worktree at ``owner_dir`` (#149).
+
+    A linked worktree's ``.git`` is a FILE (``gitdir: <repo>/.git/worktrees/<n>``)
+    whose admin dir holds a ``commondir`` pointer to the shared ``<repo>/.git``;
+    the main checkout is that directory's parent. ``None`` for a normal checkout
+    (``.git`` is a directory), a submodule (no ``commondir``), a bare common
+    dir, or anything unreadable. Read-only, like the rest of the resolver.
+    """
+    marker = Path(owner_dir) / ".git"
+    try:
+        if not marker.is_file():
+            return None
+    except OSError:
+        return None
+    text = _read_git_text(marker)
+    m = re.search(r"gitdir:\s*(.+)", text or "")
+    if not m:
+        return None
+    gitdir = Path(m.group(1).strip())
+    if not gitdir.is_absolute():
+        gitdir = marker.parent / gitdir
+    raw = _read_git_text(Path(os.path.normpath(str(gitdir))) / "commondir")
+    if raw is None or not raw.strip():
+        return None
+    rel = raw.strip()
+    common = Path(rel) if os.path.isabs(rel) else gitdir / rel
+    common = Path(os.path.normpath(str(common)))
+    if common.name != ".git":
+        return None
+    return str(common.parent)
+
+
 def _find_git_marker(start: Path) -> tuple[Path, Path] | None:
     """Walk up from ``start`` to the nearest ancestor containing a ``.git``.
 
