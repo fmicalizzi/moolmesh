@@ -1489,6 +1489,7 @@ def _portfolio_production(
     github_db: str | None = None,
     own_emails: list[str] | None = None,
     tz: Any = _CONFIGURED_TZ,
+    team: Any = None,
 ) -> dict[str, Any]:
     """Per-project production over time — the honest-metric chart (#24 Stage 2).
 
@@ -1543,10 +1544,19 @@ def _portfolio_production(
     workspace.db (+ github.db for outcome); empty structure when events/workspace
     DB or its tables are absent. Labels masked when ``hide_project_names`` is set
     (outcome counts are integers — nothing to mask).
+
+    Per-contributor, opt-in (#83): only with ``[team] per_contributor = true``
+    (``team`` defaults to the configured ``hub.team.TeamConfig``) the result
+    carries ``per_contributor: true`` and each project's ``contributors``
+    (``{login or alias: outcome counts + PR lines}``) and ``contributors_bots``;
+    see ``WorkspaceStore.read_github_outcome``. Off, the output is unchanged.
     """
     days = min(max(int(days), 1), 90)
     if hide is None:
         hide = _hide_project_names()
+    if team is None:
+        from hub.team import configured_team
+        team = configured_team()
     empty = {"window_days": days, "providers": [], "projects": [],
              "deliverables_measurable": False}
 
@@ -1722,7 +1732,8 @@ def _portfolio_production(
         store = WorkspaceStore(Path(workspace_db))
         try:
             outcome = store.read_github_outcome(
-                workspace_db, github_db, window=(start, today), tz=tz)
+                workspace_db, github_db, window=(start, today), tz=tz,
+                team=team if team.per_contributor else None)
             try:
                 states = store.derive_project_states(
                     events_db, github_db, session_ingest=activity,
@@ -1768,6 +1779,8 @@ def _portfolio_production(
         st = states.get(pk)
         if st:
             row["state"] = st
+        if team.per_contributor:
+            _attach_contributors(row, oc)
         projects.append(row)
     # Remote-only repos (#94) have no clone, so no session edges: one with
     # GitHub activity in the window gets its own row (sessions 0) so its
@@ -1802,6 +1815,8 @@ def _portfolio_production(
         st = states.get(pk)
         if st:
             row["state"] = st
+        if team.per_contributor:
+            _attach_contributors(row, oc)
         projects.append(row)
     # Confidential repos (#95) never surface, whatever is already stored.
     excl = _exclusions()
@@ -1816,12 +1831,28 @@ def _portfolio_production(
     # Hottest (most-recent activity) on top; ties broken by session volume.
     projects.sort(key=lambda p: (p["last_day"], p["sessions"]), reverse=True)
 
-    return {
+    out = {
         "window_days": days,
         "providers": sorted(providers_seen),
         "deliverables_measurable": measurable,
         "projects": projects,
     }
+    if team.per_contributor:
+        out["per_contributor"] = True
+    return out
+
+
+def _attach_contributors(row: dict[str, Any], oc: dict[str, Any]) -> None:
+    """Per-contributor outcome on a production row (#83, opt-in only).
+
+    Contributors sorted by merged PRs in the window, then all-time, then name;
+    bots never appear among them (their share is ``contributors_bots``).
+    """
+    from hub.team import empty_counts
+    people = oc.get("contributors", {})
+    row["contributors"] = dict(sorted(people.items(), key=lambda kv: (
+        -kv[1]["merged_prs_window"], -kv[1]["merged_prs"], kv[0].lower())))
+    row["contributors_bots"] = oc.get("contributors_bots", empty_counts())
 
 
 def _get_portfolio_production(
@@ -2321,6 +2352,13 @@ if _mcp is not None:
         totales de esfuerzo NO son aditivos entre filas). Ordenado por actividad
         más reciente. Con `hide_project_names`, los labels se enmascaran (los
         conteos de outcome y el `state` son enteros/tokens — nada que enmascarar).
+
+        Desglose por persona (#83, opt-in): SÓLO con `[team] per_contributor
+        = true` el resultado trae `per_contributor: true` y, por proyecto,
+        `contributors` (`{login o alias: merged_prs, closed_issues,
+        open_issues, *_window, additions, deletions, ...}`) y
+        `contributors_bots`; los bots nunca cuentan como persona (suma por
+        persona = total − bots). Apagado (default) la salida no cambia.
 
         Trae `freshness` (#76); con `stale: true` arriba, los números NO son
         actuales (daemon caído o sync viejo) — decilo antes de usarlos.

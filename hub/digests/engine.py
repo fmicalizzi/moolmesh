@@ -23,9 +23,18 @@ class DigestEngine:
     El digest siempre retorna al menos L2. L3 es un upgrade.
     """
 
-    def __init__(self, git_store: GitStore, ollama_client=None):
+    def __init__(self, git_store: GitStore, ollama_client=None, team=None):
         self._store = git_store
         self._ollama = ollama_client
+        # [team] (#83): None = read config.toml on each digest, so turning
+        # the option on or off needs no restart.
+        self._team = team
+
+    def _team_config(self):
+        if self._team is not None:
+            return self._team
+        from hub.team import configured_team
+        return configured_team()
 
     def get_daily_digest(self, repo_id: int, date: str,
                          repo_name: str = "",
@@ -60,7 +69,8 @@ class DigestEngine:
                 return cached
 
         # L1: Stats
-        stats = compute_daily_stats(self._store, repo_id, date)
+        stats = compute_daily_stats(self._store, repo_id, date,
+                                    team=self._team_config())
 
         # L2: Template
         text = render_daily(stats, repo_name, date)
@@ -128,7 +138,8 @@ class DigestEngine:
             if cached:
                 return cached
 
-        stats = compute_weekly_stats(self._store, repo_id, week_start)
+        stats = compute_weekly_stats(self._store, repo_id, week_start,
+                                     team=self._team_config())
         text = render_weekly(stats, repo_name, week_start)
         level = 2
 

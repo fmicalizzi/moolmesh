@@ -242,3 +242,181 @@ class TestGoldenOff:
             want = (GOLDEN / f"per_contributor_off_{fname}").read_text(
                 encoding="utf-8")
             assert text == want, f"{fname} changed with the option {name}"
+
+
+# ── option on ────────────────────────────────────────────────────────
+
+
+def _on(tmp_path, config_file):
+    config_file(TEAM_ON)
+    return _build(tmp_path)
+
+
+def _row(data):
+    return [p for p in data["projects"] if p["project_key"] == "proj:acme"][0]
+
+
+COUNTED = ("merged_prs", "closed_issues", "open_issues",
+           "merged_prs_window", "closed_issues_window")
+
+
+class TestPortfolioOn:
+    def test_per_person_sum_is_total_minus_bots(self, tmp_path, utc_system,
+                                                config_file, fixed_states):
+        fx = _on(tmp_path, config_file)
+        data = _portfolio(fx)
+        fx["store"].close()
+        assert data["per_contributor"] is True
+        row = _row(data)
+        people, bots = row["contributors"], row["contributors_bots"]
+        for key in COUNTED:
+            assert sum(c[key] for c in people.values()) == row[key] - bots[key], key
+        # Bots produced 3 merged PRs (dependabot, app/*, the configured one),
+        # one closed issue and one open issue with no author.
+        assert (bots["merged_prs"], bots["closed_issues"], bots["open_issues"]) == (3, 1, 1)
+
+    def test_breakdown_by_login_with_alias_and_lines(self, tmp_path, utc_system,
+                                                     config_file, fixed_states):
+        fx = _on(tmp_path, config_file)
+        row = _row(_portfolio(fx))
+        fx["store"].close()
+        people = row["contributors"]
+        assert list(people) == ["alice-acme", "bob-acme", "carol-acme"]
+        alice = people["alice-acme"]           # PRs 1, 2 and 8 (alias)
+        assert (alice["merged_prs"], alice["merged_prs_window"]) == (3, 2)
+        assert (alice["additions"], alice["deletions"]) == (112, 15)
+        assert (alice["additions_window"], alice["deletions_window"]) == (107, 10)
+        assert alice["open_issues"] == 1       # first assignee of #23
+        bob = people["bob-acme"]
+        assert (bob["merged_prs"], bob["additions"], bob["deletions"]) == (1, 40, 2)
+        # #20 assigned to bob (author alice); #25 has no closedAt: total only.
+        assert (bob["closed_issues"], bob["closed_issues_window"]) == (2, 1)
+        carol = people["carol-acme"]
+        # #26's first assignee is a bot: the next one is credited.
+        assert (carol["merged_prs"], carol["closed_issues"], carol["open_issues"]) == (0, 1, 1)
+        for name in people:
+            assert "bot" not in name and not name.startswith("app/")
+            assert name not in ("ci-runner-acme", "alice-acme-old")
+
+    def test_rest_of_the_output_is_unchanged(self, tmp_path, utc_system,
+                                             config_file, fixed_states):
+        """On adds keys; every pre-existing value stays as in the golden."""
+        fx = _on(tmp_path, config_file)
+        data = _portfolio(fx)
+        fx["store"].close()
+        data.pop("per_contributor")
+        for p in data["projects"]:
+            p.pop("contributors")
+            p.pop("contributors_bots")
+        want = (GOLDEN / "per_contributor_off_portfolio_production.json").read_text(
+            encoding="utf-8")
+        assert json.dumps(data) == want
+
+    def test_off_never_reads_the_author(self, tmp_path, utc_system, config_file,
+                                        monkeypatch):
+        import hub.cache.workspace_store as wsmod
+
+        def _boom(*a, **kw):
+            raise AssertionError("author read with the option off")
+        monkeypatch.setattr(wsmod, "_read_contributor_rows", _boom)
+        config_file("[team]\nper_contributor = false\n")
+        fx = _build(tmp_path)
+        data = _portfolio(fx)
+        fx["store"].close()
+        assert "per_contributor" not in data
+        assert "contributors" not in _row(data)
+
+    def test_old_github_db_without_pr_stats(self, tmp_path, utc_system,
+                                            config_file, fixed_states):
+        fx = _on(tmp_path, config_file)
+        fx["store"].close()
+        c = sqlite3.connect(fx["github"])
+        c.execute("DROP TABLE github_pr_stats")
+        c.commit()
+        c.close()
+        row = _row(_portfolio(fx))
+        alice = row["contributors"]["alice-acme"]
+        assert alice["merged_prs"] == 3 and alice["additions"] == 0
+
+
+class TestDigestOn:
+    def test_daily_and_weekly_breakdown(self, tmp_path, utc_system, config_file):
+        fx = _on(tmp_path, config_file)
+        daily, weekly = _digests(fx)
+        fx["store"].close()
+        # 2026-05-06: PRs 5 (app/*) and 7 (configured bot) merged, #21 closed.
+        assert daily["stats"]["contributors"] == {
+            "carol-acme": {"prs_merged": 0, "issues_closed": 1,
+                           "additions": 0, "deletions": 0}}
+        assert "**Por persona (vista por persona activa):**" in daily["text"]
+        assert "carol-acme: 1 issues cerrados" in daily["technical_summary"]
+        # Week of 2026-05-04: bob's #3, dependabot's #4, bots 5 and 7; #21.
+        assert weekly["stats"]["contributors"] == {
+            "bob-acme": {"prs_merged": 1, "issues_closed": 0,
+                         "additions": 40, "deletions": 2},
+            "carol-acme": {"prs_merged": 0, "issues_closed": 1,
+                           "additions": 0, "deletions": 0},
+        }
+        assert "bob-acme: 1 PRs mergeados (+40/-2)" in weekly["text"]
+        merged = len(weekly["stats"]["prs_merged"])
+        people = sum(c["prs_merged"] for c in weekly["stats"]["contributors"].values())
+        assert people == merged - 3   # dependabot, app/renovate, ci-runner-acme
+
+    def test_explicit_team_wins_over_config(self, tmp_path, utc_system, config_file):
+        from hub.digests.engine import DigestEngine
+        from hub.team import TeamConfig
+        fx = _on(tmp_path, config_file)
+        engine = DigestEngine(fx["store"], team=TeamConfig())
+        daily = engine.get_daily_digest(fx["repo_id"], DAILY, force_refresh=True)
+        fx["store"].close()
+        assert "contributors" not in daily["stats"]
+
+
+class TestTeamConfig:
+    def test_defaults_off(self, config_file):
+        from hub.config import load_config
+        config_file(None)
+        cfg = load_config()
+        assert cfg.per_contributor is False
+        assert cfg.contributor_aliases == {} and cfg.bot_logins == []
+
+    def test_parse_and_round_trip(self, config_file):
+        from hub.config import load_config, save_config
+        config_file(TEAM_ON)
+        cfg = load_config()
+        assert cfg.per_contributor is True
+        assert cfg.contributor_aliases == {"alice-acme-old": "alice-acme"}
+        assert cfg.bot_logins == ["ci-runner-acme"]
+        save_config(cfg)
+        again = load_config()
+        assert (again.per_contributor, again.contributor_aliases, again.bot_logins) == (
+            True, {"alice-acme-old": "alice-acme"}, ["ci-runner-acme"])
+
+    def test_off_config_saves_without_team_section(self, config_file):
+        from hub.config import HubConfig, _serialize_toml
+        assert "[team]" not in _serialize_toml(HubConfig())
+
+    def test_non_bool_flag_stays_off(self, config_file):
+        from hub.config import load_config
+        config_file('[team]\nper_contributor = "yes"\n')
+        assert load_config().per_contributor is False
+
+    def test_bot_rule_and_alias_case_insensitive(self):
+        from hub.team import TeamConfig, credited
+        team = TeamConfig(per_contributor=True, aliases={"bob-old": "bob-acme"},
+                          bot_logins=frozenset({"ci-runner-acme"}))
+        assert credited(team, is_pr=True, author="renovate[bot]") is None
+        assert credited(team, is_pr=True, author="app/helper") is None
+        assert credited(team, is_pr=True, author="Dependabot-Preview") is None
+        assert credited(team, is_pr=True, author="CI-Runner-Acme") is None
+        assert credited(team, is_pr=True, author="") is None
+        assert credited(team, is_pr=True, author="Bob-Old") == "bob-acme"
+        assert credited(team, is_pr=False, author="x-acme",
+                        assignees='["ci-runner-acme"]') == "x-acme"
+
+
+def test_dashboard_shows_indicator_only_when_on():
+    html = (Path(__file__).parent.parent / "hub" / "dashboard" / "static"
+            / "portfolio.html").read_text(encoding="utf-8")
+    assert 'id="prod-team" hidden' in html
+    assert "getElementById('prod-team').hidden = !data.per_contributor" in html

@@ -59,8 +59,19 @@ def _issue_activity(all_issues: list[dict], first_day: str, last_day: str,
     }
 
 
+def _with_contributors(stats: dict[str, Any], team, git_store: GitStore,
+                       repo_id: int, issues: list[dict]) -> dict[str, Any]:
+    """Add ``contributors`` (#83) only when ``[team] per_contributor`` is on."""
+    if team is None or not team.per_contributor:
+        return stats
+    from hub.team import digest_breakdown
+    stats["contributors"] = digest_breakdown(
+        team, issues, stats, git_store.get_pr_stats(repo_id))
+    return stats
+
+
 def compute_daily_stats(git_store: GitStore, repo_id: int,
-                        date: str, tz=CONFIGURED) -> dict[str, Any]:
+                        date: str, tz=CONFIGURED, team=None) -> dict[str, Any]:
     """Computa estadísticas del día LOCAL para un repo.
 
     Args:
@@ -77,6 +88,8 @@ def compute_daily_stats(git_store: GitStore, repo_id: int,
         prs_opened: list[dict]
         issues_closed: list[dict] — [{number, title}]
         issues_opened: list[dict]
+        contributors: dict — sólo con ``team.per_contributor`` (#83):
+            {login o alias: {prs_merged, issues_closed, additions, deletions}}
     """
     if tz is CONFIGURED:
         tz = user_timezone()
@@ -91,9 +104,10 @@ def compute_daily_stats(git_store: GitStore, repo_id: int,
     loc_removed = sum(a.get("deletions", 0) for a in authors)
 
     # GitHub stats — filtrar por día local
-    activity = _issue_activity(git_store.get_issues(repo_id), date, date, tz)
+    issues = git_store.get_issues(repo_id)
+    activity = _issue_activity(issues, date, date, tz)
 
-    return {
+    return _with_contributors({
         "commits": commits,
         "authors": authors,
         "branches": branches,
@@ -101,11 +115,11 @@ def compute_daily_stats(git_store: GitStore, repo_id: int,
         "loc_added": loc_added,
         "loc_removed": loc_removed,
         **activity,
-    }
+    }, team, git_store, repo_id, issues)
 
 
 def compute_weekly_stats(git_store: GitStore, repo_id: int,
-                         week_start: str, tz=CONFIGURED) -> dict[str, Any]:
+                         week_start: str, tz=CONFIGURED, team=None) -> dict[str, Any]:
     """Computa estadísticas de la semana (lunes a domingo, días locales).
 
     Args:
@@ -127,12 +141,13 @@ def compute_weekly_stats(git_store: GitStore, repo_id: int,
     loc_removed = sum(a.get("deletions", 0) for a in authors)
 
     # GitHub stats — filtrar por rango de semana
-    activity = _issue_activity(git_store.get_issues(repo_id), week_start, week_end, tz)
+    issues = git_store.get_issues(repo_id)
+    activity = _issue_activity(issues, week_start, week_end, tz)
     # El weekly nunca expuso pr_merged_at (forma estable del digest cacheado).
     for pr in activity["prs_merged"]:
         pr.pop("pr_merged_at", None)
 
-    return {
+    return _with_contributors({
         "commits": commits,
         "authors": authors,
         "branches": branches,
@@ -140,4 +155,4 @@ def compute_weekly_stats(git_store: GitStore, repo_id: int,
         "loc_added": loc_added,
         "loc_removed": loc_removed,
         **activity,
-    }
+    }, team, git_store, repo_id, issues)

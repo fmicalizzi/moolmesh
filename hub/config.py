@@ -189,6 +189,14 @@ class HubConfig:
     # Tope de caracteres del texto completo guardado por evento (issue #52):
     # sobre el tope se conservan la cabeza y la cola. 0 = sin tope.
     full_text_max_chars: int = DEFAULT_FULL_TEXT_MAX_CHARS
+    # --- [team] (issue #83, opt-in) ---
+    # Desglose por persona (login de GitHub) en el outcome del portfolio y en
+    # los digests. Default False: apagado, la salida es la de siempre.
+    per_contributor: bool = False
+    # login -> alias; varios logins con el mismo alias se suman.
+    contributor_aliases: dict[str, str] = field(default_factory=dict)
+    # Logins extra que cuentan como bot (además de dependabot, *[bot], app/*).
+    bot_logins: list[str] = field(default_factory=list)
 
     # --- Vista efectiva cliente/exclusiones (issue #95): local + registro ---
 
@@ -485,6 +493,25 @@ def _serialize_toml(config: HubConfig) -> str:
         lines.extend(daemon_lines)
         lines.append("")
 
+    # Sección [team] (issue #83) — sólo si se usa: un config sin la capa no
+    # cambia al guardarse.
+    team_lines = []
+    if config.per_contributor:
+        team_lines.append("per_contributor = true")
+    if config.contributor_aliases:
+        pairs = ", ".join(
+            f'"{_toml_escape(k)}" = "{_toml_escape(v)}"'
+            for k, v in config.contributor_aliases.items()
+        )
+        team_lines.append(f"contributor_aliases = {{{pairs}}}")
+    if config.bot_logins:
+        vals = ", ".join(f'"{_toml_escape(b)}"' for b in config.bot_logins)
+        team_lines.append(f"bot_logins = [{vals}]")
+    if team_lines:
+        lines.append("[team]")
+        lines.extend(team_lines)
+        lines.append("")
+
     # Sección [[repos]] - array de tablas
     for repo in config.repos:
         lines.append("[[repos]]")
@@ -644,6 +671,20 @@ def load_config() -> HubConfig:
         if "full_text_max_chars" in data["daemon"]:
             config.full_text_max_chars = _parse_full_text_max(
                 data["daemon"]["full_text_max_chars"])
+
+    # Parse [team] section (issue #83) — desglose por persona, opt-in.
+    if isinstance(data.get("team"), dict):
+        team = data["team"]
+        flag = team.get("per_contributor", False)
+        if isinstance(flag, bool):
+            config.per_contributor = flag
+        else:
+            from hub.log import get as get_logger
+            get_logger("Config").warning(
+                "[team] per_contributor debe ser true o false; queda apagado")
+        config.contributor_aliases = _str_map(
+            team.get("contributor_aliases", {})) or {}
+        config.bot_logins = _str_list(team.get("bot_logins", [])) or []
 
     # Parse [[workspace_roots]] array (issue #21, opt-in)
     if "workspace_roots" in data:

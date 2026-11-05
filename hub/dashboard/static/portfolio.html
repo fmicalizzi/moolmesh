@@ -97,6 +97,7 @@
              lets them shrink so the name ellipsizes (P3) and the strip fills (P1). */
           --pcols: 14px minmax(0,1.6fr) 42px 30px 186px minmax(0,2.4fr); }
   .prod-top { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px; }
+  .team-on { font-size:11px; color:var(--accent); border:1px solid var(--accent); border-radius:10px; padding:1px 8px; }
   .prod-top h3 { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; font-weight:600; }
   .toggle { display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
   .toggle button { background:var(--bg3); color:var(--muted); border:none; font:inherit; font-size:11px; padding:4px 12px; cursor:pointer; border-left:1px solid var(--border); }
@@ -242,6 +243,7 @@
   <div class="prod" id="prod-card">
     <div class="prod-top">
       <h3 title="Sesiones fechadas por ingesta (MAX created_at) si se capturaron en vivo, y por la hora real del evento si son historia importada. Los totales son de la ventana elegida; una sesión que tocó varios proyectos cuenta en cada uno, así que no son aditivos entre filas.">Producción por proyecto en el tiempo — esfuerzo (sesiones), no duración</h3>
+      <span class="team-on" id="prod-team" hidden title="[team] per_contributor = true en config.toml: la entrega se desglosa por login de GitHub (sin bots). Pasá el mouse sobre el nombre de un proyecto para ver el desglose.">vista por persona activa</span>
       <div class="toggle" id="prod-toggle">
         <button data-days="4">4 días</button>
         <button data-days="7" class="on">semana</button>
@@ -374,6 +376,14 @@ function stateDot(st){
 function isMeasurable(p){
   return !!((p.state && p.state.outcome_measurable)
             || p.merged_prs || p.closed_issues || p.open_issues);
+}
+// Per-contributor breakdown (#83) for the row tooltip; '' when the view is off.
+function teamTitle(p){
+  const people = p.contributors;
+  if (!people) return '';
+  const rows = Object.entries(people).map(([who, c]) =>
+    `\n${who}: ${c.merged_prs_window} PR (+${c.additions_window}/-${c.deletions_window}) · ${c.closed_issues_window} issues cerradas (ventana)`);
+  return rows.length ? '\n— por persona —' + rows.join('') : '';
 }
 function outcomeCell(p, delivMeasurable){
   const pr=p.merged_prs||0, cl=p.closed_issues||0, op=p.open_issues||0;
@@ -637,6 +647,8 @@ function renderExec(){
 function renderProduction(data, daysN){
   _prodData = data;              // feed the exec summary (#37); re-render on toggle
   renderExec();
+  // Per-contributor view (#83, opt-in): a visible flag, nothing else moves.
+  document.getElementById('prod-team').hidden = !data.per_contributor;
   const body = document.getElementById('prod-body');
   const legendEl = document.getElementById('prod-legend');
   const projects = data.projects||[];
@@ -661,7 +673,7 @@ function renderProduction(data, daysN){
   const rows = projects.map(p =>
     `<div class="prod-row">
       ${stateDot(p.state)}
-      <span class="pc-name" title="${esc(p.project_label || '—')}">${esc(cleanName(p.project_label))}</span>
+      <span class="pc-name" title="${esc(p.project_label || '—')}${esc(teamTitle(p))}">${esc(cleanName(p.project_label))}</span>
       <span class="pc-num"><b>${p.sessions}</b></span>
       <span class="pc-num">${p.active_days}</span>
       ${outcomeCell(p, data.deliverables_measurable)}

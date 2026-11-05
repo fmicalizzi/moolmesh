@@ -1030,6 +1030,65 @@ def _keyed_repo_project_key(repo_path: str) -> str | None:
             return "git_remote:" + repo_path[len(prefix):].lower()
     return None
 
+
+# --- Per-contributor outcome (#83, opt-in) ---
+
+def _read_contributor_rows(src: sqlite3.Connection) -> list[tuple]:
+    """Outcome rows with who to credit and PR lines, from ``github.db``.
+
+    Only called when ``[team] per_contributor`` is on. ``github_pr_stats``
+    (#80) is optional: on a DB without it the lines read as unknown (0).
+    """
+    cols = {r[1] for r in src.execute("PRAGMA table_info(github_issues)")}
+    assignees = "i.assignees" if "assignees" in cols else "NULL"
+    has_stats = src.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='github_pr_stats'"
+    ).fetchone() is not None
+    lines = ("s.additions, s.deletions" if has_stats else "NULL, NULL")
+    join = ("LEFT JOIN github_pr_stats s"
+            " ON s.repo_id = i.repo_id AND s.pr_number = i.number"
+            if has_stats else "")
+    return src.execute(
+        f"""SELECT i.repo_id, i.is_pull_request, i.state, i.author, {assignees},
+                   i.pr_merged_at, i.closed_at, {lines}
+            FROM github_issues i {join}
+            WHERE (i.is_pull_request = 1 AND i.pr_merged_at IS NOT NULL)
+               OR (i.is_pull_request = 0 AND i.state IN ('open', 'closed'))"""
+    ).fetchall()
+
+
+def _fold_contributors(team: Any, rows: list[tuple],
+                       window: tuple[str, str] | None,
+                       tz: Any) -> dict[int, dict[str | None, dict[str, int]]]:
+    """``{repo_id: {contributor | None: counts}}`` — ``None`` collects bots."""
+    from hub.team import add_item, credited, empty_counts
+    out: dict[int, dict[str | None, dict[str, int]]] = {}
+    for rid, is_pr, state, author, assignees, merged_at, closed_at, add, dele in rows:
+        is_pr = bool(is_pr)
+        in_window = False
+        if window is not None:
+            day = local_day(merged_at if is_pr else closed_at, tz)
+            in_window = day is not None and window[0] <= day <= window[1]
+        name = credited(team, is_pr=is_pr, author=author, assignees=assignees)
+        cell = out.setdefault(rid, {}).setdefault(name, empty_counts())
+        add_item(cell, is_pr=is_pr, state=state, merged=merged_at is not None,
+                 in_window=in_window, additions=add, deletions=dele)
+    return out
+
+
+def _merge_contributors(cell: dict[str, Any],
+                        people: dict[str | None, dict[str, int]]) -> None:
+    """Add one repo's per-contributor counts to its project's outcome cell."""
+    from hub.team import empty_counts
+    contributors = cell.setdefault("contributors", {})
+    bots = cell.setdefault("contributors_bots", empty_counts())
+    for name, counts in people.items():
+        target = bots if name is None else contributors.setdefault(
+            name, empty_counts())
+        for k, v in counts.items():
+            target[k] += v
+
+
 class WorkspaceStore:
     """Thread-safe SQLite persistence for workspace attribution."""
 
@@ -1695,6 +1754,7 @@ class WorkspaceStore:
         github_db_path: str | Path,
         window: tuple[str, str] | None = None,
         tz: Any = CONFIGURED,
+        team: Any = None,
     ) -> dict[str, dict[str, int]]:
         """Merged-PR / closed-issue / open-issue counts per CANONICAL project.
 
@@ -1726,6 +1786,13 @@ class WorkspaceStore:
         the deferred v2.x team view. Merged-PR/closed-issue is a **FACT** for
         git-backed projects; it is a DIFFERENT signal from ``delivery_candidate``
         (#22, the gitless heuristic) and is never conflated with it.
+
+        **Per-contributor, opt-in (#83):** only when ``team`` (a
+        ``hub.team.TeamConfig``) has ``per_contributor`` on, each project also
+        carries ``contributors`` (``{login or alias: counts}``, the same counts
+        plus PR lines from ``github_pr_stats``) and ``contributors_bots`` (what
+        bots and login-less items produced), each item credited once
+        (``hub.team.credited``). Off — the default — the author is never read.
 
         Returns ``{}`` when either DB (or the needed tables) is absent —
         GitHub/outcome is optional, exactly like the git signal. A read error
@@ -1765,6 +1832,10 @@ class WorkspaceStore:
                           OR (is_pull_request = 0 AND state = 'closed'
                               AND closed_at IS NOT NULL)"""
                 ).fetchall()
+            people_rows = []
+            per_contributor = bool(getattr(team, "per_contributor", False))
+            if per_contributor:
+                people_rows = _read_contributor_rows(src)
         except sqlite3.OperationalError:
             src.close()
             return {}
@@ -1782,6 +1853,10 @@ class WorkspaceStore:
                     continue
                 cell_w = window_by_repo.setdefault(rid, [0, 0])
                 cell_w[0 if is_pr else 1] += 1
+        # repo_id -> {contributor | None (bots): counts} (#83, opt-in)
+        people_by_repo: dict[int, dict[str | None, dict[str, int]]] = {}
+        if per_contributor:
+            people_by_repo = _fold_contributors(team, people_rows, window, tz)
 
         try:
             wconn = sqlite3.connect(str(workspace_db_path), timeout=5)
@@ -1829,6 +1904,8 @@ class WorkspaceStore:
                         cell.get("merged_prs_window", 0) + wcounts[0])
                     cell["closed_issues_window"] = (
                         cell.get("closed_issues_window", 0) + wcounts[1])
+                if per_contributor:
+                    _merge_contributors(cell, people_by_repo.get(repo_id, {}))
         finally:
             wconn.close()
         return out

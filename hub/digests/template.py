@@ -8,6 +8,23 @@ def _truncate(s: str, max_len: int) -> str:
     return s if len(s) <= max_len else s[:max_len - 1] + "…"
 
 
+def _contributor_lines(stats: dict[str, Any], bullet: str) -> list[str]:
+    """Per-person block (#83); empty unless ``[team] per_contributor`` is on."""
+    people = stats.get("contributors")
+    if not people:
+        return []
+    out = []
+    for name, c in people.items():
+        parts = []
+        if c.get("prs_merged"):
+            parts.append(f'{c["prs_merged"]} PRs mergeados '
+                         f'(+{c.get("additions", 0)}/-{c.get("deletions", 0)})')
+        if c.get("issues_closed"):
+            parts.append(f'{c["issues_closed"]} issues cerrados')
+        out.append(f"{bullet}{name}: " + ", ".join(parts))
+    return out
+
+
 def render_daily(stats: dict[str, Any], repo_name: str, date: str) -> str:
     """Renderiza digest diario en español.
 
@@ -81,6 +98,13 @@ def render_daily(stats: dict[str, Any], repo_name: str, date: str) -> str:
     if issues_opened:
         nums = ", ".join(f'#{i["number"]}' for i in issues_opened)
         lines.append(f"**Issues nuevos ({len(issues_opened)}):** {nums}")
+        lines.append("")
+
+    # Per person (#83, opt-in) — bots excluded
+    people = _contributor_lines(stats, "  • ")
+    if people:
+        lines.append("**Por persona (vista por persona activa):**")
+        lines.extend(people)
         lines.append("")
 
     # Top authors
@@ -163,6 +187,13 @@ def render_weekly(stats: dict[str, Any], repo_name: str,
             lines.append(f"  • {len(issues_opened)} abiertos")
         lines.append("")
 
+    # Per person (#83, opt-in) — bots excluded
+    people = _contributor_lines(stats, "  • ")
+    if people:
+        lines.append("**Por persona (vista por persona activa):**")
+        lines.extend(people)
+        lines.append("")
+
     # Authors
     authors = stats.get("authors", [])
     if authors:
@@ -232,6 +263,13 @@ def render_technical_summary(stats: dict, repo_name: str, date: str) -> str:
         for i in issues_opened:
             lines.append(f"  #{i['number']} {i['title']}")
     lines.append("")
+
+    # Por persona (#83, opt-in) — sin bots
+    people = _contributor_lines(stats, "  ")
+    if people:
+        lines.append("Por persona (vista por persona activa):")
+        lines.extend(people)
+        lines.append("")
 
     # Autores
     authors = stats.get("authors", [])
