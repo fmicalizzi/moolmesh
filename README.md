@@ -437,6 +437,17 @@ The dashboard adds a read-on-load **`/portfolio`** view over `workspace.db` (the
 
 - `[workspace] exclude_owners = ["initech"]`, `exclude_repos = ["globex/secret-plans"]` — confidential repos that are **never read**: no `git fetch`/`git log`, no GitHub API call (issues, PRs, milestones, projects, identity checks), `repo add` (path, `--board`, `--remote`, `--owner`) refuses them (`--owner` on an excluded owner refuses before listing anything), `repo sync`/`backfill-pr-stats` skip them, and they disappear from the portfolio, the MCP tools (`get_portfolio`, `get_portfolio_grouped`, `get_portfolio_production`, `get_board_issues`, `get_snapshot`) and `/api/repos`. Matching is case-insensitive; `exclude_repos` accepts `owner/repo`, `github.com/owner/repo` or a GitHub URL. A repo registered **before** it was excluded keeps its stored data — the daemon just skips it (logged once per repo). To delete that data: `mool repo remove <path | owner/repo>` (config entry and its `github.db` rows). Registering a local clone by path still reads its `origin` URL once to learn the owner, and then stops.
 
+**Per-person breakdown, opt-in (#83)** — the portfolio outcome is contributor-agnostic by default. A team coordinator can turn on a breakdown by GitHub login, read only from what `github.db` already caches (no new GitHub call):
+
+```toml
+[team]
+per_contributor = true                                  # default false
+contributor_aliases = { "alice-acme-old" = "alice-acme" } # optional; several logins → one alias are summed
+bot_logins = ["ci-runner-acme"]                         # optional; added to dependabot, *[bot], app/*
+```
+
+With it on, `get_portfolio_production` (MCP) and `/api/workspace/portfolio/production` carry `per_contributor: true` and, per project, `contributors` (`{login or alias: merged PRs, closed / open issues, all-time and in the window, and PR lines +/- when the PR stats are cached}`) and `contributors_bots`; the daily/weekly digests add a "Por persona" block; the dashboard's production card shows "vista por persona activa" and the breakdown in each project's tooltip. A merged PR is credited to its author, an issue to its first non-bot assignee (else its author); each item to exactly one person, so the per-person sum is the total minus bots. Bots — and items with no login — count in totals, never as a person. With the option off (or absent) every output is byte-for-byte what it was before. Digests already cached keep their text until regenerated.
+
 **Full history once:** `mool repo sync --all-registered [--all | --days N]` syncs every registered repo in one bounded, resumable pass (one repo's error never stops the rest) and prints a summary. With `--all` it ingests the full git history **and** the full issues/PRs history (the incremental poll is capped at 1000 items per repo), marking each repo `history_complete`; until then the portfolio labels outcome totals `desde <first ingested commit>` instead of "all-time". Registered repos that never lit up locally fold into a collapsed "registrados sin actividad" subgroup per client, and a GitHub remote that was never registered reads "no medido" (distinct from "— sin repo" and from a measured "0 entregado").
 
 ---

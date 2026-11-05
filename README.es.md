@@ -344,6 +344,17 @@ Todos los subcomandos de `repo` usan el directorio actual cuando no se especific
 
 - `[workspace] exclude_owners = ["initech"]`, `exclude_repos = ["globex/secret-plans"]` — repos confidenciales que **nunca se leen**: ni `git fetch`/`git log`, ni llamadas a la API de GitHub (issues, PRs, milestones, projects, chequeo de identidad); `repo add` (ruta, `--board`, `--remote`, `--owner`) los rechaza (`--owner` sobre un dueño excluido se rechaza antes de listar nada), `repo sync`/`backfill-pr-stats` los saltean, y desaparecen del portfolio, de las herramientas MCP (`get_portfolio`, `get_portfolio_grouped`, `get_portfolio_production`, `get_board_issues`, `get_snapshot`) y de `/api/repos`. La comparación ignora mayúsculas; `exclude_repos` acepta `owner/repo`, `github.com/owner/repo` o una URL de GitHub. Un repo registrado **antes** de excluirlo conserva sus datos guardados — el daemon sólo lo saltea (se loguea una vez por repo). Para borrarlos: `mool repo remove <ruta | owner/repo>` (entrada de config y sus filas de `github.db`). Registrar un clon local por ruta igual lee una vez su URL de `origin` para saber el dueño, y ahí se detiene.
 
+**Desglose por persona, opt-in (#83)** — el outcome del portfolio no distingue personas por defecto. Un coordinador de equipo puede encender un desglose por login de GitHub, leído sólo de lo que `github.db` ya tiene cacheado (ninguna llamada nueva a GitHub):
+
+```toml
+[team]
+per_contributor = true                                  # default false
+contributor_aliases = { "alice-acme-old" = "alice-acme" } # opcional; varios logins → un alias se suman
+bot_logins = ["ci-runner-acme"]                         # opcional; se suma a dependabot, *[bot], app/*
+```
+
+Encendido, `get_portfolio_production` (MCP) y `/api/workspace/portfolio/production` traen `per_contributor: true` y, por proyecto, `contributors` (`{login o alias: PRs mergeadas, issues cerradas / abiertas, totales y en la ventana, y líneas +/- de PR cuando sus stats están cacheadas}`) y `contributors_bots`; los digests diario y semanal suman un bloque "Por persona"; la tarjeta de producción del dashboard muestra "vista por persona activa" y el desglose en el tooltip de cada proyecto. Una PR mergeada se acredita a su autor, una issue a su primer assignee que no sea bot (si no, a su autor); cada ítem a una sola persona, así que la suma por persona es el total menos los bots. Los bots — y los ítems sin login — cuentan en los totales, nunca como persona. Con la opción apagada (o ausente) toda salida es byte por byte la de antes. Los digests ya cacheados conservan su texto hasta regenerarse.
+
 ### Token de GitHub
 
 El token se resuelve automáticamente en este orden:
