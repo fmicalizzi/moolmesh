@@ -1,0 +1,98 @@
+{
+ "level": 2,
+ "period": "weekly",
+ "date": "2026-05-04",
+ "stats": {
+  "commits": 2,
+  "authors": [
+   {
+    "author_name": "Bob",
+    "commits": 1,
+    "insertions": 2,
+    "deletions": 2
+   },
+   {
+    "author_name": "Alice",
+    "commits": 1,
+    "insertions": 10,
+    "deletions": 1
+   }
+  ],
+  "branches": [],
+  "hot_files": [
+   {
+    "file_path": "src/a.py",
+    "changes": 1,
+    "insertions": 10,
+    "deletions": 1
+   },
+   {
+    "file_path": "src/b.py",
+    "changes": 1,
+    "insertions": 2,
+    "deletions": 2
+   }
+  ],
+  "loc_added": 12,
+  "loc_removed": 3,
+  "prs_merged": [
+   {
+    "number": 7,
+    "title": "pr 7",
+    "author": "ci-runner-acme"
+   },
+   {
+    "number": 5,
+    "title": "pr 5",
+    "author": "app/renovate"
+   },
+   {
+    "number": 4,
+    "title": "pr 4",
+    "author": "dependabot[bot]"
+   },
+   {
+    "number": 3,
+    "title": "pr 3",
+    "author": "bob-acme"
+   }
+  ],
+  "prs_opened": [
+   {
+    "number": 5,
+    "title": "pr 5",
+    "author": "app/renovate"
+   },
+   {
+    "number": 6,
+    "title": "pr 6",
+    "author": "carol-acme"
+   },
+   {
+    "number": 3,
+    "title": "pr 3",
+    "author": "bob-acme"
+   }
+  ],
+  "issues_closed": [
+   {
+    "number": 21,
+    "title": "issue 21"
+   }
+  ],
+  "issues_opened": [
+   {
+    "number": 21,
+    "title": "issue 21"
+   },
+   {
+    "number": 26,
+    "title": "issue 26"
+   }
+  ]
+ },
+ "text": "## Resumen Semanal — 4 de mayo de 2026 al 10 de mayo de 2026\n**Repo:** acme/api\n\n**Balance de la semana:** 2 commits, 2 autores, +12/-3 líneas.\n\n**Pull Requests:**\n  • 4 mergeados\n    – #7 \"pr 7\"\n    – #5 \"pr 5\"\n    – #4 \"pr 4\"\n    – #3 \"pr 3\"\n  • 3 nuevos\n\n**Issues:**\n  • 1 cerrados\n  • 2 abiertos\n\n**Contribuidores:**\n  • Bob: 1 commits (+2/-2)\n  • Alice: 1 commits (+10/-1)\n\n**Archivos calientes:**\n  • `src/a.py` — 1 cambios\n  • `src/b.py` — 1 cambios\n",
+ "narrative": "",
+ "technical_summary": "─── Resumen Técnico ───\n\nCommits: 2  |  Autores: 2  |  +12/-3 (4.0:1)\n\nPRs mergeados (4):\n  #7 pr 7  — @ci-runner-acme\n  #5 pr 5  — @app/renovate\n  #4 pr 4  — @dependabot[bot]\n  #3 pr 3  — @bob-acme\nPRs abiertos (1):\n  #6 pr 6  — @carol-acme\n\nIssues cerrados (1):\n  #21 issue 21\nIssues abiertos (2):\n  #21 issue 21\n  #26 issue 26\n\nContribuidores:\n  Bob                         1 commits   50.0%  +2/-2\n  Alice                       1 commits   50.0%  +10/-1\n\nArchivos calientes:\n  src/a.py                                                 1x  +10/-1\n  src/b.py                                                 1x  +2/-2\n",
+ "ollama_status": "not_configured"
+}
