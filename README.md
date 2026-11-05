@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/cli-banner.svg" alt="MoolMesh CLI" width="560">
+  <img src="https://raw.githubusercontent.com/fmicalizzi/moolmesh/main/docs/cli-banner.svg" alt="MoolMesh CLI" width="560">
 </p>
 
 # MoolMesh
@@ -8,12 +8,12 @@
 
 Unified observability, telemetry, and inter-agent coordination — running entirely on your machine.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/fmicalizzi/moolmesh/blob/main/LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
 [![Tests: 2417 passing](https://img.shields.io/badge/Tests-2417%20passing-green.svg)](#development)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#)
 [![PyPI](https://img.shields.io/pypi/v/moolmesh.svg)](https://pypi.org/project/moolmesh/)
-[![Español](https://img.shields.io/badge/Docs-Espa%C3%B1ol-orange.svg)](README.es.md)
+[![Español](https://img.shields.io/badge/Docs-Espa%C3%B1ol-orange.svg)](https://github.com/fmicalizzi/moolmesh/blob/main/README.es.md)
 
 ---
 
@@ -25,7 +25,7 @@ When Claude Code gets stuck in a loop, your other agents don't know. When you sp
 
 **MoolMesh congregates what is scattered.** It auto-discovers sessions from every major AI coding agent, normalizes them into a single queryable database, and exposes that state to both humans (via a dashboard) and machines (via MCP).
 
-Read our [Philosophy](PHILOSOPHY.md) to understand the dual axiom behind MoolMesh: **Human-First & Agent-First**.
+Read our [Philosophy](https://github.com/fmicalizzi/moolmesh/blob/main/PHILOSOPHY.md) to understand the dual axiom behind MoolMesh: **Human-First & Agent-First**.
 
 ---
 
@@ -252,7 +252,7 @@ first copies the database to `~/.moolmesh/backups/` (the newest 5 `events-*` and
 (`Migration N applied: …`) in `daemon.log`, or in `hub.log` when the CLI or an
 MCP server applied it. A first start that is busy with such a backup can take a
 while; `daemon start`/`restart` wait for it (see [Start](#start)). Each
-version's upgrade notes are in [CHANGELOG.md](CHANGELOG.md).
+version's upgrade notes are in [CHANGELOG.md](https://github.com/fmicalizzi/moolmesh/blob/main/CHANGELOG.md).
 
 **Coming from an older version** — only what still needs an action. Each item
 applies if the version you are upgrading *from* is older than the one named:
@@ -377,9 +377,9 @@ All `repo` subcommands default to the current directory when no path is given.
 
 **Per-PR stats:** the GitHub poll also stores, for each new or updated PR, its additions, deletions, changed files and the issues it closes (`closingIssuesReferences`, qualified as `owner/repo#n` — a PR can close issues in other repos). One GraphQL call covers up to 25 PRs, at most 50 PRs per poll; if the call fails the sync continues and the PR stays without stats. PRs cached before the upgrade (or past the per-poll cap) are filled with `mool repo backfill-pr-stats [PATH | --all-registered] [--limit N]` — bounded and resumable, it only asks for PRs still missing stats. The dashboard's PR pipeline (`/api/github/prs`) carries `additions`, `deletions`, `changed_files` and `closes`.
 
-**Versioned snapshot export:** `mool snapshot export --repo OWNER/REPO --since YYYY-MM-DD --until YYYY-MM-DD [--format json] [--output FILE]` prints one repo's snapshot for a range of local days (`[user] timezone`): issues opened and closed in the period, totals at the cut, merged PRs with their stats (+/-, files, `closes` as `owner/repo#n`) and a `freshness` field — a stable, documented contract ([`docs/schema/snapshot.v1.md`](docs/schema/snapshot.v1.md), `schema_version` `1.0`) for tools that build on MoolMesh. Two exports of the same range are byte-identical (no generation time in the body); `--output` writes atomically. A range the repo's last GitHub sync does not cover (e.g. one that includes today) is refused with exit 3 unless `--allow-incomplete`, which marks it `freshness.complete = false`. Agents get the same payload from the MCP tool `get_snapshot(repo, since, until, allow_incomplete)`. It reads only `github.db` (no new API calls) and excluded repos answer as unregistered.
+**Versioned snapshot export:** `mool snapshot export --repo OWNER/REPO --since YYYY-MM-DD --until YYYY-MM-DD [--format json] [--output FILE]` prints one repo's snapshot for a range of local days (`[user] timezone`): issues opened and closed in the period, totals at the cut, merged PRs with their stats (+/-, files, `closes` as `owner/repo#n`) and a `freshness` field — a stable, documented contract ([`docs/schema/snapshot.v1.md`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/snapshot.v1.md), `schema_version` `1.0`) for tools that build on MoolMesh. Two exports of the same range are byte-identical (no generation time in the body); `--output` writes atomically. A range the repo's last GitHub sync does not cover (e.g. one that includes today) is refused with exit 3 unless `--allow-incomplete`, which marks it `freshness.complete = false`. Agents get the same payload from the MCP tool `get_snapshot(repo, since, until, allow_incomplete)`. It reads only `github.db` (no new API calls) and excluded repos answer as unregistered.
 
-**Per-device effort export (opt-in):** `mool device init [--label TEXT]` creates `~/.moolmesh/device.json` (mode 600: a random secret that never leaves the machine, your label, and a hash of the machine id — keep it out of dotfile sync). Then `mool effort export --org ORG --timezone IANA --since YYYY-MM-DD --until YYYY-MM-DD --repo OWNER/NAME [--repo …] | --repos-from FILE [--output FILE]` writes, for the **listed repos only**, one row per `(repo, local day, provider)` with `sessions` and `touches` ([`docs/schema/effort.v1.md`](docs/schema/effort.v1.md), `kind` `moolmesh.effort`). Without a repo list or without `device.json` it refuses; a `device.json` copied from another machine is refused until `mool device init --reset`. The device id in the file is `HMAC(secret, org)` — a different id per organization. Unlisted repos, `exclude_repos`/`exclude_owners` and folders without a remote add nothing (no row, no count, no total). `day` is the local day in `--timezone` (the organization's zone, not this machine's); `repo_id` is the numeric GitHub id, so a transferred repo keeps its series. The primary measure is days worked (distinct `day`s); `sessions`/`touches` are not additive across repos. The header carries `generated_at`, `data_through` and `stale` (the daemon's own record does not cover the period); re-exporting a period replaces it. Same data and arguments give identical `rows`. Read-only, no GitHub API calls, no author identities. `mool device show [--org ORG]` prints the label, the per-org id and whether the file belongs to this machine (never the secret).
+**Per-device effort export (opt-in):** `mool device init [--label TEXT]` creates `~/.moolmesh/device.json` (mode 600: a random secret that never leaves the machine, your label, and a hash of the machine id — keep it out of dotfile sync). Then `mool effort export --org ORG --timezone IANA --since YYYY-MM-DD --until YYYY-MM-DD --repo OWNER/NAME [--repo …] | --repos-from FILE [--output FILE]` writes, for the **listed repos only**, one row per `(repo, local day, provider)` with `sessions` and `touches` ([`docs/schema/effort.v1.md`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/effort.v1.md), `kind` `moolmesh.effort`). Without a repo list or without `device.json` it refuses; a `device.json` copied from another machine is refused until `mool device init --reset`. The device id in the file is `HMAC(secret, org)` — a different id per organization. Unlisted repos, `exclude_repos`/`exclude_owners` and folders without a remote add nothing (no row, no count, no total). `day` is the local day in `--timezone` (the organization's zone, not this machine's); `repo_id` is the numeric GitHub id, so a transferred repo keeps its series. The primary measure is days worked (distinct `day`s); `sessions`/`touches` are not additive across repos. The header carries `generated_at`, `data_through` and `stale` (the daemon's own record does not cover the period); re-exporting a period replaces it. Same data and arguments give identical `rows`. Read-only, no GitHub API calls, no author identities. `mool device show [--org ORG]` prints the label, the per-org id and whether the file belongs to this machine (never the secret).
 
 **Board repos (issues-only backlogs):** a repo used only as an issue backlog, with no code, is registered as a board — `mool repo add --board acme/backlog` (no local clone needed; a local clone path also works). In `config.toml` that is `kind = "board"` on its `[[repos]]` entry (default `"code"`, today's behaviour; a hand edit is picked up when the daemon restarts). A board runs no `git fetch` and no commit ingestion, only the GitHub issues sync (the same calls as any repo — no new API calls). The portfolio shows it as `board · N abiertas · M cerradas` instead of "0 entregado" and leaves it out of the merged-PR ranking. Agents read the backlog with the MCP tool `get_board_issues(repo, state, label, assignee, min_age_days, max_age_days, days, limit)`: issues filtered by label, assignee and age, plus the issues opened and closed on a local day of the last `days` days (`[user] timezone`) and the open backlog by label. It works on code repos too.
 
@@ -581,7 +581,7 @@ All tools are read-only.
 | `get_delivery_candidates` | Likely-delivered work, as candidates with confidence |
 | **GitHub** | |
 | `get_board_issues` | A repo's issues by label, assignee and age, with opened/closed counts per local day |
-| `get_snapshot` | The versioned snapshot of `mool snapshot export` ([`docs/schema/snapshot.v1.md`](docs/schema/snapshot.v1.md)) |
+| `get_snapshot` | The versioned snapshot of `mool snapshot export` ([`docs/schema/snapshot.v1.md`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/snapshot.v1.md)) |
 
 Resources: `hub://schema` (database schema), `hub://projects` (project list with stats).
 
@@ -839,16 +839,16 @@ MoolMesh started with coding-agent sessions, but the vision is to **observe the 
 | **Shipped** | v1.28 | **One local day** (`[user] timezone`, DST-aware) for digests, the workspace rollup and the portfolio, plus the delivery of a time window; OpenCode timestamps in UTC; observe robustness: streaming reads, a per-event full-text cap, self-pruning backups, old data stored as history on any path, provider entry ids (1.28.1) (#81, #79, #52, #54, #62, #67) |
 | **Shipped** | v1.29 | **Per-PR stats** (+/-, changed files, closed issues as `owner/repo#n`) and `mool repo backfill-pr-stats`; `daemon stop` waits for the process to exit, shutdown under a second (1.29.1) (#80, #96) |
 | **Shipped** | v1.30 | **Board repos** (issues-only backlogs, MCP `get_board_issues`), **remote-only repos** (`repo add --remote`, `--owner`) with identity by GitHub id, owner aliases, a shared client registry and excluded repos (#93, #94, #95) |
-| **Shipped** | v1.31 | **Versioned snapshot export** (`mool snapshot export`, MCP `get_snapshot`, [`docs/schema/snapshot.v1.md`](docs/schema/snapshot.v1.md)); outage days re-dated; every module logs under `hub.*` and `daemon start` waits out a slow start (1.31.1–1.31.2) (#82, #101, #107, #108, #111) |
+| **Shipped** | v1.31 | **Versioned snapshot export** (`mool snapshot export`, MCP `get_snapshot`, [`docs/schema/snapshot.v1.md`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/snapshot.v1.md)); outage days re-dated; every module logs under `hub.*` and `daemon start` waits out a slow start (1.31.1–1.31.2) (#82, #101, #107, #108, #111) |
 | **Shipped** | v1.32 | **Days worked:** the production strip counts a session on every local day it worked a project (#114) |
 | **Shipped** | v1.33 | Active branch of tree sessions in `mool export` and the MCP session events; `mool mcp setup antigravity`; `.git` reads never trigger cloud downloads; orphan workspaces pruned; Codex attribution fixes (#67, #77, #52, #46, #47, #48, #49) |
 | **Shipped** | v1.34 | Days worked next to touches in the rollup views; Qwen active branch; parallel tool results visible again (1.34.1); an outage catch-up counts on its own day and `mool export` is complete (1.34.2); migrations logged in `hub.log` (1.34.3) (#122, #123, #127, #131, #132, #130, #136) |
 | **Shipped** | v1.35 | **Per-contributor breakdown, opt-in** (`[team]`) in the portfolio and digests; **Antigravity desktop app / IDE** read too (#83, #77) |
-| **Shipped** | v1.36 | **Device identity and per-device effort export**, opt-in and deny-by-default (`mool device`, `mool effort export`, [`docs/schema/effort.v1.md`](docs/schema/effort.v1.md)); the snapshot always names its zone (1.36.1) (#140, #146) |
+| **Shipped** | v1.36 | **Device identity and per-device effort export**, opt-in and deny-by-default (`mool device`, `mool effort export`, [`docs/schema/effort.v1.md`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/effort.v1.md)); the snapshot always names its zone (1.36.1) (#140, #146) |
 | **Next** | — | **mool-ops engine**, a companion package in its own repo that reads MoolMesh only through `mool snapshot export` and `mool effort export` (#84). The container split (#30) was closed as won't-do for now. Org-scale team visibility stays deferred to `v2.x`; core offers only the opt-in `[team]` breakdown. |
 | **Future** | v2.x | Workspace Phase D (cross-machine, opt-in); autonomous agents; org-scale observability |
 
-See [ROADMAP.md](ROADMAP.md) for detailed plans, open questions, and design principles.
+See [ROADMAP.md](https://github.com/fmicalizzi/moolmesh/blob/main/ROADMAP.md) for detailed plans, open questions, and design principles.
 
 ---
 
@@ -876,10 +876,10 @@ pytest tests/ -v --cov=hub
 
 2417 tests. Zero external dependencies. Python stdlib + SQLite.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+See [CONTRIBUTING.md](https://github.com/fmicalizzi/moolmesh/blob/main/CONTRIBUTING.md) for guidelines.
 
 ---
 
 ## License
 
-[MIT](LICENSE) — Your telemetry is yours.
+[MIT](https://github.com/fmicalizzi/moolmesh/blob/main/LICENSE) — Your telemetry is yours.
