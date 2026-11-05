@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.34.2
+Last updated: November 2026 — v1.34.3
 
 ---
 
@@ -250,6 +250,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.34.1** ([#127](https://github.com/fmicalizzi/moolmesh/issues/127)): the active-branch view no longer hides parallel tool results of Claude and Qwen sessions.
 
 - **v1.34.2** ([#131](https://github.com/fmicalizzi/moolmesh/issues/131), [#132](https://github.com/fmicalizzi/moolmesh/issues/132)): an outage catch-up's live rows count on their own day; `mool export` writes JSON to `--output` and never stops at 500 events.
+
+- **v1.34.3** ([#130](https://github.com/fmicalizzi/moolmesh/issues/130), [#136](https://github.com/fmicalizzi/moolmesh/issues/136)): migrations applied by the CLI or an MCP server are logged in `hub.log`; a failing re-derivation keeps its first backup.
 
 ---
 

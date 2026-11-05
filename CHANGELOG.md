@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.34.3] — 2026-11-05
+
+Two fixes. No new dependencies, no migrations.
+
+### Upgrade notes
+- Upgrade, then restart the daemon:
+  - pipx: `pipx upgrade moolmesh --pip-args=--no-cache-dir`
+  - uv: `uv tool upgrade moolmesh --no-cache`
+  - pip: `python -m pip install --upgrade --no-cache-dir moolmesh`
+  - then `mool daemon restart`
+- Restart open agent sessions so their MCP servers load the new code
+  (`mool doctor` lists stale ones).
+
+### Fixed
+- **Migrations left no trace** (#136): events.db never logged an applied
+  migration, and the CLI and MCP servers do not configure logging, so a
+  migration they applied appeared in no log. Every store now logs
+  `Migration N applied: …`, and when the process applying it is not the
+  daemon, the line still goes to `~/.moolmesh/hub.log`, tagged with its pid.
+  Nothing is printed to the terminal.
+- **Re-derivation retries and backups** (#130): if the one-time days-worked
+  recalculation fails midway, its retries no longer take a new
+  `workspace.db` backup each cycle. The first one, taken before anything was
+  cleared, is kept and cannot be rotated out.
+
+---
+
 ## [1.34.2] — 2026-11-05
 
 Two fixes. No new dependencies. One additive workspace.db migration that only
