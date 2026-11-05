@@ -282,14 +282,14 @@ From *effort* to *outcome* — the loose portfolio follow-ups (#24 Stage 3, #25)
 
 Deferred out of the epic:
 
-- **Container split** ([#30](https://github.com/fmicalizzi/moolmesh/issues/30)): decompose a shared-workspace node (`SHARED-WORKSPACE`) into its distinct child projects/clients — needs re-anchoring at the resolver layer, so it is a separate follow-up rather than part of #29.
+- **Container split** ([#30](https://github.com/fmicalizzi/moolmesh/issues/30)): decompose a shared-workspace node (`SHARED-WORKSPACE`) into its distinct child projects/clients — needs re-anchoring at the resolver layer, so it is a separate follow-up rather than part of #29. **Closed as won't-do for now** (owner decision, 2026-09-19): the case behind it was not a structure that generalizes.
 - **Team/org visibility** — deferred to `v2.x` Org-Scale: the outcome data is inherently multi-actor and the model already carries contributors latently (counted contributor-agnostic today); not built now — the largest privacy surface.
 
 (#24 and #25 were folded into this epic and closed as superseded.)
 
 ### Operations tracking (mool-ops, [#84](https://github.com/fmicalizzi/moolmesh/issues/84))
 
-A coordinator's view of an organization's delivery — what was delivered, by whom and when, across all its repos — proposed from a real multi-repo use case ([`docs/proposals/mool-ops/`](docs/proposals/mool-ops/DECISIONS.md)). The engine (chained snapshots, organization registry, round reports in a private data repo) is a **companion package**, because it needs CI, a GitHub App and writes that MoolMesh core does not do. Core takes the generic gaps, one unit per release: stale-data flag + autostart (#76, `v1.27.2`), local day and time windows (#81), per-PR stats (#80), board and remote-only repos and clients spanning several owners (drafts 06–08), and a versioned export as the engine's contract (#82). Per-contributor data is an open decision (#83).
+A coordinator's view of an organization's delivery — what was delivered, by whom and when, across all its repos — proposed from a real multi-repo use case ([`docs/proposals/mool-ops/`](docs/proposals/mool-ops/DECISIONS.md)). The engine (chained snapshots, organization registry, round reports in a private data repo) is a **companion package**, because it needs CI, a GitHub App and writes that MoolMesh core does not do. **The core gaps are all shipped:** stale-data flag + autostart (#76, `v1.27.2`), local day and time windows (#81, `v1.28.0`), per-PR stats (#80, `v1.29.0`), board and remote-only repos and clients spanning several owners (#93, #94, #95, `v1.30.0`), a versioned snapshot export as the engine's contract (#82, `v1.31.0`), an opt-in per-contributor breakdown (#83, `v1.35.0`) and per-device effort export (#140, `v1.36.0`). The engine lives in its own repo (`fmicalizzi/mool-ops`, private until its first release) and reads MoolMesh only through `mool snapshot export` and `mool effort export`, never its SQLite files.
 
 ### Provider pipeline (Breadth — VISION §5)
 
