@@ -420,7 +420,7 @@ class TestCli:
         assert r3.returncode == 0 and r3.stdout == ""
         assert out.read_text() == r1.stdout
         snap = json.loads(r1.stdout)
-        assert validate(snap, SCHEMA) == [] and snap["timezone"] == ""
+        assert validate(snap, SCHEMA) == [] and snap["timezone"] != ""  # #146
 
     def test_incomplete_exit_3_and_allow(self, home):
         args = ["--repo", "acme/widget-services", "--since", "2026-11-02",

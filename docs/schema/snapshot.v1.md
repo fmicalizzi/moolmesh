@@ -25,7 +25,7 @@ format (and the default).
 | `org` | string | The client the owner maps to through `client_owner_aliases` (#95, local config or shared registry); otherwise the GitHub owner |
 | `repo` | object | `id` (numeric GitHub id; `null` until the first GitHub sync records it, #94), `label` (`owner/name` as last synced), `kind` (`code` or `board`; a remote-only repo, #94, is `code`) |
 | `date` | date | The cut: the last day of the period (`until`) |
-| `timezone` | string | IANA zone of `[user] timezone`; `"UTC"`; or `""` when unset (system zone) |
+| `timezone` | string | Zone the days are bucketed in: IANA zone of `[user] timezone`, `"UTC"`, or when unset the system zone's IANA name (or `"UTC±HH:MM"` if it cannot be named). Never empty since v1.36.1 (#146) |
 | `period` | object | `start`, `end` (local days, inclusive), `days` |
 | `issues` | object | `opened_this_period`, `closed_this_period`, and at the cut `total_open`, `total_closed` |
 | `prs` | object | `merged_this_period`, `open` and `open_bots` (open at the cut), `total_additions`, `total_deletions` (of the PRs merged in the period) |

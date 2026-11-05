@@ -27,6 +27,7 @@ machine's *current* offset.
 from __future__ import annotations
 
 import functools
+import os
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 
@@ -98,6 +99,62 @@ def zone_key(tz: Any = CONFIGURED) -> str:
     if tz is timezone.utc:
         return "UTC"
     return str(getattr(tz, "key", "") or tz)
+
+
+def system_zone_name() -> str:
+    """IANA name of the system zone, or ``""`` when it cannot be named (#146).
+
+    Tried in order: ``$TZ`` (a plain IANA name), ``/etc/timezone`` (Debian),
+    and the ``/etc/localtime`` symlink's path after ``zoneinfo/`` (Linux and
+    macOS). Each candidate must load as a ``ZoneInfo``; nothing is guessed.
+    """
+    from pathlib import Path
+    from zoneinfo import ZoneInfo
+
+    candidates: list[str] = []
+    env = os.environ.get("TZ", "").strip().lstrip(":")
+    if env and not env.startswith("/"):
+        candidates.append(env)
+    try:
+        candidates.append(Path("/etc/timezone").read_text(encoding="utf-8").strip())
+    except OSError:
+        pass
+    try:
+        target = os.readlink("/etc/localtime")
+        if "zoneinfo/" in target:
+            candidates.append(target.split("zoneinfo/", 1)[1])
+    except OSError:
+        pass
+    for name in candidates:
+        if not name:
+            continue
+        try:
+            ZoneInfo(name)
+        except Exception:  # noqa: BLE001 — unknown or malformed key
+            continue
+        return name
+    return ""
+
+
+def zone_label(tz: Any = CONFIGURED, now: datetime | None = None) -> str:
+    """The zone days are bucketed in, as a name a consumer can compare (#146).
+
+    Like :func:`zone_key`, but never ``""``: an unset ``[user] timezone`` (the
+    system zone) is named by :func:`system_zone_name`, else written as its
+    current UTC offset (``"UTC-06:00"``). For output only — ``zone_key``
+    stays the stored key (``""`` = system) used to detect zone changes.
+    """
+    key = zone_key(tz)
+    if key:
+        return key
+    name = system_zone_name()
+    if name:
+        return name
+    off = (now or datetime.now().astimezone()).utcoffset() or timedelta(0)
+    minutes = int(off.total_seconds() // 60)
+    sign = "+" if minutes >= 0 else "-"
+    hh, mm = divmod(abs(minutes), 60)
+    return f"UTC{sign}{hh:02d}:{mm:02d}"
 
 
 def to_aware(value: Any) -> datetime | None:

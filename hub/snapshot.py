@@ -279,7 +279,7 @@ def build_snapshot(
             "kind": "board" if kind == "board" else "code",
         },
         "date": until,
-        "timezone": localtime.zone_key(zone),
+        "timezone": localtime.zone_label(zone),
         "period": {
             "start": since,
             "end": until,
