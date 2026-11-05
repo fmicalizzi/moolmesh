@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.36.4] — 2026-11-05
+
+One fix. No new dependencies and no migrations.
+
+### Upgrade notes
+- `pipx upgrade moolmesh --pip-args=--no-cache-dir` (or `uv tool upgrade moolmesh --no-cache`), then `mool daemon restart`, then restart open agent sessions so their MCP servers load the new code.
+- If a script matches the text of these errors, match the exit code or the `reason` instead. Only the text changed.
+
+### Fixed
+- **Export messages in English (#156):** the errors and warnings of `mool snapshot export` and `mool effort export` were in Spanish while the rest of the CLI is in English, and tools such as mool-ops embed them in their own output. That includes the device errors `effort export` shows and the error text of the MCP tool `get_snapshot`. Reasons and exit codes do not change. A test scans the source so Spanish messages can't come back.
+
+---
+
 ## [1.36.3] — 2026-11-05
 
 Three fixes. No new dependencies. One additive `workspace.db` migration (8), followed by one automatic re-derivation that backs the database up first.

@@ -1,6 +1,6 @@
 [project]
 name = "moolmesh"
-version = "1.36.3"
+version = "1.36.4"
 readme = "README.md"
 description = "The context mesh for autonomous agents — unified observability, telemetry, and inter-agent coordination"
 requires-python = ">=3.11"
