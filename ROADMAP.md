@@ -1,6 +1,6 @@
 # MoolMesh Roadmap
 
-Last updated: November 2026 — v1.36.2
+Last updated: November 2026 — v1.36.3
 
 ---
 
@@ -260,6 +260,8 @@ The rest of the audit decisions ([#36](https://github.com/fmicalizzi/moolmesh/is
 - **v1.36.1** ([#146](https://github.com/fmicalizzi/moolmesh/issues/146)): the snapshot always names its zone (system IANA name when `[user] timezone` is unset).
 
 - **v1.36.2** (docs only): README / README.es parity, one Updating section, roadmap through v1.36, CLI and MCP reference checked against the real commands; a per-release documentation checklist in `AGENTS.md`.
+
+- **v1.36.3** ([#149](https://github.com/fmicalizzi/moolmesh/issues/149), [#152](https://github.com/fmicalizzi/moolmesh/issues/152), [#153](https://github.com/fmicalizzi/moolmesh/issues/153)): removed git worktrees keep counting toward their repo; the README reaches PyPI; `mool query` / `mool sessions` answer with JSON instead of a traceback on a clean install.
 
 ---
 

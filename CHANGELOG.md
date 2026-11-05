@@ -6,6 +6,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [1.36.3] — 2026-11-05
+
+Three fixes. No new dependencies. One additive `workspace.db` migration (8), followed by one automatic re-derivation that backs the database up first.
+
+### Upgrade notes
+- `pipx upgrade moolmesh --pip-args=--no-cache-dir` (or `uv tool upgrade moolmesh --no-cache`), then `mool daemon restart`, then restart open agent sessions so their MCP servers load the new code.
+- **Removed worktrees (#149):**
+  - The first daemon pass after the upgrade backs up `workspace.db` to `~/.moolmesh/backups/` and recomputes the attribution once.
+  - Work done in a git worktree that was later removed goes back to its repo, but only with stored evidence: an edge already attributed to the repo, the repo's `.git/worktrees` entry, or a `git worktree add` that a session ran from the repo.
+  - It never goes by folder name. A deleted folder with no evidence stays as it is.
+  - If the pass is interrupted, the next one resumes without a new backup. The counts are logged in `hub.log`. It takes seconds.
+- Nothing else to do.
+
+### Fixed
+- **Removed git worktrees showed up as separate repo-less projects (#149).**
+  - Attribution answered from what was on disk at the time, so a removed worktree fell to `path_hash`. Any later full re-derivation could also downgrade work that had been attributed correctly.
+  - MoolMesh now records every git root it sees on disk (`known_git_roots`, migration 8). A linked worktree also records its main checkout.
+  - A directory under a recorded root that no longer exists keeps the recorded identity.
+  - A session that touched both the checkout and the worktree counts once for the project.
+- **PyPI showed no project description (#152).**
+  - `pyproject.toml` had no `readme`, so the package page was empty. That includes 1.36.2, which was released to show the new README.
+  - The README is now the package description. Its links and images are absolute GitHub URLs, so they work on PyPI.
+  - A test guards the field, the links and, when setuptools ≥ 77 is available, the built metadata.
+- **Tracebacks from `mool query` and `mool sessions` on a clean install (#153).**
+  - Before the daemon's first start there is no event database. In that state, `mool query …` and `mool sessions --json` now print `{"error": "no_data", "message": …, "hint": "mool daemon start"}` on stdout and exit 1, the same convention as `snapshot export` / `effort export`. They do not create the database.
+  - Without the optional `mcp` SDK, `mool query` no longer prints a traceback on stderr. The warning now appears only when the MCP server starts.
+  - Both behaviors are in the README.
+
+---
+
 ## [1.36.2] — 2026-11-05
 
 Documentation only. No code changes, no new dependencies, no migrations.
