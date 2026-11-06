@@ -10,7 +10,7 @@ Unified observability, telemetry, and inter-agent coordination — running entir
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/fmicalizzi/moolmesh/blob/main/LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
-[![Tests: 2523 passing](https://img.shields.io/badge/Tests-2523%20passing-green.svg)](#development)
+[![Tests: 2524 passing](https://img.shields.io/badge/Tests-2524%20passing-green.svg)](#development)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-brightgreen.svg)](#)
 [![PyPI](https://img.shields.io/pypi/v/moolmesh.svg)](https://pypi.org/project/moolmesh/)
 [![Español](https://img.shields.io/badge/Docs-Espa%C3%B1ol-orange.svg)](https://github.com/fmicalizzi/moolmesh/blob/main/README.es.md)
@@ -937,7 +937,7 @@ pytest tests/ -v
 pytest tests/ -v --cov=hub
 ```
 
-2523 tests. Zero external dependencies. Python stdlib + SQLite.
+2524 tests. Zero external dependencies. Python stdlib + SQLite.
 
 See [CONTRIBUTING.md](https://github.com/fmicalizzi/moolmesh/blob/main/CONTRIBUTING.md) for guidelines.
 
