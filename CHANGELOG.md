@@ -6,7 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
-## [Unreleased]
+## [1.36.7] — 2026-11-06
+
+Documentation pass, and a clearer log line. No new dependencies, no migrations, no behavior change.
+
+### Upgrade notes
+- `pipx upgrade moolmesh --pip-args=--no-cache-dir` (or `uv tool upgrade moolmesh --no-cache`), then `mool daemon restart`. Nothing else to do.
 
 ### Documentation
 - README and README.es: a "How it looks" / "Cómo se ve" section (the dashboard, the portfolio, the `mool` CLI, MCP, digests, batch reports and the exports for mool-ops, and where to look at each), and a "Relation to mool-ops" / "Relación con mool-ops" section with its contract (`snapshot.v1`, `effort.v1`). The Roadmap row, `docs/schema/`, `docs/proposals/mool-ops/` and AGENTS §9 now say that mool-ops lives in `fmicalizzi/mool-ops`, private until its first release.
