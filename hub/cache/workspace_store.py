@@ -3745,10 +3745,12 @@ class WorkspaceStore:
                       evidence.get("transcript_failed", 0))
         if evidence is not None:
             self._log_recovery("identidad de worktrees: %d carpetas borradas ya "
-                      "atribuidas a un repo se conservan; %d carpetas borradas "
+                      "atribuidas a un repo se registran ahora (%d ya estaban "
+                      "registradas); %d carpetas borradas "
                       "sin repo, evidencia para %d (%d por .git/worktrees, %d "
                       "por 'git worktree add'), %d con evidencia contradictoria "
                       "quedan igual (#149)", evidence["attributed"],
+                      evidence.get("attributed_known", 0),
                       evidence["candidates"],
                       evidence["git_worktrees"] + evidence["worktree_add"],
                       evidence["git_worktrees"], evidence["worktree_add"],
@@ -3846,6 +3848,9 @@ class WorkspaceStore:
         on a git workspace) that is gone from disk is registered with that
         identity (``attributed``): it was resolved from disk while it existed,
         and without the row the full pass that follows would downgrade it.
+        Such a directory that an earlier pass already registered is kept as it
+        is and counted in ``attributed_known``, so the log of a second pass
+        says how many are registered instead of a bare 0.
 
         Then the candidates are the ``path_hash`` workspaces with edges whose directory
         is gone from disk. A removed directory ``W`` is registered in
@@ -3886,7 +3891,7 @@ class WorkspaceStore:
                                  WHERE a.workspace_id = w.id)""")]
         registered = {r for r, _m in known}
         counts = {"candidates": 0, "git_worktrees": 0, "worktree_add": 0,
-                  "conflicting": 0, "attributed": 0}
+                  "conflicting": 0, "attributed": 0, "attributed_known": 0}
         if transcripts:
             counts.update(transcript_files=0, transcript_commands=0,
                           transcript_failed=0)
@@ -3912,8 +3917,14 @@ class WorkspaceStore:
                 os.path.dirname(os.path.normpath(file_path))
             seen_dirs.setdefault(d, set()).add((key, kind, remote))
         seeded = []
+        known_already = 0
         for d, idents in sorted(seen_dirs.items()):
-            if d in registered or len(idents) != 1 or os.path.lexists(d):
+            if len(idents) != 1 or os.path.lexists(d):
+                continue
+            if d in registered:
+                # Registered by an earlier pass (or by other evidence): kept,
+                # and counted so the log does not read "0" on a second pass.
+                known_already += 1
                 continue
             key, kind, remote = next(iter(idents))
             seeded.append((d, key, kind, remote, None, "attributed", now, now))
@@ -3933,6 +3944,7 @@ class WorkspaceStore:
                     raise
             registered |= {r[0] for r in seeded}
         counts["attributed"] = len(seeded)
+        counts["attributed_known"] = known_already
 
         gone = [d for d in dirs if os.path.isabs(d) and not os.path.lexists(d)]
         counts["candidates"] = len(gone)

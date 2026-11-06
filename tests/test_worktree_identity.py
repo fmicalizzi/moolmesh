@@ -301,6 +301,46 @@ class TestRecoverExistingRows:
         assert _q(tmp_path, "SELECT source FROM known_git_roots WHERE root_path = ?",
                   (str(wt / "pkg"),)) == [("attributed",)]
 
+    def test_second_recovery_pass_counts_the_rows_already_registered(self, env, caplog):
+        """The log of a later recovery pass says how many removed folders were
+        registered before, instead of a bare 0 (#149, #161 log text)."""
+        tmp_path, events, repo, wt, admin, _other = env
+        _insert(events, "s1", str(wt / "pkg" / "a.py"), f"{D}T10:00:00Z")
+        s = _store(tmp_path)
+        try:
+            s.attribute_incremental(events)
+            s._conn.execute("DELETE FROM known_git_roots")   # as v1.36.x
+            s._conn.execute("DELETE FROM schema_migrations WHERE version = 8")
+            s._conn.commit()
+        finally:
+            s.close()
+        shutil.rmtree(wt)
+        shutil.rmtree(admin)
+        res = self._upgrade(tmp_path, events, caplog)
+        assert res["worktree_evidence"]["attributed"] == 1
+        assert res["worktree_evidence"]["attributed_known"] == 0
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("1 carpetas borradas ya atribuidas a un repo se registran "
+                   "ahora (0 ya estaban registradas)" in m for m in msgs)
+        caplog.clear()
+        s = _store(tmp_path)
+        try:
+            s._conn.execute("INSERT OR REPLACE INTO rollup_meta (key, value)"
+                            " VALUES ('worktree_recover', 'pending')")
+            s._conn.execute("INSERT OR REPLACE INTO rollup_meta (key, value)"
+                            " VALUES ('active_days_rederive', 'pending')")
+            s._conn.commit()
+            with caplog.at_level(logging.INFO, logger="hub"):
+                res2 = s.attribute_incremental(events)
+        finally:
+            s.close()
+        assert res2["worktree_evidence"]["attributed"] == 0
+        assert res2["worktree_evidence"]["attributed_known"] == 1
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("0 carpetas borradas ya atribuidas a un repo se registran "
+                   "ahora (1 ya estaban registradas)" in m for m in msgs)
+        assert _keys_of(tmp_path, "s1") == {REPO_KEY}
+
     def test_no_evidence_stays_as_it_is(self, env, caplog):
         tmp_path, events, _wt = self._seed(env, admin_entry=False)
         before = _keys_of(tmp_path, "s1")

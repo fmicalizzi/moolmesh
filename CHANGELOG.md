@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **The #149 recovery log read "0 carpetas borradas ya atribuidas a un repo se conservan" on a second pass** (#161, #149). The number counted only the removed folders registered in that pass, so a later pass said 0 even with hundreds already registered. The line now reads "N carpetas borradas ya atribuidas a un repo se registran ahora (M ya estaban registradas)", with M counted from the rows the pass already reads. Only the log text changed: nothing is registered, kept or attributed differently.
+
+---
+
 ## [1.36.6] — 2026-11-05
 
 One urgent fix for 1.36.5. No new dependencies and no migrations.
