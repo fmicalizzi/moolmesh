@@ -270,7 +270,7 @@ real data stay outside the repo (`~/.moolmesh/reports/`, chmod 600).
 
 ---
 
-## 9. Current priorities (snapshot, 2026-11-05 — v1.36.x)
+## 9. Current priorities (snapshot, 2026-11-06 — v1.36.x)
 
 This section is a dated snapshot; `gh issue list` is the live source.
 
@@ -285,10 +285,14 @@ This section is a dated snapshot; `gh issue list` is the live source.
    private until its first release). It reads MoolMesh only through
    `mool snapshot export` and `mool effort export` (contracts in
    `docs/schema/`), never its SQLite files. Changes it needs from core arrive
-   here as issues; a contract change bumps the schema version.
-3. **Open in GitHub:** the #84 tracking issue and the bug
-   [#149](https://github.com/fmicalizzi/moolmesh/issues/149) (removed git
-   worktrees shown as repo-less projects). New work starts from an issue (see
+   here as issues; a contract change bumps the schema version. The engine is
+   built and validated on real repos with both sources; its first release is
+   the owner's call (README, "Relation to mool-ops").
+3. **Open in GitHub:** the #84 tracking issue and two proposals from mool-ops
+   for later: [#159](https://github.com/fmicalizzi/moolmesh/issues/159)
+   (`snapshot export --timezone`) and
+   [#164](https://github.com/fmicalizzi/moolmesh/issues/164) (export releases,
+   milestones and reviews). New work starts from an issue (see
    `CONTRIBUTING.md`).
 
 Provider expansion and synchronous-coordination direction are owner decisions

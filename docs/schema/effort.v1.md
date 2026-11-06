@@ -4,6 +4,8 @@
 of repos, per local day and provider. An organization's tooling merges the
 files of several devices; it never reads MoolMesh's SQLite schema.
 
+mool-ops ([`fmicalizzi/mool-ops`](https://github.com/fmicalizzi/mool-ops), private until its first release) joins these files per device; its side of the contract is in its `docs/CONTRACT.md`.
+
 ```
 mool device init [--label TEXT] [--reset]      # once per machine, opt-in
 mool effort export --org ORG --timezone IANA --since YYYY-MM-DD --until YYYY-MM-DD \

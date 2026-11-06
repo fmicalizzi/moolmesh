@@ -45,6 +45,22 @@ Además, un **servidor MCP** que permite a otros agentes de IA consultar los dat
 
 ---
 
+## Cómo se ve
+
+Todo corre en tu máquina; nada se envía a ningún lado.
+
+| Qué | Qué ves | Dónde mirarlo |
+|-----|---------|---------------|
+| **Dashboard** | Las cuatro vistas de arriba, en vivo (Server-Sent Events) | `mool daemon start`, después <http://localhost:5200> ([Iniciar](#iniciar)) |
+| **Portfolio** | Cada workspace que tocaron tus agentes, el sistema de archivos o git, los más activos primero, con candidatos a entrega (un candidato, nunca un hecho) | La vista `/portfolio` del dashboard, o `mool workspace portfolio` ([Workspace](#workspace-observar-el-trabajo-no-sólo-las-sesiones)) |
+| **CLI `mool`** | Sesiones, transcripciones, repos, snapshots y JSON para scripts y agentes | `mool --help`, `mool <comando> --help` ([Referencia del CLI](#referencia-del-cli)) |
+| **MCP** | Los mismos datos como herramientas para otros agentes (solo lectura) | `mool mcp setup claude-code` (u otro destino) ([Servidor MCP](#servidor-mcp-api-inter-agentes)) |
+| **Digests** | Narrativas diarias y semanales por repo | La vista Code Timeline ([Resúmenes narrativos](#resúmenes-narrativos-digests)) |
+| **Reportes por lotes** | Reportes de análisis en Markdown | `mool report auto`, escritos en `~/.moolmesh/reports/` ([Reportes por lotes](#reportes-por-lotes)) |
+| **Exports para mool-ops** | JSON versionado de la entrega de un repo y del esfuerzo de un dispositivo | `mool snapshot export`, `mool effort export` ([Relación con mool-ops](#relación-con-mool-ops)) |
+
+---
+
 ## Inicio rápido
 
 ### Instalar
@@ -852,6 +868,21 @@ que lee `mool doctor`), `reports/` (`mool report auto`) y, sólo después de
 
 ---
 
+## Relación con mool-ops
+
+[mool-ops](https://github.com/fmicalizzi/mool-ops) es un paquete complementario aparte: un tracker de operaciones para un coordinador, con snapshots encadenados por repo, reportes por ronda y un resumen para la directiva, guardados en un repo privado de datos de cada organización. Vive en `fmicalizzi/mool-ops`, que es **privado hasta su primer release**, así que ese enlace da 404 si no te dieron acceso. Instalar MoolMesh no lo instala, y MoolMesh no depende de él.
+
+mool-ops lee MoolMesh solo por dos exports versionados, llamados como subproceso, y nunca sus archivos SQLite. Ese contrato es:
+
+| Export | Comando | Esquema | Desde |
+|--------|---------|---------|-------|
+| Snapshot | `mool snapshot export` | [`snapshot.v1`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/snapshot.v1.md) ([JSON Schema](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/snapshot.v1.schema.json)) | v1.31.0; la zona siempre tiene nombre desde v1.36.1 |
+| Esfuerzo | `mool effort export` (después de `mool device init`) | [`effort.v1`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/effort.v1.md) | v1.36.0 |
+
+Un cambio en cualquiera de los dos esquemas sube primero su versión acá. El diseño que dio origen a mool-ops está en [`docs/proposals/mool-ops/`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/proposals/mool-ops/README.es.md) (#84).
+
+---
+
 ## Hoja de ruta
 
 MoolMesh empezó con sesiones de agentes de programación, pero la visión es **observar el trabajo, no sólo las sesiones** — atribuir cada toque de archivo al proyecto dueño, y llegar a ver una carpeta directamente, antes o sin un agente (VISION §6).
@@ -889,7 +920,7 @@ MoolMesh empezó con sesiones de agentes de programación, pero la visión es **
 | **Entregado** | v1.34 | Días trabajados junto a los toques en las vistas del rollup; rama activa de Qwen; los resultados de herramientas en paralelo vuelven a verse (1.34.1); una recuperación tras una caída cuenta en su propio día y `mool export` está completo (1.34.2); migraciones registradas en `hub.log` (1.34.3) (#122, #123, #127, #131, #132, #130, #136) |
 | **Entregado** | v1.35 | **Desglose por persona, opt-in** (`[team]`) en el portafolio y los digests; también se lee **Antigravity de escritorio / IDE** (#83, #77) |
 | **Entregado** | v1.36 | **Identidad de dispositivo y export de esfuerzo por dispositivo**, opt-in y denegado por defecto (`mool device`, `mool effort export`, [`docs/schema/effort.v1.md`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/effort.v1.md)); el snapshot siempre nombra su zona (1.36.1) (#140, #146) |
-| **Siguiente** | — | **Motor mool-ops**, un paquete complementario en su propio repo que lee MoolMesh sólo por `mool snapshot export` y `mool effort export` (#84). La división de contenedores (#30) se cerró como "no por ahora". La visibilidad de equipo a escala de organización sigue diferida a `v2.x`; el core sólo ofrece el desglose opt-in de `[team]`. |
+| **Siguiente** | — | **Motor mool-ops**, un paquete complementario en su propio repo (`fmicalizzi/mool-ops`, privado hasta su primer release) que lee MoolMesh sólo por `mool snapshot export` y `mool effort export` (#84); está construido y validado con repos reales, y su primer release lo decide el owner ([Relación con mool-ops](#relación-con-mool-ops)). La división de contenedores (#30) se cerró como "no por ahora". La visibilidad de equipo a escala de organización sigue diferida a `v2.x`; el core sólo ofrece el desglose opt-in de `[team]`. |
 | **Futuro** | v2.x | Workspace Fase D (entre máquinas, opt-in); agentes autónomos; observabilidad a escala de organización |
 
 Consultá [ROADMAP.md](https://github.com/fmicalizzi/moolmesh/blob/main/ROADMAP.md) para planes detallados, preguntas abiertas y principios de diseño.

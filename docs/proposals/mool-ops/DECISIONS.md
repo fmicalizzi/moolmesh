@@ -58,9 +58,24 @@ v1.27.2 (#76 + 01) → v1.28.0 (#81 + #79) → v1.28.1 robustness (#52, #54, #62
 #67) → v1.29.0 (#80) → v1.30.0 (06–08: #93, #94, #95) → v1.31.0 (#82) →
 v1.35.0 (#83) → v1.36.0 (#140) → v1.36.1 (#146).
 
-Next is the `mool-ops` engine, in its own repo: first with `gh` as the source,
-then on `mool snapshot export` with identical totals on two consecutive cuts
-(checked on v1.36.0, see #84), joining `mool effort export` files per device.
+Then came the `mool-ops` engine, in its own repo: first with `gh` as the
+source, then on `mool snapshot export` with identical totals on two consecutive
+cuts (checked on v1.36.0, see #84), joining `mool effort export` files per
+device.
+
+## Status of the engine (2026-11-06)
+
+- `fmicalizzi/mool-ops` is private until its first release; nothing is on PyPI.
+- Its steps 1 and 2 (the `gh` source, the MoolMesh source and the effort join)
+  are done and validated on real repos: the two sources gave identical
+  snapshots. A coordinator's views followed (mool-ops #17): releases,
+  milestones, reviews and aging files read from `gh`, a round report in
+  Markdown and HTML, a leadership summary and a review appendix.
+- The contract did not change: still only `snapshot.v1` and `effort.v1`
+  (`docs/schema/`). Exporting releases, milestones and reviews from MoolMesh is
+  a proposal for later, [#164](https://github.com/fmicalizzi/moolmesh/issues/164).
+- The first release of mool-ops, and its rollout to a second user, are the
+  owner's call.
 
 The kit's own tests run standalone (`python3 -m unittest discover -s tests` from
 this folder); MoolMesh's suite does not collect them (`testpaths = ["tests"]`).

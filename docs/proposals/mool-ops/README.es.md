@@ -1,5 +1,7 @@
 # mool-ops-kit (español)
 
+> **Qué pasó con esto (2026-11-06):** las decisiones de los mantenedores están en [DECISIONS.md](DECISIONS.md) (en inglés). Los ocho borradores se publicaron en el núcleo de MoolMesh, y el motor se construyó como paquete aparte en `fmicalizzi/mool-ops`, **privado hasta su primer release** (github.com/fmicalizzi/mool-ops da 404 sin acceso). Su contrato con MoolMesh es [`snapshot.v1`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/snapshot.v1.md) y [`effort.v1`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/effort.v1.md). Este kit se conserva tal como llegó, como registro del diseño.
+
 **Kit de diseño para un tracker de operaciones que complementa a MoolMesh.**
 Estado: propuesta con implementación de referencia que funciona. Todo es genérico; los ejemplos usan una empresa ficticia ("Acme Corp").
 

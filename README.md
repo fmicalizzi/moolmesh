@@ -44,6 +44,22 @@ Plus a **MCP server** that lets other AI agents query your session data programm
 
 ---
 
+## How it looks
+
+Everything runs on your machine; nothing is sent anywhere.
+
+| What | What you see | Where to look |
+|------|--------------|---------------|
+| **Dashboard** | The four views above, live (Server-Sent Events) | `mool daemon start`, then <http://localhost:5200> ([Start](#start)) |
+| **Portfolio** | Every workspace your agents, the filesystem or git touched, hot first, with delivery candidates (a candidate, never a fact) | The `/portfolio` view of the dashboard, or `mool workspace portfolio` ([Workspace](#workspace-observe-the-work-not-just-the-sessions)) |
+| **`mool` CLI** | Sessions, transcripts, repos, snapshots and JSON for scripts and agents | `mool --help`, `mool <command> --help` ([CLI Reference](#cli-reference)) |
+| **MCP** | The same data as tools for other agents (read-only) | `mool mcp setup claude-code` (or another target) ([MCP Server](#mcp-server-inter-agent-api)) |
+| **Digests** | Daily and weekly narratives per repo | The Code Timeline view ([Digest Narratives](#digest-narratives)) |
+| **Batch reports** | Markdown analysis reports | `mool report auto`, written to `~/.moolmesh/reports/` ([Batch Reports](#batch-reports)) |
+| **Exports for mool-ops** | Versioned JSON of a repo's delivery and of a device's effort | `mool snapshot export`, `mool effort export` ([Relation to mool-ops](#relation-to-mool-ops)) |
+
+---
+
 ## Quick Start
 
 ### Install
@@ -840,6 +856,21 @@ after `mool device init`, `device.json` (mode 600).
 
 ---
 
+## Relation to mool-ops
+
+[mool-ops](https://github.com/fmicalizzi/mool-ops) is a separate companion package: an operations tracker for a coordinator, with chained snapshots per repo, round reports and a leadership summary, kept in an organization's private data repo. It lives in `fmicalizzi/mool-ops`, which is **private until its first release**, so that link answers 404 unless you have been given access. Installing MoolMesh does not install it, and MoolMesh does not depend on it.
+
+mool-ops reads MoolMesh only through two versioned exports, called as subprocesses, and never its SQLite files. That contract is:
+
+| Export | Command | Schema | Since |
+|--------|---------|--------|-------|
+| Snapshot | `mool snapshot export` | [`snapshot.v1`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/snapshot.v1.md) ([JSON Schema](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/snapshot.v1.schema.json)) | v1.31.0; the zone is always named since v1.36.1 |
+| Effort | `mool effort export` (after `mool device init`) | [`effort.v1`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/effort.v1.md) | v1.36.0 |
+
+A change to either schema bumps its version here first. The design that led to mool-ops is in [`docs/proposals/mool-ops/`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/proposals/mool-ops/README.md) (#84).
+
+---
+
 ## Roadmap
 
 MoolMesh started with coding-agent sessions, but the vision is to **observe the work, not just the sessions** — attributing every file-touch to the project that owns it, and eventually seeing a folder directly, before or without an agent (VISION §6).
@@ -877,7 +908,7 @@ MoolMesh started with coding-agent sessions, but the vision is to **observe the 
 | **Shipped** | v1.34 | Days worked next to touches in the rollup views; Qwen active branch; parallel tool results visible again (1.34.1); an outage catch-up counts on its own day and `mool export` is complete (1.34.2); migrations logged in `hub.log` (1.34.3) (#122, #123, #127, #131, #132, #130, #136) |
 | **Shipped** | v1.35 | **Per-contributor breakdown, opt-in** (`[team]`) in the portfolio and digests; **Antigravity desktop app / IDE** read too (#83, #77) |
 | **Shipped** | v1.36 | **Device identity and per-device effort export**, opt-in and deny-by-default (`mool device`, `mool effort export`, [`docs/schema/effort.v1.md`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/effort.v1.md)); the snapshot always names its zone (1.36.1) (#140, #146) |
-| **Next** | — | **mool-ops engine**, a companion package in its own repo that reads MoolMesh only through `mool snapshot export` and `mool effort export` (#84). The container split (#30) was closed as won't-do for now. Org-scale team visibility stays deferred to `v2.x`; core offers only the opt-in `[team]` breakdown. |
+| **Next** | — | **mool-ops engine**, a companion package in its own repo (`fmicalizzi/mool-ops`, private until its first release) that reads MoolMesh only through `mool snapshot export` and `mool effort export` (#84); built and validated on real repos, its first release is the owner's call ([Relation to mool-ops](#relation-to-mool-ops)). The container split (#30) was closed as won't-do for now. Org-scale team visibility stays deferred to `v2.x`; core offers only the opt-in `[team]` breakdown. |
 | **Future** | v2.x | Workspace Phase D (cross-machine, opt-in); autonomous agents; org-scale observability |
 
 See [ROADMAP.md](https://github.com/fmicalizzi/moolmesh/blob/main/ROADMAP.md) for detailed plans, open questions, and design principles.

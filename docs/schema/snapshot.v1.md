@@ -7,6 +7,8 @@ changes through migrations.
 
 Machine-readable schema: [`snapshot.v1.schema.json`](snapshot.v1.schema.json).
 
+mool-ops ([`fmicalizzi/mool-ops`](https://github.com/fmicalizzi/mool-ops), private until its first release) reads this export as a subprocess; its side of the contract is in its `docs/CONTRACT.md`.
+
 ```bash
 mool snapshot export --repo acme/widget-services --since 2026-11-02 --until 2026-11-03
 mool snapshot export --repo acme/widget-services --since 2026-11-02 --until 2026-11-03 \

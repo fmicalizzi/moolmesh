@@ -8,6 +8,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ## [Unreleased]
 
+### Documentation
+- README and README.es: a "How it looks" / "Cómo se ve" section (the dashboard, the portfolio, the `mool` CLI, MCP, digests, batch reports and the exports for mool-ops, and where to look at each), and a "Relation to mool-ops" / "Relación con mool-ops" section with its contract (`snapshot.v1`, `effort.v1`). The Roadmap row, `docs/schema/`, `docs/proposals/mool-ops/` and AGENTS §9 now say that mool-ops lives in `fmicalizzi/mool-ops`, private until its first release.
+
 ### Fixed
 - **The #149 recovery log read "0 carpetas borradas ya atribuidas a un repo se conservan" on a second pass** (#161, #149). The number counted only the removed folders registered in that pass, so a later pass said 0 even with hundreds already registered. The line now reads "N carpetas borradas ya atribuidas a un repo se registran ahora (M ya estaban registradas)", with M counted from the rows the pass already reads. Only the log text changed: nothing is registered, kept or attributed differently.
 

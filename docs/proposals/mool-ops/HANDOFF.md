@@ -1,5 +1,7 @@
 # Handoff to the MoolMesh maintainers
 
+> **Where this went (2026-11-06):** the maintainers' decisions are in [DECISIONS.md](DECISIONS.md). All eight drafts shipped in MoolMesh core, and the engine was built as a separate package in `fmicalizzi/mool-ops`, **private until its first release** (github.com/fmicalizzi/mool-ops answers 404 without access). Its contract with MoolMesh is [`snapshot.v1`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/snapshot.v1.md) and [`effort.v1`](https://github.com/fmicalizzi/moolmesh/blob/main/docs/schema/effort.v1.md). This kit is kept as it was received, as the design record.
+
 **What this is:** a design kit, not a product. It describes an operations-tracking capability that complements MoolMesh and ships a working reference so the method is unambiguous. **The maintainers own the implementation decisions**: where it lives (inside MoolMesh, an optional module, or a companion package named `mool-ops`), its CLI, its storage and its release plan.
 
 **Issues are NOT filed yet.** The 8 drafts live in [issues/](issues/); the maintainers decide which ones to file, merge or drop, and when. Nothing about this kit has been published.
